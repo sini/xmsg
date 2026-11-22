@@ -8,7 +8,7 @@
 
 ## Highlights
 
-- **Local-first, zero-ceremony IPC:** Binds Unix domain sockets (`http.sock`, `agent.sock`, `register.sock`) in `$XDG_RUNTIME_DIR/xmsg/` (on macOS without it, `xmsg/` under `getconf DARWIN_USER_TEMP_DIR`; `0700` dir, `0600` sockets) and authenticates callers via kernel peer credentials (`SO_PEERCRED` on Linux, `getpeereid` on macOS).
+- **Local-first, zero-ceremony IPC:** Binds owner-private Unix domain sockets (`http.sock`, `agent.sock`, `register.sock`; `0700` state-derived runtime directory, `0600` sockets published atomically without replacement, discoverable via `xmsg doctor --json`) and authenticates callers via kernel peer credentials (`SO_PEERCRED` on Linux, `getpeereid` on macOS).
 - **Attested sender identity:** Every message carries `label · id@node`, `label · <P>/<child>@node`, `name@node`, or `<from> · anon@node`, separating the sender's unverified display label from the `xmsg`-attested address.
 - **MCP tools for messaging and file reads:** `list`, `send`, `reply`, `replies`, `inbox` (for [delegated subagents](https://xmsg.dev/concepts/sessions-services-subagents/#delegated-subagents-pchildnode)), and `read_attachment`.
 - **Durable queueing & cross-machine handoff:** Sends to parked conversations queue in SQLite (`7 days` default reply TTL) and drain in FIFO order when the conversation returns — or follow a Claude conversation across a user's machines over `/fed/v2/handoff`.

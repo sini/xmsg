@@ -119,7 +119,15 @@ xmsg doctor --http-sock /absolute/path/to/http.sock --db-path /absolute/path/to/
 The command exits `1` if any check fails. Warnings alone exit `0`. Informational rows
 do not add to the passed, warning or failed totals. `--json` reports
 `checks` (each with `id`, `status`, `message` and `hint`), `passed`, `warnings`, `failed`,
-`client_version`, `client_build_revision` and `not_checked`.
+`client_version`, `client_build_revision`, `not_checked`, and (planned,
+<Status id="xmsg.install-contract" />) top-level unredacted resolved endpoints
+(`http_socket`, `agent_socket`, `register_socket`, `leaf_register_socket`), `endpoints_usable`,
+and an `install` summary (`platform`, `target`, `service_owner`, `competing_managers`,
+`legacy_conflicts`, redacted `profile_state_root` / `profile_config_root`, and home-dependent
+`claude_adapter_status` / `claude_coordinator_status`, which report `unknown` when account home is
+unavailable). Doctor never attempts to acquire `serve.lock` or any endpoint lock, never creates
+directories or files, and sets `endpoints_usable: false` on any ownership, permission, legacy, or
+competing-manager conflict.
 
 The always-on `collector.sqlite_engine` line reports `linked SQLite <found>; the fleet collector requires <required>` for this CLI binary. Its status is `info`, even when the versions differ; it does not affect summary counts or the exit code. It performs no file or network I/O and does not validate a collector configuration or a running collector. The collector enforces its engine requirement at startup.
 
@@ -299,8 +307,17 @@ enablement for each user are deployment configuration.
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L241-L386
+```rust file=<rootDir>/src/main.rs#L241-L402
 ```
+
+Planned (<Status id="xmsg.install-contract" />): in `--leaf` mode, `--leaf-register-sock`
+(`XMSG_LEAF_REGISTER_SOCK`) takes precedence for the leaf registration socket; when unset,
+`--register-sock` (`XMSG_REGISTER_SOCK`) remains an alias. An unpinned leaf `agent.sock` follows
+the managed default runtime namespace rather than deriving beside `--leaf-register-sock`; pass
+`--agent-sock` explicitly to pin it beside the registration socket. Optional Antigravity discovery
+paths can be pinned via `XMSG_AGY_PRESENCE_DIR` and `XMSG_AGY_BRAIN_DIR`; when account home is
+unavailable and no explicit override is set, optional harness discovery is omitted without falling
+back to the working directory.
 
 Planned: `--codex-exe` and `--agy-exe` compare canonical executable `file_name`s by default
 so open sessions survive store-path upgrades (`xmsg doctor` notes path drift as `info` under
@@ -349,7 +366,7 @@ denied to plugin connections and absent from TCP and `/fed`.
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L388-L413
+```rust file=<rootDir>/src/main.rs#L404-L429
 ```
 
 ### `xmsg register`

@@ -99,7 +99,12 @@ activation (`src/systemd.rs`):
   When `LISTEN_FDS=1` and `LISTEN_FDNAMES` is not set, the single descriptor goes to the only
   configured TCP listener (`--fed-listen` or `--listen`). Startup fails closed on any of these: an
   unknown, duplicate or unconfigured slot; a socket that is not a listening stream socket; a bound
-  address or path that does not match.
+  address or path that does not match. Planned (<Status id="xmsg.install-contract" />): Unix
+  socket activation requires explicit endpoint flags (`--http-sock`, `--agent-sock`,
+  `--register-sock` / `--leaf-register-sock`), acquires the per-endpoint lock in the parent
+  directory, and excludes validated adopted listeners from the legacy probe, bind, publication and
+  cleanup so the service manager keeps owning the socket node. Set `DirectoryMode=0700` explicitly
+  in socket units that create the parent directory.
 - **Readiness & reload notifications (`NOTIFY_SOCKET`):**
   - xmsg sends `READY=1` only after all configured listeners are bound (or adopted) and accept
     connections.
@@ -111,17 +116,66 @@ activation (`src/systemd.rs`):
     - `READY=1\nSTATUS=nothing to reload` when `SIGHUP` arrives and federation is not configured.
   - xmsg sends `STOPPING=1` when `SIGTERM` or `SIGINT` starts a graceful shutdown.
 
+## Planned: installation path contract & ownership locks
+
+<Status id="xmsg.install-contract" />
+
+The installation contract unifies default state, config, log and socket paths across `serve`, CLI,
+hooks, MCP and `doctor` through one shared resolver (breaking default change; coordinate daemon and
+client re-pins together):
+
+| Purpose | macOS default | Linux default |
+| --- | --- | --- |
+| Config root | `~/Library/Application Support/xmsg/config` | `${XDG_CONFIG_HOME:-$HOME/.config}/xmsg` |
+| Durable state root | `~/Library/Application Support/xmsg/state` | `${XDG_STATE_HOME:-$HOME/.local/state}/xmsg` |
+| Logs | `~/Library/Logs/xmsg` | `<state>/logs` |
+| Managed socket namespace | `/tmp/xmsg-<uid>-<12hex>/` | `$XDG_RUNTIME_DIR/xmsg-<uid>-<12hex>/` (falls back to `/tmp/` if valid parent exceeds `sun_path`) |
+
+- **Precedence & account home:** CLI flags win, then `XMSG_*` environment variables, then absolute
+  `XDG_*` roots (a relative `XDG_*` root is refused), then platform defaults. When a component
+  needs a home-derived default or expands `~/`, `getpwuid(geteuid())` supplies the authoritative
+  account home; a mismatched `HOME` is refused. Components pinned by literal paths never require a
+  home, and optional harness discovery (`~/.claude/sessions`, `~/.gemini/antigravity-cli/{presence,brain}`,
+  `~/.codex`) is omitted rather than falling back to the working directory.
+- **Private permissions & process umask:** Every xmsg writer calls `umask(0077)` at process entry.
+  The daemon samples its effective kernel umask before spawning concurrent work and logs it as
+  `effective_umask` on `"starting xmsg server"`. State roots and socket parents must be owned by
+  the effective UID with `mode & 0o777 == 0o700` (an inherited setgid bit such as `02700` is
+  allowed). Missing explicit final directories are created one level deep with exclusive `mkdir` at
+  `0700`; existing directories are validated without implicit repair.
+- **Legacy component guard:** Before creating new state or opening the database (`serve`,
+  `enroll-ca`, `enroll`), xmsg checks both `$XDG_STATE_HOME/xmsg` and `~/.local/state/xmsg` for
+  legacy `xmsg.db`, enrollment identity files (`enroll.json`, `fed.crt`, `fed.key`) and
+  `enroll/peers.json`, and probes legacy runtime endpoints (`$XDG_RUNTIME_DIR/xmsg/`, or
+  `DARWIN_USER_TEMP_DIR/xmsg/` on macOS, plus leaf sibling `agent.sock`) read-only before binding.
+  Refusals name the blocked component and compatible explicit pin without creating replacement
+  state.
+- **Ownership locks & atomic socket publication:** `serve` holds an exclusive non-blocking
+  `<state>/serve.lock` for its lifetime, persists runtime directory and bound endpoint identities
+  in `<state>/owner.json`, and serializes manual endpoint bindings across state roots with
+  `<parent>/.<name>.lock` acquired in sorted order. Sockets bind to a byte-bounded temporary sibling
+  first and publish atomically without replacement (`renamex_np(RENAME_EXCL)` on macOS,
+  `renameat2(RENAME_NOREPLACE)` on Linux, falling back to `link()` + `unlink()` only when
+  unsupported). Stale socket cleanup requires matching `(path, dev, ino, uid)` proof in
+  `owner.json`; a failed connect alone never unlinks an existing node.
+- **Live runtime marker recovery:** If a temporary-directory cleaner deletes only
+  `<runtime>/identity.json`, the running daemon verifies its directory identity under the held
+  state lock and re-stamps `identity.json` atomically on its periodic maintenance cadence
+  (`reply_ttl.clamp(1, 600)` seconds) without restarting.
+
 ## Persisted state & SQLite schema version
 
-The SQLite database (`--db-path`) records its schema version in `PRAGMA user_version`. The
-default path is `$XDG_STATE_HOME/xmsg/xmsg.db` or `~/.local/state/xmsg/xmsg.db`. The current
+The SQLite database (`--db-path`) records its schema version in `PRAGMA user_version`. The current
 version is **version 3**:
 
+- **Empty version 0 (new database):** xmsg initializes schema version 3.
 - **Version 3:** xmsg opens the database in place. Queued messages, stored replies,
   `instance_claims`, idempotency keys, `peer_mailbox` and `forwarded_messages` persist across
   restarts.
-- **Below version 3:** In one transaction, xmsg drops the message state tables and creates them
-  again at version 3. It keeps `instance_claims`.
+- **Populated version 0 or older version (`0 < v < 3`):** Planned (<Status id="xmsg.install-contract" />):
+  `storage::init_db` refuses the database before any write (gating both `serve` and `enroll-ca`),
+  preserving existing rows and database bytes intact until exported or migrated by a tested
+  migration.
 - **Above version 3:** xmsg refuses the database at startup and names both versions. Thus a
   downgrade never corrupts newer state. To roll back across a schema change, back up `xmsg.db`
   before you upgrade.
