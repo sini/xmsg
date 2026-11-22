@@ -627,6 +627,7 @@ async fn undialable_leaf_origin_supplies_attachment_by_reverse_mailbox_query() {
     let mut leaf_entry = leaf.identity.entry(9, &["send", "reply", "forward"]);
     leaf_entry["leaf"] = true.into();
     hub.reload(json!({"peers":{"leaf":leaf_entry,"node-b":b.identity.entry(b.fed_port,&["send","reply"])}}));
+    let t0 = std::time::Instant::now();
     let id = leaf
         .send(
             "Bob@node-b",
@@ -634,17 +635,29 @@ async fn undialable_leaf_origin_supplies_attachment_by_reverse_mailbox_query() {
         )
         .await;
     b.wait_delivery(&id).await;
+    let t_send = t0.elapsed();
     let read = b.read(&id).await;
     assert_eq!(
         read["data"], "reverse query file from leaf",
         "undialable origin must answer via pull mailbox, not inbound dial: {read}"
     );
+    let t_read = t0.elapsed();
     let reference = b.stage(b"reply file back to leaf").await;
     let answer = b.agent(json!({"action":"reply","message_id":id,"text":"file answer","attachments":[reference]})).await;
     assert_eq!(answer["status"], "ok", "reply via hub to leaf: {answer}");
+    let t_reply = t0.elapsed();
     let pushed = answer["reply"]["pushedMessageId"].as_str().unwrap();
+    let hub_db = rusqlite::Connection::open(&hub.db).unwrap();
+    let hub_mailbox_rows: i64 = hub_db
+        .query_row(
+            "SELECT count(*) FROM peer_mailbox WHERE id=?1",
+            [pushed],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let t_hub_enqueue = t0.elapsed();
     let db = rusqlite::Connection::open(&leaf.db).unwrap();
-    tokio::time::timeout(WAIT, async {
+    let pull_res = tokio::time::timeout(WAIT, async {
         loop {
             if xmsg::storage::has_svc_message(&db, pushed).unwrap() {
                 break;
@@ -652,8 +665,20 @@ async fn undialable_leaf_origin_supplies_attachment_by_reverse_mailbox_query() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("leaf must receive reply from hub mailbox");
+    .await;
+    let t_leaf_pull = t0.elapsed();
+    assert!(
+        pull_res.is_ok(),
+        "leaf must receive reply from hub mailbox (send={t_send:?} read={t_read:?} reply={t_reply:?} hub_enqueue={t_hub_enqueue:?} hub_mailbox_rows={hub_mailbox_rows} leaf_pull={t_leaf_pull:?})\nleaf:\n{}\nhub:\n{}",
+        leaf.output.snapshot(),
+        hub.output.snapshot()
+    );
+    assert_eq!(
+        leaf.output
+            .line_count_containing("starting outbound link pull loop"),
+        0,
+        "leaf mode must not run competing outbound pull loop alongside run_leaf_inbox_task"
+    );
     let replies = leaf
         .agent(json!({"action":"replies","message_id":id,"wait":0}))
         .await;
@@ -1140,11 +1165,26 @@ async fn leaf_acks_configured_oversize_ref_and_delivers_next_plain_message() {
         bad_rows, 0,
         "permanently refused mailbox item must be ACKed"
     );
+    assert!(
+        leaf.output.wait_for_line_count(
+            "rejecting malformed message pulled from hub on leaf",
+            1,
+            WAIT,
+        ),
+        "permanent bad metadata must be rejected: {}",
+        leaf.output.snapshot()
+    );
     assert_eq!(
         leaf.output
             .line_count_containing("rejecting malformed message pulled from hub on leaf"),
         1,
         "permanent bad metadata must be rejected once, without redelivery or a hot loop"
+    );
+    assert_eq!(
+        leaf.output
+            .line_count_containing("starting outbound link pull loop"),
+        0,
+        "leaf mode must not run competing outbound pull loop"
     );
     assert_eq!(
         leaf.output
