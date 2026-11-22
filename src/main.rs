@@ -1428,7 +1428,9 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
     );
 
     // Acquire exclusive per-state lock BEFORE opening the database or touching sockets.
-    let state_lock = Arc::new(xmsg::runtime_lock::StateLock::try_acquire(&canon_state_root)?);
+    let state_lock = Arc::new(xmsg::runtime_lock::StateLock::try_acquire(
+        &canon_state_root,
+    )?);
     let manager_hint = detect_process_manager_hint();
     let mut owner_record = xmsg::runtime_lock::OwnerRecord::load(&canon_state_root)?
         .unwrap_or_else(|| xmsg::runtime_lock::OwnerRecord::new(my_uid, manager_hint.clone()));
@@ -1522,7 +1524,9 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
             .as_ref()
             .ok_or("systemd agent listener missing endpoint")?;
         if !ep.explicit {
-            return Err("systemd activation for agent requires an explicit --agent-sock pin".into());
+            return Err(
+                "systemd activation for agent requires an explicit --agent-sock pin".into(),
+            );
         }
         adopted_unix_paths.push(ep.path.clone());
     }
@@ -2202,13 +2206,14 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         }
     }
 
-    let find_endpoint_lock = |ep_path: &std::path::Path| -> Option<&xmsg::runtime_lock::EndpointLock> {
-        let lp = xmsg::runtime_lock::EndpointLock::lock_path_for(ep_path).ok()?;
-        let canon_lp = xmsg::install_paths::canonicalize_best_effort(&lp).unwrap_or(lp);
-        endpoint_lock_by_path
-            .get(&canon_lp)
-            .map(|&idx| &endpoint_locks[idx])
-    };
+    let find_endpoint_lock =
+        |ep_path: &std::path::Path| -> Option<&xmsg::runtime_lock::EndpointLock> {
+            let lp = xmsg::runtime_lock::EndpointLock::lock_path_for(ep_path).ok()?;
+            let canon_lp = xmsg::install_paths::canonicalize_best_effort(&lp).unwrap_or(lp);
+            endpoint_lock_by_path
+                .get(&canon_lp)
+                .map(|&idx| &endpoint_locks[idx])
+        };
 
     let attribution = if let Some(lifecycle_socket) = args.executor_lifecycle_socket {
         let query_socket = args.executor_attribution_sock.unwrap_or_else(|| {

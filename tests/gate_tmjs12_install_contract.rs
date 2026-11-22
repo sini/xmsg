@@ -109,11 +109,7 @@ fn make_private_dir(path: &Path) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-fn fixture_env<'a>(
-    platform: Platform,
-    lookup: &'a FixtureHomeLookup,
-    euid: u32,
-) -> ResolveEnv<'a> {
+fn fixture_env<'a>(platform: Platform, lookup: &'a FixtureHomeLookup, euid: u32) -> ResolveEnv<'a> {
     ResolveEnv {
         home: None,
         xdg_config_home: None,
@@ -349,7 +345,10 @@ fn s1_all_entry_points_agree_on_resolved_defaults_and_precedence() {
         .output()
         .unwrap();
     let doc_v: serde_json::Value = serde_json::from_slice(&doc.stdout).unwrap();
-    assert_eq!(doc_v["http_socket"], expected_http.to_string_lossy().as_ref());
+    assert_eq!(
+        doc_v["http_socket"],
+        expected_http.to_string_lossy().as_ref()
+    );
     assert_eq!(
         doc_v["agent_socket"],
         expected_agent.to_string_lossy().as_ref()
@@ -542,7 +541,9 @@ fn s1_legacy_peers_only_and_enrollment_only_refuse_without_replacements() {
         (Platform::Linux, true),
     ] {
         // Case A: peers-only under ~/.local/state/xmsg/enroll/peers.json (NO DB, NO identity files)
-        let home_a = tmp.path().join(format!("peers-{platform:?}-{xdg_elsewhere}"));
+        let home_a = tmp
+            .path()
+            .join(format!("peers-{platform:?}-{xdg_elsewhere}"));
         make_private_dir(&home_a);
         let enroll_a = home_a.join(".local/state/xmsg/enroll");
         make_private_dir(&enroll_a);
@@ -572,7 +573,10 @@ fn s1_legacy_peers_only_and_enrollment_only_refuse_without_replacements() {
             "M-S1d: refusal must name blocked peers component and compatible pin, got: {msg_a}"
         );
         assert!(
-            !new_xdg_a.exists() && !home_a.join("Library/Application Support/xmsg/state").exists(),
+            !new_xdg_a.exists()
+                && !home_a
+                    .join("Library/Application Support/xmsg/state")
+                    .exists(),
             "M-S1d: no replacement state may be created on refusal"
         );
 
@@ -609,7 +613,10 @@ fn s1_legacy_peers_only_and_enrollment_only_refuse_without_replacements() {
             "refusal must name blocked enrollment component and compatible pin, got: {msg_b}"
         );
         assert!(
-            !new_xdg_b.exists() && !home_b.join("Library/Application Support/xmsg/state").exists(),
+            !new_xdg_b.exists()
+                && !home_b
+                    .join("Library/Application Support/xmsg/state")
+                    .exists(),
             "no replacement state may be created on refusal"
         );
     }
@@ -965,7 +972,10 @@ fn s1_pod_vectors_and_passwd_less_pins_start_without_home() {
     assert_eq!(doc_json["install"]["claude_adapter_status"], "unknown");
     assert_eq!(doc_json["install"]["claude_coordinator_status"], "unknown");
     // Unredacted manual HTTP socket exposed at top level for skill curl (N5/R3).
-    assert_eq!(doc_json["http_socket"], http_sock.to_string_lossy().as_ref());
+    assert_eq!(
+        doc_json["http_socket"],
+        http_sock.to_string_lossy().as_ref()
+    );
 }
 
 // ===========================================================================

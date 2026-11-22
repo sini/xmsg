@@ -71,7 +71,12 @@ async fn test_oracle_1_leaf_binds_no_harness_sockets_or_fed_listener() {
         .expect("leaf_register_sock")
         .path
         .clone();
-    let agent_sock = expected.agent_sock.as_ref().expect("agent_sock").path.clone();
+    let agent_sock = expected
+        .agent_sock
+        .as_ref()
+        .expect("agent_sock")
+        .path
+        .clone();
     let http_sock = expected
         .runtime_namespace
         .as_ref()
