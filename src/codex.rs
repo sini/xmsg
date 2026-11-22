@@ -3549,11 +3549,32 @@ mod readonly_attribution_tests {
     fn readonly_codex_wrong_owner_and_unheld_root_refuse() {
         let mut f = fixture();
         root(&mut f, A, 1);
+        let other = f.config.proc_root.join("101");
+        std::fs::create_dir_all(other.join("fd")).unwrap();
+        std::fs::create_dir_all(other.join("fdinfo")).unwrap();
+        let original = f.config.proc_root.join("100");
+        for (file, from, to) in [
+            ("stat", "100 (", "101 ("),
+            ("fdinfo/4", "WRITE 100 ", "WRITE 101 "),
+        ] {
+            let content = std::fs::read_to_string(original.join(file)).unwrap();
+            std::fs::write(other.join(file), content.replace(from, to)).unwrap();
+        }
+        symlink(
+            std::fs::read_link(original.join("fd/4")).unwrap(),
+            other.join("fd/4"),
+        )
+        .unwrap();
+        f.store.roots[A]
+            .watch
+            .readonly_continuity(&f.config.proc_root, 101, "42", deadline())
+            .expect("other owner must pass the independent held-inode predicate");
         assert_eq!(
             f.store
                 .readonly_attribution_binding(&f.config, (101, "42"), A, A, None, deadline())
                 .err(),
-            Some(crate::client::caller_attribution::FailureReason::Context)
+            Some(crate::client::caller_attribution::FailureReason::Context),
+            "a held inode cannot override the registered owner"
         );
         assert_eq!(
             f.store
@@ -3595,6 +3616,23 @@ mod readonly_attribution_tests {
         assert_eq!(snapshot.principal_id, format!("{A}/{CHILD}"));
         assert_eq!(snapshot.child_generation, Some(1));
         let child = f.store.children.get_mut(&(A.into(), CHILD.into())).unwrap();
+        child.owner_pid = 101;
+        assert_eq!(
+            f.store
+                .readonly_attribution_binding(
+                    &f.config,
+                    (100, "42"),
+                    A,
+                    CHILD,
+                    Some("turn-a"),
+                    deadline()
+                )
+                .err(),
+            Some(crate::client::caller_attribution::FailureReason::Context),
+            "a child owned by another process cannot attribute",
+        );
+        let child = f.store.children.get_mut(&(A.into(), CHILD.into())).unwrap();
+        child.owner_pid = 100;
         child.root_generation = 2;
         assert_eq!(
             f.store
@@ -3607,7 +3645,8 @@ mod readonly_attribution_tests {
                     deadline()
                 )
                 .err(),
-            Some(crate::client::caller_attribution::FailureReason::Context)
+            Some(crate::client::caller_attribution::FailureReason::Context),
+            "a stale child generation cannot attribute"
         );
         f.store
             .children
