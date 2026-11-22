@@ -405,7 +405,10 @@ async fn start_node_with_bin(
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("XMSG_AGY_PRESENCE_DIR", &presence_dir)
-        .env("XMSG_AGY_BRAIN_DIR", run_dir.join(".gemini/antigravity-cli/brain"))
+        .env(
+            "XMSG_AGY_BRAIN_DIR",
+            run_dir.join(".gemini/antigravity-cli/brain"),
+        )
         .env("CODEX_HOME", run_dir.join(".codex"))
         .env("PATH", &path_env)
         .env("RUST_LOG", "info")
@@ -1897,8 +1900,14 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             ])
             .env("HOME", &run_dir)
             .env("XDG_RUNTIME_DIR", &run_dir)
-            .env("XMSG_AGY_BRAIN_DIR", run_dir.join(".gemini/antigravity-cli/brain"))
-            .env("XMSG_AGY_PRESENCE_DIR", run_dir.join(".gemini/antigravity-cli/presence"))
+            .env(
+                "XMSG_AGY_BRAIN_DIR",
+                run_dir.join(".gemini/antigravity-cli/brain"),
+            )
+            .env(
+                "XMSG_AGY_PRESENCE_DIR",
+                run_dir.join(".gemini/antigravity-cli/presence"),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1947,8 +1956,14 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             ])
             .env("HOME", &run_dir)
             .env("XDG_RUNTIME_DIR", &run_dir)
-            .env("XMSG_AGY_BRAIN_DIR", run_dir.join(".gemini/antigravity-cli/brain"))
-            .env("XMSG_AGY_PRESENCE_DIR", run_dir.join(".gemini/antigravity-cli/presence"))
+            .env(
+                "XMSG_AGY_BRAIN_DIR",
+                run_dir.join(".gemini/antigravity-cli/brain"),
+            )
+            .env(
+                "XMSG_AGY_PRESENCE_DIR",
+                run_dir.join(".gemini/antigravity-cli/presence"),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1997,8 +2012,14 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             ])
             .env("HOME", &run_dir)
             .env("XDG_RUNTIME_DIR", &run_dir)
-            .env("XMSG_AGY_BRAIN_DIR", run_dir.join(".gemini/antigravity-cli/brain"))
-            .env("XMSG_AGY_PRESENCE_DIR", run_dir.join(".gemini/antigravity-cli/presence"))
+            .env(
+                "XMSG_AGY_BRAIN_DIR",
+                run_dir.join(".gemini/antigravity-cli/brain"),
+            )
+            .env(
+                "XMSG_AGY_PRESENCE_DIR",
+                run_dir.join(".gemini/antigravity-cli/presence"),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2171,8 +2192,14 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             ])
             .env("HOME", &run_dir)
             .env("XDG_RUNTIME_DIR", &run_dir)
-            .env("XMSG_AGY_BRAIN_DIR", run_dir.join(".gemini/antigravity-cli/brain"))
-            .env("XMSG_AGY_PRESENCE_DIR", run_dir.join(".gemini/antigravity-cli/presence"))
+            .env(
+                "XMSG_AGY_BRAIN_DIR",
+                run_dir.join(".gemini/antigravity-cli/brain"),
+            )
+            .env(
+                "XMSG_AGY_PRESENCE_DIR",
+                run_dir.join(".gemini/antigravity-cli/presence"),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
