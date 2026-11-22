@@ -219,9 +219,79 @@ async fn sender(hub: &Arc<FedState>, directory: &Path, tasks: &mut Tasks) -> Reg
 const SIGNAL_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug, Default)]
+struct ProbeTimeline {
+    connected: Option<Duration>,
+    tls_ready: Option<Duration>,
+    request_started: Option<Duration>,
+    request_write: Option<Duration>,
+    first_response_byte: Option<Duration>,
+    driver_held: bool,
+}
+
+struct ProbeIo<T> {
+    io: T,
+    start: std::time::Instant,
+    timeline: Arc<Mutex<ProbeTimeline>>,
+}
+
+impl<T: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for ProbeIo<T> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = std::pin::Pin::new(&mut self.io).poll_read(cx, buf);
+        if matches!(result, std::task::Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            self.timeline
+                .lock()
+                .unwrap()
+                .first_response_byte
+                .get_or_insert(self.start.elapsed());
+        }
+        result
+    }
+}
+
+impl<T: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for ProbeIo<T> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let result = std::pin::Pin::new(&mut self.io).poll_write(cx, bytes);
+        if matches!(result, std::task::Poll::Ready(Ok(count)) if count > 0) {
+            self.timeline
+                .lock()
+                .unwrap()
+                .request_write
+                .get_or_insert(self.start.elapsed());
+        }
+        result
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
 async fn probe_hostile_inbox(
     fed_state: &FedState,
     peer_name: &str,
+    start: std::time::Instant,
+    timeline: Arc<Mutex<ProbeTimeline>>,
+    hold_driver: bool,
 ) -> Result<hyper::StatusCode, xmsg::error::AppError> {
     let peers = fed_state.current_peers();
     let peer = peers
@@ -252,6 +322,7 @@ async fn probe_hostile_inbox(
         ))
     })?
     .map_err(|e| xmsg::error::AppError::PeerUnreachable(format!("connecting: {e}")))?;
+    timeline.lock().unwrap().connected = Some(start.elapsed());
     let tls = tokio::time::timeout(PROBE_STAGE_TIMEOUT, connector.connect(name, tcp))
         .await
         .map_err(|_| {
@@ -262,7 +333,12 @@ async fn probe_hostile_inbox(
         .map_err(|e| {
             xmsg::error::AppError::PeerUnreachable(format!("TLS handshake failed: {e}"))
         })?;
-    let io = hyper_util::rt::TokioIo::new(tls);
+    timeline.lock().unwrap().tls_ready = Some(start.elapsed());
+    let io = hyper_util::rt::TokioIo::new(ProbeIo {
+        io: tls,
+        start,
+        timeline: timeline.clone(),
+    });
     let (mut sender, conn) = tokio::time::timeout(
         PROBE_STAGE_TIMEOUT,
         hyper::client::conn::http1::handshake(io),
@@ -274,25 +350,41 @@ async fn probe_hostile_inbox(
         ))
     })?
     .map_err(|e| xmsg::error::AppError::PeerUnreachable(format!("HTTP handshake failed: {e}")))?;
-    let conn_task = tokio::spawn(conn);
     let req = hyper::Request::builder()
         .method("GET")
         .uri("/fed/v2/inbox?wait=0")
         .header("host", peer.name.as_str())
         .body(http_body_util::Empty::<bytes::Bytes>::new())
         .map_err(|e| xmsg::error::AppError::Internal(e.to_string()))?;
-    let result = match tokio::time::timeout(PROBE_STAGE_TIMEOUT, sender.send_request(req)).await {
-        Ok(Ok(resp)) => Ok(resp.status()),
-        Ok(Err(e)) => Err(xmsg::error::AppError::PeerUnreachable(format!(
-            "Request failed: {e}"
-        ))),
-        Err(_) => Err(xmsg::error::AppError::Internal(format!(
-            "probe_hostile_inbox timed out after {PROBE_STAGE_TIMEOUT:?} during send_request"
-        ))),
+    timeline.lock().unwrap().request_started = Some(start.elapsed());
+    let driver = async {
+        if hold_driver {
+            timeline.lock().unwrap().driver_held = true;
+            std::future::pending::<()>().await;
+        }
+        let _ = conn.await;
     };
-    conn_task.abort();
-    let _ = tokio::time::timeout(Duration::from_secs(5), conn_task).await;
-    result
+    let request = async {
+        match sender.send_request(req).await {
+            Ok(response) => Ok(response.status()),
+            Err(error) => Err(xmsg::error::AppError::PeerUnreachable(format!(
+                "Request failed: {error}"
+            ))),
+        }
+    };
+    tokio::pin!(driver, request);
+    tokio::time::timeout(PROBE_STAGE_TIMEOUT, async {
+        tokio::select! {
+            result = &mut request => result,
+            () = &mut driver => request.await,
+        }
+    })
+    .await
+    .map_err(|_| {
+        xmsg::error::AppError::Internal(format!(
+            "probe_hostile_inbox timed out after {PROBE_STAGE_TIMEOUT:?} during send_request"
+        ))
+    })?
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -366,17 +458,53 @@ async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() 
             runtime.path(),
             true,
         );
-        let hostile_err = match probe_hostile_inbox(&hostile, HUB).await {
-            Err(err @ xmsg::error::AppError::PeerUnreachable(_))
-            | Err(err @ xmsg::error::AppError::PeerRejected(_)) => err,
-            Err(err) => {
-                panic!("grt4 concrete cycle hostile host failed with unexpected error: {err:?}")
+        // The hostile probe is the only connection until the lawful leaf starts below.
+        assert_eq!(hub_controls.tls_handshake_refusals.count(), 0);
+        let timeline = Arc::new(Mutex::new(ProbeTimeline::default()));
+        let hostile_err = {
+            let start = std::time::Instant::now();
+            // Freeze the HTTP driver during the restart cycle, after client-side TLS.
+            let hold_driver = generation == 1;
+            let probe = probe_hostile_inbox(&hostile, HUB, start, timeline.clone(), hold_driver);
+            let refusal = hub_controls.tls_handshake_refusals.wait_for_timeout(
+                1,
+                SIGNAL_WAIT_TIMEOUT,
+                "tls_handshake_refusals",
+            );
+            tokio::pin!(probe, refusal);
+            let hostile_err = tokio::select! {
+                biased;
+                result = &mut probe => match result {
+                    Err(err @ xmsg::error::AppError::PeerUnreachable(_))
+                    | Err(err @ xmsg::error::AppError::PeerRejected(_)) => {
+                        refusal.await.unwrap_or_else(|error| {
+                            panic!("generation {generation}: {error}; client={err:?}; timeline={:?}",
+                                timeline.lock().unwrap());
+                        });
+                        Some(err)
+                    }
+                    Err(err) => panic!("generation {generation}: unexpected probe error: {err:?}; timeline={:?}",
+                        timeline.lock().unwrap()),
+                    Ok(status) => panic!("generation {generation}: hostile host was admitted: HTTP {status}; timeline={:?}",
+                        timeline.lock().unwrap()),
+                },
+                result = &mut refusal => {
+                    result.unwrap_or_else(|error| {
+                        panic!("generation {generation}: {error}; timeline={:?}", timeline.lock().unwrap());
+                    });
+                    None
+                }
+            };
+            if hold_driver {
+                let trace = timeline.lock().unwrap();
+                assert!(
+                    trace.driver_held
+                        && trace.request_started.is_some()
+                        && trace.request_write.is_none(),
+                    "forced driver barrier must hold the request before its first write: {trace:?}"
+                );
             }
-            Ok(status) => {
-                panic!(
-                    "grt4 concrete cycle hostile host was admitted (captured the pod alias): HTTP {status}"
-                )
-            }
+            hostile_err
         };
         hub_controls
             .tls_handshake_done
@@ -384,8 +512,8 @@ async fn concrete_addressless_ca_leaf_survives_mixed_patterns_and_hub_restart() 
             .await
             .unwrap_or_else(|err| {
                 panic!(
-                    "grt4 concrete cycle generation {generation}: {err} (client_err={hostile_err:?}, refusals={})",
-                    hub_controls.tls_handshake_refusals.count()
+                    "grt4 concrete cycle generation {generation}: {err} (client_err={hostile_err:?}, refusals={}, timeline={:?})",
+                    hub_controls.tls_handshake_refusals.count(), timeline.lock().unwrap()
                 )
             });
         assert_eq!(
