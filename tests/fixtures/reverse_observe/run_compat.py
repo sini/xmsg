@@ -85,6 +85,10 @@ def build(source, output, variant, seed, candidate, vendor_dir=None):
         shutil.copy2(source/name,tree/name)
     for name in ("src","tests"):
         shutil.copytree(source/name,tree/name,ignore=shutil.ignore_patterns("__pycache__","*.pyc"))
+    if (source / "assets").exists():
+        shutil.copytree(source / "assets", tree / "assets")
+    expected_assets = {str(f.relative_to(source)):digest(f) for f in (source/"assets").rglob("*") if f.is_file()}
+    assert {str(f.relative_to(tree)):digest(f) for f in (tree/"assets").rglob("*") if f.is_file()} == expected_assets, "compile assets differ after source copy"
     for directory in tree.rglob("*"):
         if directory.is_dir():
             directory.chmod(directory.stat().st_mode | 0o200)
@@ -128,7 +132,9 @@ def build(source, output, variant, seed, candidate, vendor_dir=None):
     else:
         raise AssertionError("actual cached Cargo build was accepted")
     source_hashes = {str(f.relative_to(tree)):digest(f) for f in (tree/"src").rglob("*") if f.is_file()}
-    receipt = {"variant":variant,"production_src_sha256":source_hashes,"helper_sha256":digest(helper),
+    asset_hashes = {str(f.relative_to(tree)):digest(f) for f in (tree/"assets").rglob("*") if f.is_file()}
+    assert asset_hashes == expected_assets, "compile assets changed during build"
+    receipt = {"variant":variant,"production_src_sha256":source_hashes,"compile_assets_sha256":asset_hashes,"helper_sha256":digest(helper),
                "manifest_sha256":digest(manifest),"lock_sha256":digest(tree/"Cargo.lock"),
                "vendor_dir":str(vendor_dir) if vendor_dir is not None else None,
                "seeded":seed is not None,
