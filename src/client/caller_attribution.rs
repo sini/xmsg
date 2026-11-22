@@ -858,25 +858,88 @@ mod tests {
     }
     #[test]
     fn attribution_oversized_header_is_rejected_before_body() {
-        let (client, server) = UnixStream::pair().unwrap();
-        let (original, _peer) = UnixStream::pair().unwrap();
-        let mut body = vec![QUERY_MARKER];
-        body.extend_from_slice(&((MAX_BODY + 1) as u32).to_be_bytes());
-        send(
-            &client,
-            &body,
-            Some(original.as_fd()),
-            Instant::now() + Duration::from_secs(2),
-        )
-        .unwrap();
-        assert!(
-            matches!(
-                receive_query(&server, Instant::now() + Duration::from_secs(2)),
-                Err(FailureReason::Limit)
-            ),
-            "oversized attribution body header accepted"
+        for marker in [QUERY_MARKER, REPLY_MARKER] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let (original, _peer) = UnixStream::pair().unwrap();
+            let mut frame = vec![marker];
+            frame.extend_from_slice(&((MAX_BODY + 1) as u32).to_be_bytes());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let original = (marker == QUERY_MARKER).then(|| original.as_fd());
+            send(&client, &frame, original, deadline).unwrap();
+            let result = if marker == QUERY_MARKER {
+                receive_query(&server, deadline).map(|_| ())
+            } else {
+                receive_reply(&server, deadline).map(|_| ())
+            };
+            assert_eq!(
+                result,
+                Err(FailureReason::Limit),
+                "oversized attribution body header accepted for marker {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn attribution_query_checks_version_after_receiving_frame() {
+        for version in [VERSION, VERSION + 1] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let (original, _peer) = UnixStream::pair().unwrap();
+            let mut request = query();
+            request.v = version;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            send(
+                &client,
+                &frame(QUERY_MARKER, &request).unwrap(),
+                Some(original.as_fd()),
+                deadline,
+            )
+            .unwrap();
+            let result = receive_query(&server, deadline).map(|(query, _)| query.v);
+            if version == VERSION {
+                assert_eq!(result, Ok(VERSION));
+            } else {
+                assert_eq!(
+                    result,
+                    Err(FailureReason::Protocol),
+                    "query accepted an unsupported protocol version"
+                );
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attribution_endpoint_requires_stream_even_at_matching_path() {
+        use std::os::unix::net::{UnixDatagram, UnixListener};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("original.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let _caller = UnixStream::connect(&path).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        assert_eq!(original_endpoint(accepted.as_fd(), &path), Ok(()));
+        drop(accepted);
+        drop(listener);
+        std::fs::remove_file(&path).unwrap();
+
+        let datagram = UnixDatagram::bind(&path).unwrap();
+        let datagram_peer_path = directory.path().join("peer.sock");
+        let _peer = UnixDatagram::bind(&datagram_peer_path).unwrap();
+        datagram.connect(&datagram_peer_path).unwrap();
+        assert_eq!(
+            datagram.local_addr().unwrap().as_pathname(),
+            Some(path.as_path())
+        );
+        assert_eq!(
+            datagram.peer_addr().unwrap().as_pathname(),
+            Some(datagram_peer_path.as_path())
+        );
+        assert_eq!(
+            original_endpoint(datagram.as_fd(), &path),
+            Err(FailureReason::Endpoint),
+            "connected datagram with a matching path passed the stream-type check"
         );
     }
+
     fn extra_fd_frame(client: &UnixStream, descriptors: &[RawFd], bytes: &[u8]) {
         let mut control = [0usize; 16];
         let mut vector = libc::iovec {

@@ -326,6 +326,7 @@ jobs:
           fi
           cat "$red_log"
           test "$status" -eq 101
+          grep -Fx "test $witness ... FAILED" "$red_log"
           grep -F 'Darwin attribution must refuse before receiving rights:' "$red_log"
           cp "$backup" "$source_file"
           cargo test --locked --lib "$witness" -- --exact
