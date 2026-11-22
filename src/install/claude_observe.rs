@@ -51,20 +51,19 @@ pub fn inspect(request: &Request) -> Result<Observation, Error> {
     })
 }
 
-#[cfg(not(test))]
-fn policy_roots(_request: &Request) -> Vec<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        vec![PathBuf::from("/Library/Application Support/ClaudeCode")]
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        vec![PathBuf::from("/etc/claude-code")]
-    }
-}
-#[cfg(test)]
 fn policy_roots(request: &Request) -> Vec<PathBuf> {
-    vec![request.account_home.join(".managed-policy-fixture")]
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(roots) = &request.policy_roots {
+        return roots.clone();
+    }
+    #[cfg(test)]
+    return vec![request.account_home.join(".managed-policy-fixture")];
+    #[cfg(not(test))]
+    let _ = request;
+    #[cfg(all(not(test), target_os = "macos"))]
+    return vec![PathBuf::from("/Library/Application Support/ClaudeCode")];
+    #[cfg(all(not(test), not(target_os = "macos")))]
+    return vec![PathBuf::from("/etc/claude-code")];
 }
 
 fn inspect_policy(request: &Request) -> Result<&'static str, Error> {
