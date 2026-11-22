@@ -552,13 +552,43 @@ async fn enrollment_operator(
     Ok(value)
 }
 
+fn run_install_adapter(adapter: xmsg::install::Adapter, action: xmsg::install::Action) -> bool {
+    #[cfg(test)]
+    if let Some(context) = claude_install_cli_tests::context() {
+        let xmsg::install::Adapter::Claude(args) = adapter;
+        let lookup = xmsg::install_paths::FixtureHomeLookup(Some(context.account_home));
+        let env = xmsg::install_paths::ResolveEnv::from_process(&lookup);
+        let request = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .map_err(|_| xmsg::install::Error::Unsafe)
+            .and_then(|executable| {
+                xmsg::install::request_from_environment(
+                    &args,
+                    &env,
+                    executable,
+                    std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+                )
+            })
+            .map(|request| request.with_fixture_policy_roots(context.policy_roots));
+        return xmsg::install::run_cli_request(&args, action, request);
+    }
+    xmsg::install::run_cli(adapter, action)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    main_from_args(std::env::args_os())
+}
+
+fn main_from_args(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Restrict newly created state, config, log, and socket files to owner-only before any write.
     xmsg::install_paths::apply_process_umask();
-    let adapter_command = std::env::args_os()
-        .nth(1)
+    let arguments = arguments.into_iter().collect::<Vec<_>>();
+    let adapter_command = arguments
+        .get(1)
         .is_some_and(|command| command == "install" || command == "uninstall");
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_from(arguments) {
         Ok(cli) => cli,
         Err(error) => {
             if adapter_command
@@ -602,12 +632,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Install { adapter } => {
-            if !xmsg::install::run_cli(adapter, xmsg::install::Action::Install) {
+            if !run_install_adapter(adapter, xmsg::install::Action::Install) {
                 std::process::exit(2);
             }
         }
         Commands::Uninstall { adapter } => {
-            if !xmsg::install::run_cli(adapter, xmsg::install::Action::Uninstall) {
+            if !run_install_adapter(adapter, xmsg::install::Action::Uninstall) {
                 std::process::exit(2);
             }
         }
@@ -2639,6 +2669,265 @@ async fn run_shutdown_drain(
 #[cfg(test)]
 mod claude_install_cli_tests {
     use super::*;
+    use sha2::{Digest, Sha256};
+    use std::{
+        cell::RefCell,
+        collections::BTreeMap,
+        fs,
+        os::unix::{
+            fs::{symlink, DirBuilderExt, MetadataExt, PermissionsExt},
+            process::CommandExt,
+        },
+        path::Path,
+        process::{Child, Command, Output, Stdio},
+        time::Instant,
+    };
+
+    #[derive(Clone)]
+    pub(super) struct FixtureContext {
+        pub(super) account_home: PathBuf,
+        pub(super) policy_roots: Vec<PathBuf>,
+    }
+    thread_local! {
+        static CONTEXT: RefCell<Option<FixtureContext>> = const { RefCell::new(None) };
+    }
+    pub(super) fn context() -> Option<FixtureContext> {
+        CONTEXT.with(|context| context.borrow().clone())
+    }
+
+    struct OwnedProcess(Option<Child>);
+    impl Drop for OwnedProcess {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                if child.try_wait().ok().flatten().is_none() {
+                    if let Ok(pid) = i32::try_from(child.id()) {
+                        if unsafe { libc::getpgid(pid) } == pid {
+                            unsafe { libc::kill(-pid, libc::SIGKILL) };
+                        }
+                    }
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn fingerprint(root: &Path) -> BTreeMap<PathBuf, String> {
+        fn collect(root: &Path, item: &Path, out: &mut BTreeMap<PathBuf, String>) {
+            let meta = fs::symlink_metadata(item).unwrap();
+            let content = if meta.is_file() {
+                hex::encode(Sha256::digest(fs::read(item).unwrap()))
+            } else {
+                String::new()
+            };
+            out.insert(
+                item.strip_prefix(root).unwrap().to_path_buf(),
+                format!(
+                    "{:?}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{content}",
+                    meta.created().ok(),
+                    meta.dev(),
+                    meta.ino(),
+                    meta.mode(),
+                    meta.uid(),
+                    meta.gid(),
+                    meta.len(),
+                    meta.mtime(),
+                    meta.mtime_nsec(),
+                    meta.ctime(),
+                    meta.ctime_nsec()
+                ),
+            );
+            if meta.is_dir() {
+                for entry in fs::read_dir(item).unwrap() {
+                    collect(root, &entry.unwrap().path(), out);
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        collect(root, root, &mut out);
+        out
+    }
+
+    fn cli_child(home: &Path, lookup: &Path, policy: &Path, runtime: &Path) -> Output {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "claude_install_cli_tests::cli_process_fixture",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_clear()
+            .env("HOME", home)
+            .env("XDG_RUNTIME_DIR", runtime)
+            .env("XMSG_CLAUDE_FIXTURE_ACCOUNT_HOME", lookup)
+            .env("XMSG_CLAUDE_FIXTURE_POLICY_ROOT", policy)
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(marker) = std::env::var_os("NIX_BUILD_TOP") {
+            command.env("NIX_BUILD_TOP", marker);
+        }
+        let mut child = OwnedProcess(Some(command.spawn().unwrap()));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "owned CLI fixture process did not finish"
+            );
+            std::thread::yield_now();
+        }
+        child.0.take().unwrap().wait_with_output().unwrap()
+    }
+
+    fn report(output: &Output) -> serde_json::Value {
+        let text = String::from_utf8_lossy(&output.stdout);
+        let reports = text
+            .lines()
+            .filter_map(|line| {
+                line.find('{').and_then(|start| {
+                    serde_json::from_str::<serde_json::Value>(&line[start..]).ok()
+                })
+            })
+            .filter(|value| value["action"] == "install")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reports.len(),
+            1,
+            "actual CLI did not emit exactly one install report: {output:?}"
+        );
+        reports.into_iter().next().unwrap()
+    }
+
+    #[test]
+    #[ignore = "owned subprocess entry; executed and reaped by process_cli_repeat_and_home_aliases_keep_pins_and_metadata"]
+    fn cli_process_fixture() {
+        let account_home = std::env::var_os("XMSG_CLAUDE_FIXTURE_ACCOUNT_HOME")
+            .map(PathBuf::from)
+            .expect("fixture account home is required");
+        let policy = std::env::var_os("XMSG_CLAUDE_FIXTURE_POLICY_ROOT")
+            .map(PathBuf::from)
+            .expect("fixture policy root is required");
+        let lookup = xmsg::install_paths::FixtureHomeLookup(Some(account_home.clone()));
+        let env = xmsg::install_paths::ResolveEnv::from_process(&lookup);
+        let classification = match xmsg::install_paths::resolve_account_home(&env) {
+            Ok(_) => "matched",
+            Err(xmsg::install_paths::InstallError::HomeMismatch { .. }) => "home_mismatch",
+            Err(_) => "other",
+        };
+        eprintln!("fixture-home-class={classification}");
+        CONTEXT.with(|context| {
+            *context.borrow_mut() = Some(FixtureContext {
+                account_home,
+                policy_roots: vec![policy],
+            })
+        });
+        main_from_args(
+            ["xmsg", "install", "claude", "--apply", "--json"].map(std::ffi::OsString::from),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn process_cli_repeat_and_home_aliases_keep_pins_and_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        let canonical = fs::canonicalize(&home).unwrap();
+        let policy = canonical.join("fixture-managed-policy");
+        fs::DirBuilder::new().mode(0o700).create(&policy).unwrap();
+        let runtime = tempfile::Builder::new()
+            .prefix("cli-rt-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir_in(fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let mut native_var = false;
+        #[cfg(target_os = "macos")]
+        let native_raw = canonical
+            .strip_prefix("/private/var/folders")
+            .ok()
+            .map(|suffix| Path::new("/var/folders").join(suffix));
+        #[cfg(not(target_os = "macos"))]
+        let native_raw: Option<PathBuf> = None;
+        let raw = if let Some(raw) = native_raw {
+            native_var = true;
+            assert_eq!(fs::canonicalize(&raw).unwrap(), canonical);
+            raw
+        } else {
+            let alias = root.path().join("raw-home");
+            symlink(&canonical, &alias).unwrap();
+            alias
+        };
+        eprintln!("cli-process-native-var-alias={native_var}");
+        let cases = [(&raw, &raw), (&raw, &canonical), (&canonical, &raw)];
+        let mut baseline_pins = None;
+        for (index, (env_home, account_home)) in cases.into_iter().enumerate() {
+            eprintln!("cli-process-case={index} fixture_HOME={env_home:?} fixture_account={account_home:?} canonical_target={canonical:?}");
+            let before = fingerprint(&canonical);
+            let first = cli_child(env_home, account_home, &policy, runtime.path());
+            let first_report = report(&first);
+            if !first.status.success() {
+                assert!(
+                    index != 0
+                        && first.status.code() == Some(2)
+                        && String::from_utf8_lossy(&first.stderr)
+                            .contains("fixture-home-class=home_mismatch"),
+                    "actual CLI failed unexpectedly: {first:?}"
+                );
+                assert_eq!(first_report["status"], "refused");
+                assert_eq!(
+                    fingerprint(&canonical),
+                    before,
+                    "refused home alias wrote files"
+                );
+                let second = cli_child(env_home, account_home, &policy, runtime.path());
+                assert_eq!(second.status.code(), Some(2));
+                assert!(String::from_utf8_lossy(&second.stderr)
+                    .contains("fixture-home-class=home_mismatch"));
+                assert_eq!(report(&second), first_report);
+                assert_eq!(fingerprint(&canonical), before);
+                continue;
+            }
+            assert_eq!(
+                first_report["status"],
+                if index == 0 { "applied" } else { "no_op" }
+            );
+            let mcp = fs::read(canonical.join(".claude.json")).unwrap();
+            let hooks = fs::read(canonical.join(".claude/settings.json")).unwrap();
+            let pins = (mcp, hooks);
+            if let Some(baseline) = &baseline_pins {
+                assert_eq!(
+                    &pins, baseline,
+                    "home aliases changed accepted command pins"
+                );
+            } else {
+                baseline_pins = Some(pins.clone());
+            }
+            let installed = fingerprint(&canonical);
+            let second = cli_child(env_home, account_home, &policy, runtime.path());
+            assert!(
+                second.status.success(),
+                "second actual CLI failed: {second:?}"
+            );
+            assert_eq!(
+                report(&second)["status"],
+                "no_op",
+                "identical process CLI inputs were not a no-op"
+            );
+            assert_eq!(
+                fingerprint(&canonical),
+                installed,
+                "second process CLI rewrote content or metadata"
+            );
+            assert_eq!(fs::read(canonical.join(".claude.json")).unwrap(), pins.0);
+            assert_eq!(
+                fs::read(canonical.join(".claude/settings.json")).unwrap(),
+                pins.1
+            );
+            eprintln!("cli-process-case={index} accepted identical-input second=no_op pins-and-metadata=unchanged");
+        }
+    }
     #[test]
     fn mcp_and_claude_hook_accept_literal_database_pin() {
         for arguments in [
