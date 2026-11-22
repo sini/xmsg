@@ -323,11 +323,30 @@ pub fn original_endpoint(fd: BorrowedFd<'_>, expected: &Path) -> Result<(), Fail
 
 #[cfg(target_os = "macos")]
 static INHERITANCE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(all(test, target_os = "macos"))]
+static GATE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn inheritance_gate_held_for_test() -> bool {
+    GATE_HELD.load(std::sync::atomic::Ordering::SeqCst)
+}
 pub fn with_fd_inheritance_gate<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
     #[cfg(target_os = "macos")]
     let _guard = INHERITANCE_GATE
         .lock()
         .map_err(|_| io::Error::other("FD inheritance gate poisoned"))?;
+    #[cfg(all(test, target_os = "macos"))]
+    struct Held;
+    #[cfg(all(test, target_os = "macos"))]
+    impl Drop for Held {
+        fn drop(&mut self) {
+            GATE_HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    #[cfg(all(test, target_os = "macos"))]
+    let _held = {
+        GATE_HELD.store(true, std::sync::atomic::Ordering::SeqCst);
+        Held
+    };
     operation()
 }
 fn receive_gate<T>(deadline: Instant, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
@@ -708,6 +727,22 @@ mod tests {
             context_digest: "c".repeat(64),
         }
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn actual_inheritance_gate_owns_the_shared_mutex_during_spawn_operation() {
+        with_fd_inheritance_gate(|| {
+            assert!(
+                matches!(
+                    INHERITANCE_GATE.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "spawn operation did not own the shared receive-to-fcntl mutex"
+            );
+            assert!(inheritance_gate_held_for_test());
+            Ok(())
+        })
+        .unwrap();
+    }
     #[test]
     fn attribution_wire_passes_one_descriptor_without_consuming_original() {
         let (client, server) = UnixStream::pair().unwrap();
@@ -728,6 +763,13 @@ mod tests {
             let (actual, received) =
                 receive_query(&server, Instant::now() + Duration::from_secs(2)).unwrap();
             assert_eq!(actual, expected);
+            let flags = unsafe { libc::fcntl(received.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0, "received original descriptor was invalid");
+            assert_ne!(
+                flags & libc::FD_CLOEXEC,
+                0,
+                "received original descriptor was not close-on-exec"
+            );
             assert_eq!(
                 socket_peer(received.as_fd()).unwrap().0,
                 super::super::current_uid()
