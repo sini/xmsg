@@ -206,6 +206,33 @@ fn bridge_scripted_socket_positive_admits_bound_principal() {
 }
 
 #[test]
+fn bridge_reply_from_previous_service_epoch_is_refused() {
+    use xmsg::client::caller_attribution::Reply;
+
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let first = captured.clone();
+    let (reply, rows) = run_scripted_bridge(move |reply| {
+        let Reply::Ok { runtime_epoch, .. } = reply else {
+            panic!("scripted peer expected an eligible reply");
+        };
+        *first.lock().unwrap() = Some(runtime_epoch.clone());
+    });
+    assert_eq!(reply["status"], "ok");
+    assert_eq!(rows, 1);
+
+    let epoch = captured.lock().unwrap().take().unwrap();
+    let (reply, rows) = run_scripted_bridge(move |reply| {
+        let Reply::Ok { runtime_epoch, .. } = reply else {
+            panic!("second invocation expected an eligible reply");
+        };
+        assert_ne!(*runtime_epoch, epoch);
+        *runtime_epoch = epoch;
+    });
+    assert_eq!(reply["code"], "attestation_binding");
+    assert_eq!(rows, 0, "a prior service reply reached durable admission");
+}
+
+#[test]
 fn bridge_wrong_epoch_has_no_admission_even_with_valid_grant() {
     let (reply, rows) = run_scripted_bridge(|reply| {
         if let xmsg::client::caller_attribution::Reply::Ok { runtime_epoch, .. } = reply {
