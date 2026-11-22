@@ -67,7 +67,10 @@ fn wait_for_socket(path: &Path, child: &mut Child, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().unwrap() {
-            panic!("daemon exited early ({status}) before binding {}", path.display());
+            panic!(
+                "daemon exited early ({status}) before binding {}",
+                path.display()
+            );
         }
         if StdUnixStream::connect(path).is_ok() {
             return;
@@ -155,8 +158,8 @@ fn s8_socket_byte_budget_and_multibyte_darwin_bounds() {
         euid: uid,
         home_lookup: &lookup,
     };
-    let ns_id = compute_namespace_identity(&canonicalize_best_effort(&long_state).unwrap())
-        .unwrap();
+    let ns_id =
+        compute_namespace_identity(&canonicalize_best_effort(&long_state).unwrap()).unwrap();
     let selected = select_runtime_parent(&linux_env, &ns_id.dir_name, "register.sock")
         .expect("valid-but-too-long Linux XDG_RUNTIME_DIR must fall back to /tmp");
     let canon_tmp = canonicalize_best_effort(Path::new("/tmp")).unwrap();
@@ -320,9 +323,13 @@ async fn s8_proof_authorized_stale_cleanup_and_unproven_refusal() {
     let ns_id = compute_namespace_identity(&canon_state2).unwrap();
     let unproven_dir = rt_parent.join(&ns_id.dir_name);
     make_private_dir(&unproven_dir); // empty, private, 0700, owned by uid — STILL UNPROVEN!
-    let err_empty = ensure_managed_runtime_dir(&st_lock, &state2, &unproven_dir, &ns_id, &mut owner2, uid)
-        .expect_err("Q3: existing empty runtime dir without durable proof must refuse");
-    assert!(matches!(err_empty, RuntimeLockError::UnprovenRuntimeDir { .. }));
+    let err_empty =
+        ensure_managed_runtime_dir(&st_lock, &state2, &unproven_dir, &ns_id, &mut owner2, uid)
+            .expect_err("Q3: existing empty runtime dir without durable proof must refuse");
+    assert!(matches!(
+        err_empty,
+        RuntimeLockError::UnprovenRuntimeDir { .. }
+    ));
 
     // Plant a mismatched identity.json -> also refuses!
     fs::write(unproven_dir.join("identity.json"), b"{\"wrong\":true}").unwrap();
@@ -428,7 +435,10 @@ fn s8_live_runtime_marker_removal_recovers_within_one_period() {
     wait_for_socket(&http_sock, &mut serve.0, Duration::from_secs(10));
 
     let marker = ns_dir.join("identity.json");
-    assert!(marker.exists(), "runtime identity.json must exist at startup");
+    assert!(
+        marker.exists(),
+        "runtime identity.json must exist at startup"
+    );
 
     // Simulate a tmp cleaner removing ONLY `identity.json` while daemon stays live.
     fs::remove_file(&marker).unwrap();
@@ -497,7 +507,9 @@ async fn s8_competing_manual_owners_serialized_by_endpoint_lock() {
         make_private_dir(d);
     }
     let sock = run.join("shared-manual.sock");
-    let canon_sock = canonicalize_best_effort(&run).unwrap().join("shared-manual.sock");
+    let canon_sock = canonicalize_best_effort(&run)
+        .unwrap()
+        .join("shared-manual.sock");
 
     let barrier = Arc::new(Barrier::new(2));
     socket_publish_hook::pause_once(canon_sock.clone(), barrier.clone());

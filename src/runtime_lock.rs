@@ -130,36 +130,38 @@ pub struct EndpointLock {
 
 impl EndpointLock {
     pub fn lock_path_for(endpoint_path: &Path) -> Result<PathBuf, RuntimeLockError> {
-        let parent = endpoint_path
-            .parent()
-            .ok_or_else(|| RuntimeLockError::Io {
-                path: endpoint_path.to_path_buf(),
-                source: io::Error::new(io::ErrorKind::InvalidInput, "endpoint has no parent"),
-            })?;
+        let parent = endpoint_path.parent().ok_or_else(|| RuntimeLockError::Io {
+            path: endpoint_path.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, "endpoint has no parent"),
+        })?;
         let name = endpoint_path
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| RuntimeLockError::Io {
                 path: endpoint_path.to_path_buf(),
-                source: io::Error::new(io::ErrorKind::InvalidInput, "endpoint has invalid basename"),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "endpoint has invalid basename",
+                ),
             })?;
         Ok(parent.join(format!(".{name}.lock")))
     }
 
     pub fn try_acquire(endpoint_path: &Path, expected_uid: u32) -> Result<Self, RuntimeLockError> {
-        let parent = endpoint_path
-            .parent()
-            .ok_or_else(|| RuntimeLockError::Io {
-                path: endpoint_path.to_path_buf(),
-                source: io::Error::new(io::ErrorKind::InvalidInput, "endpoint has no parent"),
-            })?;
+        let parent = endpoint_path.parent().ok_or_else(|| RuntimeLockError::Io {
+            path: endpoint_path.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, "endpoint has no parent"),
+        })?;
         let canon_parent = validate_private_dir(parent, expected_uid)?;
         let name = endpoint_path
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| RuntimeLockError::Io {
                 path: endpoint_path.to_path_buf(),
-                source: io::Error::new(io::ErrorKind::InvalidInput, "endpoint has invalid basename"),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "endpoint has invalid basename",
+                ),
             })?;
         let path = canon_parent.join(format!(".{name}.lock"));
         let file = OpenOptions::new()
@@ -420,7 +422,8 @@ pub fn ensure_managed_runtime_dir(
             detail: "no durable runtime_dir proof in owner.json (offline ownership reconciliation required)".into(),
         });
     };
-    let rec_canon = canonicalize_best_effort(&recorded.path).unwrap_or_else(|_| recorded.path.clone());
+    let rec_canon =
+        canonicalize_best_effort(&recorded.path).unwrap_or_else(|_| recorded.path.clone());
     if rec_canon != canon
         || recorded.dev != meta.dev()
         || recorded.ino != meta.ino()
@@ -607,12 +610,10 @@ pub fn bind_and_publish_socket(
         source: io::Error::new(io::ErrorKind::InvalidInput, "socket path has no parent"),
     })?;
     let canon_parent = validate_private_dir(parent, expected_uid)?;
-    let final_basename = final_path
-        .file_name()
-        .ok_or_else(|| RuntimeLockError::Io {
-            path: final_path.to_path_buf(),
-            source: io::Error::new(io::ErrorKind::InvalidInput, "socket path has no basename"),
-        })?;
+    let final_basename = final_path.file_name().ok_or_else(|| RuntimeLockError::Io {
+        path: final_path.to_path_buf(),
+        source: io::Error::new(io::ErrorKind::InvalidInput, "socket path has no basename"),
+    })?;
     let canon_final = canon_parent.join(final_basename);
     validate_socket_path(&canon_final)?;
 
@@ -734,7 +735,10 @@ fn reclaim_proven_stale_socket(
     if meta.uid() != expected_uid {
         return Err(RuntimeLockError::UnprovenExistingSocket {
             path: canon_final.to_path_buf(),
-            detail: format!("existing socket owned by UID {}, expected {expected_uid}", meta.uid()),
+            detail: format!(
+                "existing socket owned by UID {}, expected {expected_uid}",
+                meta.uid()
+            ),
         });
     }
 
@@ -1000,7 +1004,10 @@ mod tests {
             Err(RuntimeLockError::StateLockHeld { .. })
         ));
         let b2 = state_lock_attempts();
-        assert!(b2 > b1, "failed nonblocking acquire must increment attempt counter");
+        assert!(
+            b2 > b1,
+            "failed nonblocking acquire must increment attempt counter"
+        );
         drop(lock1);
         let _lock2 = StateLock::try_acquire(tmp.path()).unwrap();
         assert!(state_lock_attempts() > b2);
@@ -1061,7 +1068,10 @@ mod tests {
         let slock = StateLock::try_acquire(&state).unwrap();
         let mut owner = OwnerRecord::new(uid, None);
 
-        for prim in [PublishPrimitive::RenameNoReplace, PublishPrimitive::LinkUnlink] {
+        for prim in [
+            PublishPrimitive::RenameNoReplace,
+            PublishPrimitive::LinkUnlink,
+        ] {
             publish_control::force_primitive(Some(prim));
             let name = match prim {
                 PublishPrimitive::RenameNoReplace => "a.sock",
