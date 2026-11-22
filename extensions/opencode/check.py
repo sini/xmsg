@@ -242,8 +242,10 @@ def user_texts(session):
 
 home = os.path.join(TMP, "home")
 os.makedirs(os.path.join(home, ".config", "opencode", "plugin"), exist_ok=True)
-os.makedirs(RUN, mode=0o700, exist_ok=True)
-os.chmod(RUN, 0o700)
+STATE = os.path.join(TMP, "xmsg-state")
+for d in (RUN, SOCKS, STATE):
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
 work = os.path.join(TMP, "work")
 os.makedirs(work, exist_ok=True)
 with open(PLUGIN) as src, open(os.path.join(home, ".config", "opencode", "plugin", "xmsg.ts"), "w") as dst:
@@ -269,8 +271,23 @@ def serve():
         s_path = os.path.join(SOCKS, s_name)
         if os.path.exists(s_path):
             os.unlink(s_path)
-    p = subprocess.Popen([XMSG, "serve", "--db-path", os.path.join(TMP, "xmsg.db")], env=env,
-                         stdout=open(os.path.join(TMP, "serve.log"), "a"), stderr=subprocess.STDOUT)
+    p = subprocess.Popen(
+        [
+            XMSG,
+            "serve",
+            "--db-path",
+            os.path.join(STATE, "xmsg.db"),
+            "--http-sock",
+            os.path.join(SOCKS, "http.sock"),
+            "--agent-sock",
+            os.path.join(SOCKS, "agent.sock"),
+            "--register-sock",
+            os.path.join(SOCKS, "register.sock"),
+        ],
+        env=env,
+        stdout=open(os.path.join(TMP, "serve.log"), "a"),
+        stderr=subprocess.STDOUT,
+    )
     procs.append(p)
     wait_until(lambda: can_connect_unix(os.path.join(SOCKS, "http.sock"))
                and can_connect_unix(os.path.join(SOCKS, "register.sock")), 20, "xmsg serve")

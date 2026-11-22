@@ -13,7 +13,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -32,7 +32,7 @@ use xmsg::runtime_lock::{
 const BIN: &str = env!("CARGO_BIN_EXE_xmsg");
 
 /// Serialize tests that touch global test hooks (`socket_publish_hook`, `publish_control`).
-static HOOK_SERIAL: Mutex<()> = Mutex::new(());
+static HOOK_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
@@ -112,10 +112,10 @@ fn s8_socket_byte_budget_and_multibyte_darwin_bounds() {
     // Exact C6 / M-S8 multibyte fixture:
     // Under `/private/tmp/h`, component of 52 U+00E9 ('é', 2 UTF-8 bytes each) + `/agent.sock`.
     // 15 + 52 + 11 = 78 chars (<= 103) and 15 + 104 + 11 = 130 OS bytes (>= 104 and >= 108).
-    let multibyte_comp: String = std::iter::repeat('\u{00E9}').take(52).collect();
+    let multibyte_comp = "\u{00E9}".repeat(52);
     let multibyte_str = format!("/private/tmp/h/{multibyte_comp}/agent.sock");
     let char_count = multibyte_str.chars().count();
-    let os_bytes = multibyte_str.as_bytes().len();
+    let os_bytes = multibyte_str.len();
     assert!(
         char_count <= 103,
         "C6 precondition: expected <= 103 chars, got {char_count}"
@@ -497,7 +497,7 @@ fn s8_live_runtime_marker_removal_recovers_within_one_period() {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s8_competing_manual_owners_serialized_by_endpoint_lock() {
-    let _guard = HOOK_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HOOK_SERIAL.lock().await;
     let tmp = TempDir::new().unwrap();
     let uid = unsafe { libc::geteuid() };
     let state1 = tmp.path().join("state1");
@@ -571,7 +571,7 @@ async fn s8_competing_manual_owners_serialized_by_endpoint_lock() {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn s8_incumbent_collision_barrier_per_primitive_arm() {
-    let _guard = HOOK_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HOOK_SERIAL.lock().await;
     let _reset = ResetPublishControl;
     let uid = unsafe { libc::geteuid() };
 
