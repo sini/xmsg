@@ -2425,7 +2425,7 @@ pub fn strict_open_file_vnodes(
                 size as libc::c_int,
             )
         };
-        if filled <= 0 || filled as usize >= size || filled as usize % entry_size != 0 {
+        if filled <= 0 || filled as usize >= size || !(filled as usize).is_multiple_of(entry_size) {
             return Err(FailureReason::AuthorityUnavailable);
         }
         unsafe {
