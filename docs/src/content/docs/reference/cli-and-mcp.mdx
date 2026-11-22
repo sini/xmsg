@@ -307,7 +307,7 @@ enablement for each user are deployment configuration.
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L268-L437
+```rust file=<rootDir>/src/main.rs#L268-L444
 ```
 
 Planned (<Status id="xmsg.install-contract" />): in `--leaf` mode, `--leaf-register-sock`
@@ -316,8 +316,8 @@ Planned (<Status id="xmsg.install-contract" />): in `--leaf` mode, `--leaf-regis
 the managed default runtime namespace rather than deriving beside `--leaf-register-sock`; pass
 `--agent-sock` explicitly to pin it beside the registration socket. Optional Antigravity discovery
 paths can be pinned via `XMSG_AGY_PRESENCE_DIR` and `XMSG_AGY_BRAIN_DIR`; when account home is
-unavailable and no explicit override is set, optional harness discovery is omitted without falling
-back to the working directory.
+unavailable or `HOME` mismatches and no explicit override is set, optional harness discovery is
+omitted without falling back to the working directory.
 
 Planned: `--codex-exe` and `--agy-exe` compare canonical executable `file_name`s by default
 so open sessions survive store-path upgrades (`xmsg doctor` notes path drift as `info` under
@@ -366,7 +366,7 @@ denied to plugin connections and absent from TCP and `/fed`.
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L439-L464
+```rust file=<rootDir>/src/main.rs#L446-L471
 ```
 
 ### `xmsg register`
