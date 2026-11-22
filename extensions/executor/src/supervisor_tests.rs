@@ -1752,14 +1752,29 @@ fn set_wall_budget(f: &Fixture, millis: u64) {
         )
         .unwrap();
 }
-fn budget_probe_backend(f: &Fixture, probe: &Path, stall_startup: bool) -> PathBuf {
+fn budget_probe_backend(f: &Fixture, probe: &Path, startup_gate: Option<&Path>) -> PathBuf {
     let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_acp_process.py");
-    let script = f.dir.path().join(if stall_startup {
-        "stall_startup.py"
+    let script = f.dir.path().join("budget_backend.py");
+    let body = if let Some(gate) = startup_gate {
+        format!(
+            "gate=socket.socket(socket.AF_UNIX)\ngate.connect({})\ngate.sendall(b'R')\nassert gate.recv(1)==b'G'\ngate.close()",
+            serde_json::to_string(&gate.to_string_lossy()).unwrap()
+        )
     } else {
-        "budget_backend.py"
-    });
-    let code=format!("import socket,signal,os,runpy\nsignal.signal(signal.SIGALRM,lambda *args:os.killpg(os.getpgrp(),signal.SIGKILL));signal.alarm(10)\ns=socket.socket(socket.AF_UNIX);s.connect({});s.sendall(b'R')\n{}\n",serde_json::to_string(&probe.to_string_lossy()).unwrap(),if stall_startup{"s.recv(1)".into()}else{format!("runpy.run_path({},run_name='__main__')",serde_json::to_string(&original.to_string_lossy()).unwrap())});
+        String::new()
+    };
+    let continuation = if startup_gate.is_some() {
+        "s.recv(1)".into()
+    } else {
+        format!(
+            "runpy.run_path({},run_name='__main__')",
+            serde_json::to_string(&original.to_string_lossy()).unwrap()
+        )
+    };
+    let code = format!(
+        "import socket,signal,os,runpy\nsignal.signal(signal.SIGALRM,lambda *args:os.killpg(os.getpgrp(),signal.SIGKILL));signal.alarm(10)\n{body}\ns=socket.socket(socket.AF_UNIX);s.connect({});s.sendall(b'R')\n{continuation}\n",
+        serde_json::to_string(&probe.to_string_lossy()).unwrap()
+    );
     fs::write(&script, code).unwrap();
     script
 }
@@ -1819,27 +1834,72 @@ fn resistant_descendant_stop_is_unknown_and_retains_slot_and_workspace() {
 }
 #[test]
 fn broker_death_during_initialize_cannot_bypass_supervisor_wall_budget() {
+    use std::os::unix::process::ExitStatusExt;
+
     let f = fixture();
-    set_wall_budget(&f, 500);
+    let wall_budget = Duration::from_secs(2);
+    let slack = Duration::from_millis(250);
+    set_wall_budget(&f, wall_budget.as_millis() as u64);
     admit(&f);
     let probe = f.dir.path().join("startup-budget.sock");
     let listener = UnixListener::bind(&probe).unwrap();
-    let backend = budget_probe_backend(&f, &probe, true);
+    let gate = f.dir.path().join("cold-start.sock");
+    let gate_listener = UnixListener::bind(&gate).unwrap();
+    let backend = budget_probe_backend(&f, &probe, Some(&gate));
     let (mut broker, _barrier) = spawn_broker(&f, "after_spawn", Some(backend));
-    let mut stream = accept_fixture(&listener, "backend probe").unwrap();
+    let mut gate = accept_fixture(&gate_listener, "cold-start barrier").unwrap();
+    gate.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let observed_start = std::time::Instant::now();
+    let mut byte = [0];
+    gate.read_exact(&mut byte).unwrap();
+    assert_eq!(byte[0], b'R');
+    // Keep the Python probe blocked past the former fixture's entire lifetime.
+    std::thread::sleep(Duration::from_millis(650));
+    let release = gate.write_all(b"G");
+    let mut stream = accept_fixture(&listener, "backend probe")
+        .unwrap_or_else(|error| panic!("{error}; cold-start gate release={release:?}"));
+    release.unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    let mut byte = [0];
     stream.read_exact(&mut byte).unwrap();
     assert_eq!(byte[0], b'R');
     broker.kill().unwrap();
-    broker.wait().unwrap();
+    assert_eq!(broker.wait().unwrap().signal(), Some(libc::SIGKILL));
+    let broker_killed = observed_start.elapsed();
+    assert!(
+        broker_killed < wall_budget,
+        "broker must be killed during initialize, before the wall budget expires: {broker_killed:?}"
+    );
+
+    let deadline = observed_start + wall_budget + slack;
+    stream
+        .set_read_timeout(Some(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+        ))
+        .unwrap();
     let ended = stream.read(&mut byte);
     assert!(
         matches!(ended, Ok(0)),
         "startup handshake escaped supervisor wall budget: {ended:?}"
     );
+    loop {
+        match ExecutionLock::acquire(&f.runtime.root, "session-1", 1) {
+            Ok(_) => break,
+            Err(SupervisorError::Busy) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => {
+                panic!("supervisor retained the execution lock past the wall budget: {error}")
+            }
+        }
+    }
+    let supervisor_exited = observed_start.elapsed();
+    assert!(
+        supervisor_exited <= wall_budget + slack,
+        "supervisor outlived the wall budget and slack: {supervisor_exited:?}"
+    );
+    eprintln!("cold-start control: broker killed at {broker_killed:?}; supervisor lock released at {supervisor_exited:?}");
     let observed = SupervisorController::new(f.runtime.clone())
         .reconcile(&f.service, "session-1", 1, 101)
         .unwrap();
@@ -1855,7 +1915,7 @@ fn stalled_accepted_client_cannot_postpone_execution_wall_budget() {
     let accepted = f.dir.path().join("accepted.sock");
     let accepted_listener = UnixListener::bind(&accepted).unwrap();
     let mut cfg = fake_runtime(&f);
-    cfg.fixture.as_mut().unwrap().backend = budget_probe_backend(&f, &backend_probe, false);
+    cfg.fixture.as_mut().unwrap().backend = budget_probe_backend(&f, &backend_probe, None);
     cfg.fixture.as_mut().unwrap().accept_probe = Some(accepted);
     let controller = SupervisorController::new(cfg);
     let running = controller.start_admitted(&f.service, 1, 100).unwrap();
