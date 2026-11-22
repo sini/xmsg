@@ -135,13 +135,13 @@ pub struct Args {
     pub peers_file: Option<PathBuf>,
 }
 
-pub fn run_with_environment(
+#[doc(hidden)]
+pub fn request_from_environment(
     args: &Args,
-    action: Action,
     env: &crate::install_paths::ResolveEnv<'_>,
     executable: PathBuf,
     config_dir: Option<PathBuf>,
-) -> Result<(String, bool), Error> {
+) -> Result<Request, Error> {
     if args.apply && args.dry_run {
         return Err(Error::Arguments);
     }
@@ -154,7 +154,10 @@ pub fn run_with_environment(
         peers_file: args.peers_file.clone(),
         ..Default::default()
     };
-    let request = Request::resolve(&input, env, executable, config_dir)?;
+    Request::resolve(&input, env, executable, config_dir)
+}
+
+fn run_request(args: &Args, action: Action, request: Request) -> Result<(String, bool), Error> {
     let planned = plan(&request, action)?;
     if args.apply {
         let report = planned.apply()?;
@@ -166,22 +169,41 @@ pub fn run_with_environment(
     }
 }
 
+pub fn run_with_environment(
+    args: &Args,
+    action: Action,
+    env: &crate::install_paths::ResolveEnv<'_>,
+    executable: PathBuf,
+    config_dir: Option<PathBuf>,
+) -> Result<(String, bool), Error> {
+    run_request(
+        args,
+        action,
+        request_from_environment(args, env, executable, config_dir)?,
+    )
+}
+
 pub fn run_cli(adapter: Adapter, action: Action) -> bool {
     let Adapter::Claude(args) = adapter;
     let lookup = crate::install_paths::SystemHomeLookup;
     let env = crate::install_paths::ResolveEnv::from_process(&lookup);
-    let result = std::env::current_exe()
+    let request = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|_| Error::Unsafe)
         .and_then(|executable| {
-            run_with_environment(
+            request_from_environment(
                 &args,
-                action,
                 &env,
                 executable,
                 std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
             )
         });
+    run_cli_request(&args, action, request)
+}
+
+#[doc(hidden)]
+pub fn run_cli_request(args: &Args, action: Action, request: Result<Request, Error>) -> bool {
+    let result = request.and_then(|request| run_request(args, action, request));
     match result {
         Ok((output, success)) => {
             println!("{output}");
