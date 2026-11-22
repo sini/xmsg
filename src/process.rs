@@ -1757,9 +1757,11 @@ mod strict_peer {
         Ok(value)
     }
     fn socket_metadata(fd: BorrowedFd<'_>) -> Result<(), FailureReason> {
-        if option_i32(fd, libc::SOL_SOCKET, libc::SO_TYPE)? != libc::SOCK_STREAM
-            || option_i32(fd, libc::SOL_SOCKET, libc::SO_ACCEPTCONN)? != 0
-        {
+        if option_i32(fd, libc::SOL_SOCKET, libc::SO_TYPE)? != libc::SOCK_STREAM {
+            return Err(FailureReason::Endpoint);
+        }
+        #[cfg(target_os = "linux")]
+        if option_i32(fd, libc::SOL_SOCKET, libc::SO_ACCEPTCONN)? != 0 {
             return Err(FailureReason::Endpoint);
         }
         let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -2175,12 +2177,29 @@ mod strict_peer {
                     .is_ok(),
                 "valid write-half-close refused"
             );
-            sender.shutdown(std::net::Shutdown::Both).unwrap();
-            assert_eq!(
-                strict_peer_cred_from_fd(original.as_fd(), Path::new(super::super::LIVE_PROC_ROOT))
+            #[cfg(target_os = "linux")]
+            {
+                sender.shutdown(std::net::Shutdown::Both).unwrap();
+                assert_eq!(
+                    strict_peer_cred_from_fd(
+                        original.as_fd(),
+                        Path::new(super::super::LIVE_PROC_ROOT)
+                    )
                     .err(),
-                Some(FailureReason::DeadPeer)
-            );
+                    Some(FailureReason::DeadPeer)
+                );
+            }
+            #[cfg(target_os = "macos")]
+            {
+                drop(sender);
+                assert!(matches!(
+                    strict_peer_cred_from_fd(
+                        original.as_fd(),
+                        Path::new(super::super::LIVE_PROC_ROOT)
+                    ),
+                    Err(FailureReason::Endpoint | FailureReason::DeadPeer)
+                ));
+            }
         }
         #[test]
         fn strict_peer_regular_file_and_datagram_are_not_stream_peers() {
@@ -2361,20 +2380,39 @@ mod strict_peer {
         }
         #[test]
         fn strict_peer_changed_start_token_refuses() {
-            let root = tempfile::tempdir().unwrap();
-            let pid = std::process::id();
-            std::fs::create_dir(root.path().join(pid.to_string())).unwrap();
-            let mut fields = vec!["0"; 20];
-            fields[0] = "S";
-            fields[19] = "42";
-            let stat = root.path().join(pid.to_string()).join("stat");
-            std::fs::write(&stat, format!("{pid} (fixture) {}\n", fields.join(" "))).unwrap();
             let (_sender, original) = std::os::unix::net::UnixStream::pair().unwrap();
-            let peer = strict_peer_cred_from_fd(original.as_fd(), root.path()).unwrap();
-            fields[19] = "43";
-            std::fs::write(stat, format!("{pid} (fixture) {}\n", fields.join(" "))).unwrap();
+            #[cfg(target_os = "linux")]
+            let (fixture, peer) = {
+                let fixture = tempfile::tempdir().unwrap();
+                let pid = std::process::id();
+                std::fs::create_dir(fixture.path().join(pid.to_string())).unwrap();
+                let mut fields = vec!["0"; 20];
+                fields[0] = "S";
+                fields[19] = "42";
+                let stat = fixture.path().join(pid.to_string()).join("stat");
+                std::fs::write(&stat, format!("{pid} (fixture) {}\n", fields.join(" "))).unwrap();
+                let peer = strict_peer_cred_from_fd(original.as_fd(), fixture.path()).unwrap();
+                fields[19] = "43";
+                std::fs::write(stat, format!("{pid} (fixture) {}\n", fields.join(" "))).unwrap();
+                (fixture, peer)
+            };
+            #[cfg(target_os = "linux")]
+            let root = fixture.path();
+
+            #[cfg(target_os = "macos")]
+            let root = Path::new(super::super::LIVE_PROC_ROOT);
+            #[cfg(target_os = "macos")]
+            let peer = {
+                let mut peer = strict_peer_cred_from_fd(original.as_fd(), root).unwrap();
+                assert_eq!(peer.branch, StrictPeerBranch::MacWeaker);
+                assert!(matches!(peer.peer.pin, PeerPin::Unpinned));
+                strict_revalidate(&peer, original.as_fd(), root).unwrap();
+                peer.captured_start.push_str("-stale");
+                peer
+            };
+
             assert_eq!(
-                strict_revalidate(&peer, original.as_fd(), root.path()).err(),
+                strict_revalidate(&peer, original.as_fd(), root).err(),
                 Some(FailureReason::Changed),
                 "changed process token survived revalidation"
             );
