@@ -100,7 +100,7 @@ impl StateLock {
             .write(true)
             .create(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)
             .map_err(|source| RuntimeLockError::Io {
                 path: path.clone(),
@@ -118,6 +118,16 @@ impl StateLock {
             return Err(RuntimeLockError::Io { path, source: err });
         }
         Ok(Self { _file: file, path })
+    }
+}
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        // Unlock the open file description before closing the fd so a concurrent pre-exec fork()
+        // cannot keep the flock held past drop().
+        unsafe {
+            let _ = libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -169,7 +179,7 @@ impl EndpointLock {
             .write(true)
             .create(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)
             .map_err(|source| RuntimeLockError::Io {
                 path: path.clone(),
@@ -187,6 +197,16 @@ impl EndpointLock {
             return Err(RuntimeLockError::Io { path, source: err });
         }
         Ok(Self { _file: file, path })
+    }
+}
+
+impl Drop for EndpointLock {
+    fn drop(&mut self) {
+        // Unlock the open file description before closing the fd so a concurrent pre-exec fork()
+        // cannot keep the flock held past drop().
+        unsafe {
+            let _ = libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -1009,8 +1029,34 @@ mod tests {
             "failed nonblocking acquire must increment attempt counter"
         );
         drop(lock1);
-        let _lock2 = StateLock::try_acquire(tmp.path()).unwrap();
+        let lock2 = StateLock::try_acquire(tmp.path()).unwrap();
         assert!(state_lock_attempts() > b2);
+
+        // Forced-race control: simulate a concurrent pre-exec fork() duplicating the lock fd.
+        // Drop must explicitly release the flock on the open file description even while the
+        // duplicated fd is still open!
+        let dup_fd = unsafe { libc::dup(lock2._file.as_raw_fd()) };
+        assert!(dup_fd >= 0, "dup() failed");
+        drop(lock2);
+        let reacquire = StateLock::try_acquire(tmp.path());
+        unsafe {
+            libc::close(dup_fd);
+        }
+        reacquire.expect("drop(StateLock) must unlock even while a pre-exec dup fd is still open");
+
+        // Identical forced-race control for EndpointLock.
+        let uid = unsafe { libc::geteuid() };
+        let sock = tmp.path().join("agent.sock");
+        let ep1 = EndpointLock::try_acquire(&sock, uid).unwrap();
+        let ep_dup = unsafe { libc::dup(ep1._file.as_raw_fd()) };
+        assert!(ep_dup >= 0, "dup() failed");
+        drop(ep1);
+        let ep_reacquire = EndpointLock::try_acquire(&sock, uid);
+        unsafe {
+            libc::close(ep_dup);
+        }
+        ep_reacquire
+            .expect("drop(EndpointLock) must unlock even while a pre-exec dup fd is still open");
     }
 
     #[tokio::test]

@@ -536,12 +536,16 @@ async fn s8_competing_manual_owners_serialized_by_endpoint_lock() {
 
     // Wait for owner 1 to reach the publish barrier while holding its endpoint lock.
     let reached = barrier.clone();
-    let reach_task = tokio::task::spawn_blocking(move || reached.wait());
+    let mut reach_task = tokio::task::spawn_blocking(move || reached.wait());
     tokio::select! {
-        res = reach_task => {
+        res = &mut reach_task => {
             res.unwrap();
         }
         early = &mut t1 => {
+            // Release the blocking thread parked on `reached.wait()` so Tokio's
+            // BlockingPool shutdown never hangs and swallows the panic.
+            barrier.wait();
+            let _ = reach_task.await;
             panic!("owner 1 exited before reaching publish barrier: {early:?}");
         }
     }
@@ -660,12 +664,16 @@ async fn s8_incumbent_collision_barrier_per_primitive_arm() {
             // Wait until candidate reaches the barrier immediately before atomic publication.
             // Select against `candidate` so an unexpected early exit fails fast instead of hanging.
             let b_reach = barrier.clone();
-            let reach_task = tokio::task::spawn_blocking(move || b_reach.wait());
+            let mut reach_task = tokio::task::spawn_blocking(move || b_reach.wait());
             tokio::select! {
-                res = reach_task => {
+                res = &mut reach_task => {
                     res.unwrap();
                 }
                 early = &mut candidate => {
+                    // Release the blocking thread parked on `b_reach.wait()` so Tokio's
+                    // BlockingPool shutdown never hangs and swallows the panic.
+                    barrier.wait();
+                    let _ = reach_task.await;
                     panic!("candidate exited before reaching publish barrier ({arm_name}/{kind:?}): {early:?}");
                 }
             }
