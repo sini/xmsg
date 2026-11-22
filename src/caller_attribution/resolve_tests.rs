@@ -248,7 +248,10 @@ fn strict_reader_authority_query_error_is_not_parent_fallback() {
 #[test]
 fn strict_reader_unreadable_registry_is_not_parent_fallback() {
     let f = fixture();
-    file(&f, 300, "10", FIRST);
+    agy(&f, FIRST, 300, "10");
+    let parent = query(&f, 100, 900).unwrap();
+    assert_eq!(parent.principal, format!("{FIRST}@reader.node"));
+    assert_eq!(parent.stamp.source, "agy");
     std::fs::write(
         f.state.sessions_dirs[0].join("broken.json"),
         b"invalid fixture JSON",
