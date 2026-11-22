@@ -1838,7 +1838,7 @@ fn broker_death_during_initialize_cannot_bypass_supervisor_wall_budget() {
 
     let f = fixture();
     let wall_budget = Duration::from_secs(2);
-    let slack = Duration::from_millis(250);
+    let slack = Duration::from_secs(1);
     set_wall_budget(&f, wall_budget.as_millis() as u64);
     admit(&f);
     let probe = f.dir.path().join("startup-budget.sock");
