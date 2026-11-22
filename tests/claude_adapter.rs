@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs,
@@ -150,7 +151,26 @@ fn command(executable: &Path, home: &Path, wrong_runtime: &Path, wrong_db: &Path
         .env("XDG_CONFIG_HOME", home.join("changed-xdg-config"))
         .env("XMSG_DB_PATH", wrong_db)
         .env("XMSG_URL", "http://127.0.0.1:0");
+    if let Some(build_top) = std::env::var_os("NIX_BUILD_TOP") {
+        command.env("NIX_BUILD_TOP", build_top);
+    }
     command
+}
+
+fn verify_artifact(executable: &Path, artifact: &Value, test_hooks: bool) {
+    assert_eq!(
+        fs::canonicalize(executable).unwrap(),
+        fs::canonicalize(artifact["executable"].as_str().unwrap()).unwrap(),
+        "executed command is not the captured compiler artifact"
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(fs::read(executable).unwrap())),
+        artifact["sha256"].as_str().unwrap(),
+        "compiler artifact changed before or after execution"
+    );
+    let features = artifact["features"].as_array().unwrap();
+    assert_eq!(features.iter().any(|f| f == "test-hooks"), test_hooks);
+    assert_eq!(artifact["profile"]["test"], false);
 }
 
 #[test]
@@ -233,6 +253,11 @@ fn check_command_pins(original_runtime_unset: bool) {
         serde_json::from_slice(&fs::read(home.join(".claude.json")).unwrap()).unwrap();
     let mcp = &installed["mcpServers"]["xmsg"];
     let executable = PathBuf::from(mcp["command"].as_str().unwrap());
+    let provenance = std::env::var_os("XMSG_CLAUDE_COMMAND_PROVENANCE").map(|file| {
+        let receipt: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+        verify_artifact(&executable, &receipt["candidate"], true);
+        receipt
+    });
     let mut client = command(&executable, &home, runtime_b.path(), &wrong_db);
     for argument in mcp["args"].as_array().unwrap() {
         client.arg(argument.as_str().unwrap());
@@ -240,7 +265,8 @@ fn check_command_pins(original_runtime_unset: bool) {
     for (key, value) in mcp["env"].as_object().unwrap() {
         client.env(key, value.as_str().unwrap());
     }
-    let output=run(client,b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"list\",\"arguments\":{}}}\n");
+    let mcp_input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"list\",\"arguments\":{}}}\n";
+    let output = run(client, mcp_input);
     assert!(
         output.status.success(),
         "installed MCP command failed: status={} stderr={}",
@@ -290,6 +316,42 @@ fn check_command_pins(original_runtime_unset: bool) {
         "installed hook command did not perform its lifecycle operation"
     );
     assert!(events.iter().any(|(_, action)| action == "mcp_start"));
+    if let Some(receipt) = provenance {
+        verify_artifact(&executable, &receipt["candidate"], true);
+        if original_runtime_unset {
+            let release = PathBuf::from(receipt["release"]["executable"].as_str().unwrap());
+            verify_artifact(&release, &receipt["release"], false);
+            assert!(std::env::var_os("NIX_BUILD_TOP").is_some());
+            let tmp = fs::metadata(fs::canonicalize("/tmp").unwrap()).unwrap();
+            assert_eq!(tmp.uid(), 65534, "unsafe shared-tmp fixture is unavailable");
+            assert_ne!(tmp.mode() & 0o1000, 0);
+            let before = peers.events.lock().unwrap().len();
+            let mut release_command = command(&release, &home, runtime_b.path(), &wrong_db);
+            for argument in mcp["args"].as_array().unwrap() {
+                release_command.arg(argument.as_str().unwrap());
+            }
+            for (key, value) in mcp["env"].as_object().unwrap() {
+                release_command.env(key, value.as_str().unwrap());
+            }
+            let refused = run(release_command, mcp_input);
+            assert_eq!(
+                peers.events.lock().unwrap().len(),
+                before,
+                "release control reached an agent endpoint"
+            );
+            assert!(
+                !refused.status.success(),
+                "release control accepted unsafe shared tmp"
+            );
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains("UnsafeSharedTmp"),
+                "release control returned a different error: {}",
+                String::from_utf8_lossy(&refused.stderr)
+            );
+            verify_artifact(&release, &receipt["release"], false);
+            eprintln!("default-release: typed UnsafeSharedTmp refusal, zero agent operations");
+        }
+    }
 }
 
 #[test]
