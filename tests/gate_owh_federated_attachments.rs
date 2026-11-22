@@ -695,6 +695,80 @@ async fn undialable_leaf_origin_supplies_attachment_by_reverse_mailbox_query() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leaf_with_outbound_hub_receives_reply_to_own_send() {
+    let ia = Identity::new("leaf");
+    let ih = Identity::new("hub");
+    let ib = Identity::new("node-b");
+    let mut b = Node::new(
+        ib,
+        BOB,
+        "Bob",
+        json!({"peers":{"hub":ih.entry(9,&["send","reply","relayed"])}}),
+        &[],
+    )
+    .await;
+    let mut leaf_entry = ia.entry(9, &["send", "reply", "forward"]);
+    leaf_entry["leaf"] = true.into();
+    let mut hub = Node::new(
+        ih,
+        QUINN,
+        "Hub",
+        json!({"peers":{"leaf":leaf_entry,"node-b":b.identity.entry(b.fed_port,&["send","reply"])}}),
+        &[],
+    )
+    .await;
+    let mut route = hub.identity.entry(hub.fed_port, &["send", "reply"]);
+    route["dial"] = "outbound".into();
+    route["default_route"] = true.into();
+    let leaf = Node::new(
+        ia,
+        ALICE,
+        "Leaf",
+        json!({"peers":{"hub":route}}),
+        &["--leaf", "--leaf-principal", "demo"],
+    )
+    .await;
+    b.reload(json!({"peers":{"hub":hub.identity.entry(hub.fed_port,&["send","reply","relayed"])}}));
+    let mut leaf_entry = leaf.identity.entry(9, &["send", "reply", "forward"]);
+    leaf_entry["leaf"] = true.into();
+    hub.reload(
+        json!({"peers":{"leaf":leaf_entry,"node-b":b.identity.entry(b.fed_port,&["send","reply"])}}),
+    );
+    let sent = leaf
+        .agent(json!({"action":"send","to":"Bob@node-b","text":"outbound leaf ping"}))
+        .await;
+    assert_eq!(sent["status"], "ok", "leaf send: {sent}");
+    let id = sent["message_id"].as_str().unwrap();
+    b.wait_delivery(id).await;
+    let answer = b
+        .agent(json!({"action":"reply","message_id":id,"text":"outbound leaf pong"}))
+        .await;
+    assert_eq!(answer["status"], "ok", "reply via hub to leaf: {answer}");
+    let pushed = answer["reply"]["pushedMessageId"].as_str().unwrap();
+    let db = rusqlite::Connection::open(&leaf.db).unwrap();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if xmsg::storage::has_svc_message(&db, pushed).unwrap() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("leaf with dial:outbound hub must receive reply to own send");
+    let replies = leaf
+        .agent(json!({"action":"replies","message_id":id,"wait":0}))
+        .await;
+    assert_eq!(replies["replies"][0]["text"], "outbound leaf pong");
+    assert_eq!(
+        leaf.output
+            .line_count_containing("starting outbound link pull loop"),
+        0,
+        "leaf mode must not run competing outbound pull loop"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oversized_federation_reference_is_refused_before_storage() {
     let (a, b) = pair(&[]).await;
     let mut reference = a.stage(b"small file").await;
