@@ -10,7 +10,7 @@ import Status from '../../../components/Status.astro';
 The `xmsg` binary exposes `list`, `locate`, `watch`, `doctor`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
 `register`, `unregister`, `check-peers`, `enroll` (<Status id="xmsg.enroll-ca" />), `enroll-ca`, `harness` (<Status id="xmsg.harness-descriptors" />), and `observe-collector` (<Status id="fleet-observer.collector" />).
 
-```rust file=<rootDir>/src/main.rs#L21-L85
+```rust file=<rootDir>/src/main.rs#L53-L112
 ```
 
 ### Operator commands
@@ -307,7 +307,7 @@ enablement for each user are deployment configuration.
 
 Starts the local IPC and optional mTLS federation daemon:
 
-```rust file=<rootDir>/src/main.rs#L241-L402
+```rust file=<rootDir>/src/main.rs#L268-L437
 ```
 
 Planned (<Status id="xmsg.install-contract" />): in `--leaf` mode, `--leaf-register-sock`
@@ -366,7 +366,7 @@ denied to plugin connections and absent from TCP and `/fed`.
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L404-L429
+```rust file=<rootDir>/src/main.rs#L439-L464
 ```
 
 ### `xmsg register`
