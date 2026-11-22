@@ -1119,4 +1119,42 @@ mod tests {
         assert_eq!(unchanged.apply().unwrap_err(), Error::Conflict);
         assert_eq!(inventory(&request.account_home), before);
     }
+    #[test]
+    fn native_file_modes_are_private_and_preserve_stricter_input() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_root, request) = fixture();
+        let mcp = request.account_home.join(".claude.json");
+        std::fs::write(&mcp, b"{}").unwrap();
+        std::fs::set_permissions(&mcp, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let planned = plan(&request, Action::Install).unwrap();
+        let key = planned.ownership.set_id.clone();
+        planned.apply().unwrap();
+        assert_eq!(
+            std::fs::metadata(&mcp).unwrap().permissions().mode() & 0o777,
+            0o400,
+            "installer widened a stricter input mode"
+        );
+        for file in [
+            request.account_home.join(".claude/settings.json"),
+            request.account_home.join(".claude/skills/xmsg/SKILL.md"),
+            transaction::area(&request, &key).join("ownership.json"),
+        ] {
+            assert_eq!(
+                std::fs::metadata(file).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "native private file creation did not preserve0600"
+            );
+        }
+        plan(&request, Action::Uninstall).unwrap().apply().unwrap();
+        assert_eq!(std::fs::read(&mcp).unwrap(), b"{}");
+        assert_eq!(
+            std::fs::metadata(mcp).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            std::mem::size_of::<libc::mode_t>(),
+            std::mem::size_of::<libc::c_uint>()
+        );
+    }
 }
