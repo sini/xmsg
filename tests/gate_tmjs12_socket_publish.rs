@@ -527,21 +527,24 @@ async fn s8_competing_manual_owners_serialized_by_endpoint_lock() {
         .await
         .unwrap();
 
-    // Owner 2 (distinct state root) tries to acquire the manual endpoint lock and publish:
-    // MUST be refused at the endpoint lock BEFORE reaching publication (`M-S8d`)!
-    let ep2_err = EndpointLock::try_acquire(&sock, uid)
-        .expect_err("M-S8d: competing manual owner must be blocked by held endpoint lock");
-    assert!(
-        matches!(ep2_err, RuntimeLockError::EndpointLockHeld { .. }),
-        "M-S8d: expected EndpointLockHeld, got {ep2_err}"
-    );
+    // Owner 2 (distinct state root) tries to acquire the manual endpoint lock while owner 1
+    // is paused at the publish barrier. Capture the result and release the barrier BEFORE
+    // asserting so a mutant failure never leaves owner 1 parked at the barrier.
+    let ep2_res = EndpointLock::try_acquire(&sock, uid);
 
-    // Release owner 1 and confirm clean publication!
+    // Release owner 1 before asserting so tokio shutdown never hangs on a failed assertion.
     let release = barrier.clone();
     tokio::task::spawn_blocking(move || release.wait())
         .await
         .unwrap();
     let (res1, _st1, _ep1) = t1.await.unwrap();
+
+    let ep2_err =
+        ep2_res.expect_err("M-S8d: competing manual owner must be blocked by held endpoint lock");
+    assert!(
+        matches!(ep2_err, RuntimeLockError::EndpointLockHeld { .. }),
+        "M-S8d: expected EndpointLockHeld, got {ep2_err}"
+    );
     let (listener, _prim) = res1.expect("owner 1 must publish cleanly after release");
     let _client = StdUnixStream::connect(&sock).expect("connect to owner 1 socket");
     let _ = listener.accept().await.unwrap();
