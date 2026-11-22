@@ -7,7 +7,7 @@ import Status from '../../../components/Status.astro';
 
 ## Command-line interface (`src/main.rs`)
 
-The `xmsg` binary exposes `list`, `locate`, `watch`, `doctor`, `send`, `replies`, `show`, `service`, `serve`, `mcp`,
+The `xmsg` binary exposes `list`, `locate`, `watch`, `doctor`, `install`, `uninstall` (<Status id="xmsg.claude-install" />), `send`, `replies`, `show`, `service`, `serve`, `mcp`,
 `register`, `unregister`, `check-peers`, `enroll` (<Status id="xmsg.enroll-ca" />), `enroll-ca`, `harness` (<Status id="xmsg.harness-descriptors" />), and `observe-collector` (<Status id="fleet-observer.collector" />).
 
 ```rust file=<rootDir>/src/main.rs#L53-L112
@@ -366,7 +366,11 @@ denied to plugin connections and absent from TCP and `/fed`.
 
 Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 
-```rust file=<rootDir>/src/main.rs#L446-L471
+`--db-path` (or `XMSG_DB_PATH`) selects the daemon's state-derived endpoints.
+An explicit CLI database pin wins over the environment. Explicit socket options
+retain precedence over derived endpoints.
+
+```rust file=<rootDir>/src/main.rs#L454-L482
 ```
 
 ### `xmsg register`
@@ -374,7 +378,12 @@ Starts the stdio Model Context Protocol (MCP) server for agent harnesses:
 Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/antigravity/),
 [Claude Code](/harnesses/claude-code/), and [Codex](/harnesses/codex/):
 
-```rust file=<rootDir>/src/main.rs#L151-L239
+`xmsg register claude --hook --db-path PATH` also accepts `XMSG_DB_PATH` and uses
+the shared endpoint resolver. An explicit `--sock` / `XMSG_AGENT_SOCK` remains the
+agent endpoint override. The standalone [Claude adapter](/reference/claude-install/)
+pins these commands to the selected installation without invoking Claude.
+
+```rust file=<rootDir>/src/main.rs#L189-L247
 ```
 
 ### `xmsg check-peers`

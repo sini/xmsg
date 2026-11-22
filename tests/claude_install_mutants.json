@@ -1,0 +1,90 @@
+[
+  {
+    "id": "s1-hook-ownership",
+    "oracle": "M-S1",
+    "file": "src/install/claude.rs",
+    "needle": "                new.entries.push(OwnedEntry {\n                    field,\n                    selector,\n                    value: wanted,\n                    hash: raw_hash(&d, found.ok_or(Error::Conflict)?),\n                });",
+    "replacement": "                let _ = (field, selector, wanted, found);",
+    "test": "applied_claude_hooks_are_owned_and_removed_without_user_data_loss",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "written hook lost its ownership record and survived uninstall"
+  },
+  {
+    "id": "s2-eager-preparation",
+    "oracle": "M-S2",
+    "file": "src/install/claude.rs",
+    "needle": "pub(super) fn plan(request: &Request, action: Action) -> Result<Plan, Error> {\n",
+    "replacement": "pub(super) fn plan(request: &Request, action: Action) -> Result<Plan, Error> {\n    request.prepare_roots()?;\n",
+    "test": "fresh_claude_preview_has_no_filesystem_effects",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "preview created adapter or transaction files"
+  },
+  {
+    "id": "s3-whole-file-reencoding",
+    "oracle": "M-S3",
+    "file": "src/install/claude.rs",
+    "needle": "fn set(bytes: &[u8], parent: &[&str], key: &str, new: &Value) -> Result<Vec<u8>, Error> {\n    let d = document(bytes)?;\n    let node = at(&d, parent)?.ok_or(Error::Unsupported)?;\n    match d\n        .set_member(node, key, new)\n        .map_err(|_| Error::Unsupported)?\n    {\n        Some(edit) => d.render(&[edit]).map_err(|_| Error::InvalidJson),\n        None => Ok(bytes.to_vec()),\n    }\n}",
+    "replacement": "fn set(bytes: &[u8], parent: &[&str], key: &str, new: &Value) -> Result<Vec<u8>, Error> {\n    let d = document(bytes)?;\n    let node = at(&d, parent)?.ok_or(Error::Unsupported)?;\n    match d\n        .set_member(node, key, new)\n        .map_err(|_| Error::Unsupported)?\n    {\n        Some(edit) => d.render(&[edit]).map(|bytes|serde_json::to_vec(&serde_json::from_slice::<Value>(&bytes).unwrap()).unwrap()).map_err(|_|Error::InvalidJson),\n        None => Ok(bytes.to_vec()),\n    }\n}",
+    "test": "dirty_neighbors_keep_exact_syntax_order_and_permissions",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "whole-file replacement changed unowned syntax"
+  },
+  {
+    "id": "s3-neighbor-output",
+    "oracle": "M-S3b",
+    "file": "src/install/mod.rs",
+    "needle": "self.report.render(json)",
+    "replacement": "format!(\"{}{}\",self.report.render(json),self.targets.iter().find_map(|target|target.before.as_ref()).map(|snapshot|String::from_utf8_lossy(&snapshot.bytes)).unwrap_or_default())",
+    "test": "dirty_neighbors_keep_exact_syntax_order_and_permissions",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "install report leaked neighboring value"
+  },
+  {
+    "id": "s3-state-keyed-coordinator",
+    "oracle": "M-S3c",
+    "file": "src/install/transaction.rs",
+    "needle": "pub(super) fn coordinator(request: &Request) -> PathBuf {\n    request\n        .account_home\n        .join(\".local/state/xmsg/claude-coordinator\")\n}",
+    "replacement": "pub(super) fn coordinator(request: &Request) -> PathBuf {\n    request\n        .state_root\n        .join(\"claude-coordinator\")\n}",
+    "test": "actual_inflight_apply_excludes_another_state_before_publication",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "competing apply published while the first transaction held the account lock"
+  },
+  {
+    "id": "s4-missing-durable-intent",
+    "oracle": "M-S4",
+    "file": "src/install/transaction.rs",
+    "needle": "fn save_intent(journal: &Path, intent: &Intent, uid: u32) -> Result<(), Error> {\n    atomic(\n        journal,\n        &serde_json::to_vec(intent).map_err(|_| Error::Io)?,\n        uid,\n    )\n}",
+    "replacement": "fn save_intent(journal:&Path,intent:&Intent,uid:u32)->Result<(),Error>{let _=(journal,intent,uid);Ok(())}\n",
+    "test": "interrupted_apply_has_durable_intent_and_explicit_recovery",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "partial publication lacks durable recovery state"
+  },
+  {
+    "id": "s6-ignore-owned-fingerprint",
+    "oracle": "M-S6",
+    "file": "src/install/claude.rs",
+    "needle": "current.is_none_or(|node| raw_hash(&d, node) != entry.hash)",
+    "replacement": "current.is_none()",
+    "test": "edited_owned_entry_is_preserved_with_redacted_repeatable_conflict",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "uninstall removed an edited owned entry"
+  },
+  {
+    "id": "s6-conflict-output",
+    "oracle": "M-S6b",
+    "file": "src/install/mod.rs",
+    "needle": "self.report.render(json)",
+    "replacement": "format!(\"{}{}\",self.report.render(json),self.targets.iter().find_map(|target|target.before.as_ref()).map(|snapshot|String::from_utf8_lossy(&snapshot.bytes)).unwrap_or_default())",
+    "test": "edited_owned_entry_is_preserved_with_redacted_repeatable_conflict",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "uninstall conflict report leaked neighboring value"
+  }
+]

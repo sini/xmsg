@@ -19,6 +19,13 @@ pub fn inspect(request: &Request) -> Result<Observation, Error> {
     if let Ok(entries) = std::fs::read_dir(config.join("sessions")) {
         for entry in entries {
             let entry = entry.map_err(|_| Error::Io)?;
+            if !entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                continue;
+            }
             let Some(snapshot) = super::transaction::read(&entry.path(), request.uid)? else {
                 continue;
             };

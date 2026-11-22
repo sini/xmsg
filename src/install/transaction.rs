@@ -573,19 +573,25 @@ fn recover(request: &Request, key: &str, expected_targets: &[PathBuf]) -> Result
     unlink(&journal)
 }
 #[cfg(test)]
-thread_local! {pub(super) static AFTER_PUBLICATION:std::cell::RefCell<Option<Box<dyn FnMut(usize)>>>=const{std::cell::RefCell::new(None)};}
+type PublicationHook = Option<Box<dyn FnMut(usize)>>;
+#[cfg(test)]
+thread_local! {pub(super) static AFTER_PUBLICATION:std::cell::RefCell<PublicationHook>=const{std::cell::RefCell::new(None)};}
 #[cfg(test)]
 thread_local! {pub(super) static BEFORE_PUBLICATION:std::cell::RefCell<Option<Box<dyn FnMut()>>>=const{std::cell::RefCell::new(None)};}
 
 pub(super) fn apply(mut plan: Plan) -> Result<Report, Error> {
+    let observed = super::claude_observe::inspect(&plan.request)?;
+    if observed.writers == "observed" {
+        return Err(Error::WriterObserved);
+    }
+    if observed.managed_policy == "conflict" {
+        return Err(Error::Conflict);
+    }
     let file_changes = plan.targets.iter().any(|target| {
         target.before.as_ref().map(|s| s.bytes.as_slice()) != target.after.as_deref()
     });
     if !file_changes && !plan.metadata_change && !plan.pending {
         return Ok(plan.report);
-    }
-    if super::claude_observe::inspect(&plan.request)?.writers == "observed" {
-        return Err(Error::WriterObserved);
     }
     let _lock = lock(&plan.request)?;
     overlap(&plan)?;
