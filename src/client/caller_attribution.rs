@@ -559,6 +559,11 @@ fn send(
     }
     stream.shutdown(std::net::Shutdown::Write).map_err(failure)
 }
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static NEXT_CONTROL_LEN: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 fn receive(
     stream: &UnixStream,
     marker: u8,
@@ -583,6 +588,10 @@ fn receive(
             message.msg_control = control.as_mut_ptr().cast();
             message.msg_controllen =
                 unsafe { libc::CMSG_SPACE((2 * std::mem::size_of::<RawFd>()) as _) } as _;
+            #[cfg(all(test, target_os = "linux"))]
+            if let Some(length) = NEXT_CONTROL_LEN.get() {
+                message.msg_controllen = length;
+            }
             #[cfg(target_os = "linux")]
             let flags = libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC;
             #[cfg(not(target_os = "linux"))]
@@ -591,6 +600,8 @@ fn receive(
             if count < 0 {
                 return Err(io::Error::last_os_error());
             }
+            #[cfg(all(test, target_os = "linux"))]
+            NEXT_CONTROL_LEN.take();
             let mut received = Vec::new();
             let mut malformed = false;
             unsafe {
@@ -1075,6 +1086,34 @@ mod tests {
             assert!(
                 matches!(peer.read(&mut [0]), Ok(0)),
                 "truncated rights leaked descriptor"
+            );
+        }
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let (first, mut first_peer) = UnixStream::pair().unwrap();
+        let (second, mut second_peer) = UnixStream::pair().unwrap();
+        extra_fd_frame(
+            &client,
+            &[first.as_raw_fd(), second.as_raw_fd()],
+            &frame(QUERY_MARKER, &query()).unwrap(),
+        );
+        drop(first);
+        drop(second);
+        let one_right = unsafe { libc::CMSG_LEN(std::mem::size_of::<RawFd>() as _) } as usize;
+        NEXT_CONTROL_LEN.set(Some(one_right));
+        assert!(
+            matches!(
+                receive_query(&server, Instant::now() + Duration::from_secs(2)),
+                Err(FailureReason::Ancillary)
+            ),
+            "control truncation was accepted with only one visible descriptor"
+        );
+        for peer in [&mut first_peer, &mut second_peer] {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            wait(peer.as_raw_fd(), libc::POLLIN, deadline).unwrap();
+            assert!(
+                matches!(peer.read(&mut [0]), Ok(0)),
+                "truncated rights leaked a descriptor"
             );
         }
     }

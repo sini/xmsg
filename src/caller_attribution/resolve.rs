@@ -456,6 +456,10 @@ pub fn resolve(
             return Err(FailureReason::Changed);
         }
         expected_start = Some(parent.start);
+        #[cfg(test)]
+        if let Some(barrier) = NEXT_LINEAGE_STEP.with(|cell| cell.borrow_mut().take()) {
+            barrier();
+        }
         current = step.parent_pid;
         previous_steps.push(step);
     }
@@ -468,5 +472,6 @@ mod tests;
 
 #[cfg(test)]
 thread_local! {
+    static NEXT_LINEAGE_STEP:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};
     pub(crate) static REVALIDATION_BARRIER:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};
 }

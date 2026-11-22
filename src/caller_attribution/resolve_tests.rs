@@ -195,10 +195,41 @@ fn strict_reader_agy_without_credentials_remains_in_matched_set() {
     assert_eq!(answer.stamp.source, "agy");
 }
 #[test]
+fn strict_reader_refuses_a_parent_incarnation_change_between_steps() {
+    let f = fixture();
+    agy(&f, FIRST, 200, "21");
+    let proc_root = f.proc_root.clone();
+    NEXT_LINEAGE_STEP.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(move || stat(&proc_root, 200, 300, 21)));
+    });
+    assert_eq!(
+        query(&f, 100, 900).err(),
+        Some(FailureReason::Changed),
+        "a recycled parent published authority during the lineage walk"
+    );
+    let updated = query(&f, 100, 900).unwrap();
+    assert_eq!(updated.principal, format!("{FIRST}@reader.node"));
+    assert_eq!(updated.stamp.matched_start, "21");
+}
+
+#[test]
 fn strict_reader_competing_identities_never_select_the_first() {
     let f = fixture();
     agy(&f, FIRST, 100, "30");
     agy(&f, SECOND, 100, "30");
+    let step = strict_process_link(&f.proc_root, 100).unwrap();
+    assert_eq!(
+        capture_step(
+            &f.state,
+            &step,
+            100,
+            None,
+            Instant::now() + Duration::from_secs(2)
+        )
+        .err(),
+        Some(FailureReason::Ambiguous),
+        "the capture must reject competing registrations before the walk uses them"
+    );
     let answer = query(&f, 100, 900);
     assert_eq!(
         answer.err(),

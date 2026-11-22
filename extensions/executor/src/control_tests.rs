@@ -379,6 +379,14 @@ fn bridge_wrong_live_peer_has_no_admission_even_with_valid_grant() {
     let _ = peer.0.wait();
     assert_eq!(rows, 0, "wrong live peer reached durable admission");
     assert_eq!(reply["code"], "attestation_binding");
+
+    let (reply, rows) = run_scripted_bridge(|reply| {
+        if let xmsg::client::caller_attribution::Reply::Ok { peer_uid, .. } = reply {
+            *peer_uid ^= 1;
+        }
+    });
+    assert_eq!(rows, 0, "wrong reply UID reached durable admission");
+    assert_eq!(reply["code"], "attestation_binding");
 }
 fn send(id: &str) -> ControlRequest {
     ControlRequest {
