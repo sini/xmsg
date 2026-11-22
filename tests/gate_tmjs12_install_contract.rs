@@ -144,6 +144,34 @@ fn wait_for_socket(path: &Path, child: &mut Child, timeout: Duration) {
     panic!("timed out waiting for socket {}", path.display());
 }
 
+/// Runs a command expected to fail/refuse quickly; kills it and returns `(false, ...)` if it
+/// stays alive past `timeout` (e.g. when a mutant bypasses a startup refusal and starts serving).
+fn run_expect_refusal_bounded(cmd: &mut Command, timeout: Duration) -> (bool, String) {
+    let mut child = ChildGuard(
+        cmd.stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn command expected to refuse"),
+    );
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut s) = child.0.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
+            return (!status.success(), stderr);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let _ = child.0.kill();
+    let _ = child.0.wait();
+    (
+        false,
+        format!("timed out after {timeout:?}: daemon stayed alive instead of refusing"),
+    )
+}
+
 // ===========================================================================
 // S1: Entry-point agreement, CLI/env/XDG precedence, HOME mismatch,
 //     macOS shell XDG absent from LaunchAgent service environment (M-S1b)
@@ -1441,7 +1469,8 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
     }
     let v0_bytes_before = fs::read(&v0_db).unwrap();
 
-    let serve_v0 = Command::new(BIN)
+    let mut serve_v0_cmd = Command::new(BIN);
+    serve_v0_cmd
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &run_dir)
@@ -1455,14 +1484,13 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
             run_dir.join("agent.sock").to_str().unwrap(),
             "--register-sock",
             run_dir.join("register.sock").to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
+        ]);
+    let (serve_v0_refused, serve_v0_err) =
+        run_expect_refusal_bounded(&mut serve_v0_cmd, Duration::from_secs(5));
     assert!(
-        !serve_v0.status.success(),
-        "M-S5: serve must refuse populated v0 ee1b6ca DB"
+        serve_v0_refused,
+        "M-S5: serve must refuse populated v0 ee1b6ca DB: {serve_v0_err}"
     );
-    let serve_v0_err = String::from_utf8_lossy(&serve_v0.stderr);
     assert!(
         serve_v0_err.contains("refusing to open unversioned"),
         "M-S5: serve must emit schema refusal, got: {serve_v0_err}"
@@ -1554,7 +1582,8 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
     let nm1_before = fs::read(&n_minus_1_db).unwrap();
     let sidecar_before = fs::read(&sidecar).unwrap();
 
-    let serve_nm1 = Command::new(BIN)
+    let mut serve_nm1_cmd = Command::new(BIN);
+    serve_nm1_cmd
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &run_dir)
@@ -1568,10 +1597,11 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
             run_dir.join("agent.sock").to_str().unwrap(),
             "--register-sock",
             run_dir.join("register.sock").to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    let ca_nm1 = Command::new(BIN)
+        ]);
+    let (serve_nm1_refused, serve_nm1_err) =
+        run_expect_refusal_bounded(&mut serve_nm1_cmd, Duration::from_secs(5));
+    let mut ca_nm1_cmd = Command::new(BIN);
+    ca_nm1_cmd
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &run_dir)
@@ -1584,16 +1614,18 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
             "--db-path",
             n_minus_1_db.to_str().unwrap(),
             "list",
-        ])
-        .output()
-        .unwrap();
+        ]);
+    let (ca_nm1_refused, ca_nm1_err) =
+        run_expect_refusal_bounded(&mut ca_nm1_cmd, Duration::from_secs(5));
 
-    for (label, out) in [("serve", serve_nm1), ("enroll-ca", ca_nm1)] {
+    for (label, refused, err_txt) in [
+        ("serve", serve_nm1_refused, serve_nm1_err),
+        ("enroll-ca", ca_nm1_refused, ca_nm1_err),
+    ] {
         assert!(
-            !out.status.success(),
-            "S5: {label} must refuse schema N-1 DB without tested migration"
+            refused,
+            "S5: {label} must refuse schema N-1 DB without tested migration: {err_txt}"
         );
-        let err_txt = String::from_utf8_lossy(&out.stderr);
         assert!(
             err_txt.contains("schema version") && err_txt.contains("existing data preserved"),
             "S5: {label} must emit schema preservation refusal, got: {err_txt}"
