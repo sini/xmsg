@@ -740,10 +740,40 @@ async fn leaf_with_outbound_hub_receives_reply_to_own_send() {
     assert_eq!(sent["status"], "ok", "leaf send: {sent}");
     let id = sent["message_id"].as_str().unwrap();
     b.wait_delivery(id).await;
+    let t_wait = std::time::Instant::now();
+    let wait_replies = tokio::spawn({
+        let agent = leaf.agent.clone();
+        let id = id.to_string();
+        async move {
+            tokio::time::timeout(WAIT, async {
+                let mut stream = UnixStream::connect(&agent).await.unwrap();
+                stream
+                    .write_all(
+                        format!("{}\n", json!({"action":"replies","message_id":id,"wait":5}))
+                            .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(stream).read_line(&mut line).await.unwrap();
+                serde_json::from_str::<Value>(&line).unwrap()
+            })
+            .await
+            .expect("replies --wait timeout")
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let answer = b
         .agent(json!({"action":"reply","message_id":id,"text":"outbound leaf pong"}))
         .await;
     assert_eq!(answer["status"], "ok", "reply via hub to leaf: {answer}");
+    let replies = wait_replies.await.unwrap();
+    let waited = t_wait.elapsed();
+    assert!(
+        waited < Duration::from_secs(2),
+        "replies --wait must wake immediately on leaf-pulled reply, took {waited:?}"
+    );
+    assert_eq!(replies["replies"][0]["text"], "outbound leaf pong");
     let pushed = answer["reply"]["pushedMessageId"].as_str().unwrap();
     let db = rusqlite::Connection::open(&leaf.db).unwrap();
     tokio::time::timeout(WAIT, async {
@@ -756,10 +786,6 @@ async fn leaf_with_outbound_hub_receives_reply_to_own_send() {
     })
     .await
     .expect("leaf with dial:outbound hub must receive reply to own send");
-    let replies = leaf
-        .agent(json!({"action":"replies","message_id":id,"wait":0}))
-        .await;
-    assert_eq!(replies["replies"][0]["text"], "outbound leaf pong");
     assert_eq!(
         leaf.output
             .line_count_containing("starting outbound link pull loop"),
