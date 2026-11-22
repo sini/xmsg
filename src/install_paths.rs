@@ -686,6 +686,171 @@ pub fn default_logs_dir(env: &ResolveEnv<'_>, state_root: &Path) -> Result<PathB
     })
 }
 
+/// Pure, strictly read-only planning output from [`plan_install_roots`].
+///
+/// Computes the exact durable state/config/log roots and any explicitly pinned endpoints using
+/// the same precedence and validation rules as [`resolve_install`], without requiring `state_root`
+/// to exist on disk and without creating any files or directories.
+#[derive(Debug, Clone)]
+pub struct PlannedInstallRoots {
+    pub platform: Platform,
+    pub leaf: bool,
+    pub state_root: PathBuf,
+    pub state_root_explicit: bool,
+    pub config_root: Option<PathBuf>,
+    pub logs_dir: Option<PathBuf>,
+    pub staging_cache_dir: PathBuf,
+    pub db_path: PathBuf,
+    pub db_explicit: bool,
+    pub enroll_state_dir: PathBuf,
+    pub enroll_explicit: bool,
+    pub peers_file: Option<PathBuf>,
+    pub peers_explicit: bool,
+    pub http_sock: Option<PathBuf>,
+    pub agent_sock: Option<PathBuf>,
+    pub register_sock: Option<PathBuf>,
+    pub leaf_register_sock: Option<PathBuf>,
+    /// Populated read-only when `state_root` already exists (or all enabled endpoints are pinned);
+    /// `None` on a fresh account where `state_root` does not yet exist and at least one enabled
+    /// endpoint is unpinned.
+    pub resolved_if_present: Option<ResolvedInstall>,
+}
+
+/// Pure planning seam for read-only install previews (e.g. `xmsg install claude` without `--apply`).
+///
+/// Uses the exact same CLI > `XMSG_*` > absolute `XDG_*` > platform default precedence, account
+/// home validation, optional legacy component guard, leaf registration alias, and explicit socket
+/// path validation as [`resolve_install`], while never creating directories or requiring
+/// `state_root` to already exist on disk.
+pub fn plan_install_roots(
+    req: &ResolveRequest,
+    env: &ResolveEnv<'_>,
+) -> Result<PlannedInstallRoots, InstallError> {
+    let (db_path, state_root, db_explicit) = match &req.db_path {
+        Some(raw) => {
+            let expanded = expand_explicit_path(raw, env)?;
+            let parent = expanded
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .ok_or_else(|| InstallError::MissingParent {
+                    parent: PathBuf::new(),
+                    target: expanded.clone(),
+                })?
+                .to_path_buf();
+            (expanded, parent, true)
+        }
+        None => {
+            let sr = default_state_root(env)?;
+            (sr.join("xmsg.db"), sr, false)
+        }
+    };
+
+    let (enroll_state_dir, enroll_explicit) = match &req.enroll_state {
+        Some(raw) => (expand_explicit_path(raw, env)?, true),
+        None => (state_root.join("enroll"), false),
+    };
+    let (peers_file, peers_explicit) = match &req.peers_file {
+        Some(raw) => (Some(expand_explicit_path(raw, env)?), true),
+        None => (None, false),
+    };
+
+    let config_root = default_config_root(env).ok();
+    let logs_dir = default_logs_dir(env, &state_root).ok();
+
+    if req.enforce_legacy_guard {
+        let conflicts = check_legacy_components_raw(
+            &db_path,
+            db_explicit,
+            &enroll_state_dir,
+            enroll_explicit,
+            peers_file.as_deref(),
+            peers_explicit,
+            env,
+            &LegacyInventory::default(),
+        )?;
+        if !conflicts.is_empty() {
+            let summary = format_legacy_conflicts(&conflicts);
+            return Err(InstallError::LegacyConflict { summary, conflicts });
+        }
+    }
+
+    let validate_pin = |pin: Option<PathBuf>| -> Result<Option<PathBuf>, InstallError> {
+        if let Some(ref p) = pin {
+            if let Ok(meta) = fs::symlink_metadata(p) {
+                if meta.file_type().is_symlink() {
+                    return Err(InstallError::SymlinkNotAllowed { path: p.clone() });
+                }
+            }
+            validate_socket_path(p)?;
+        }
+        Ok(pin)
+    };
+
+    let http_sock = validate_pin(if req.leaf {
+        None
+    } else {
+        req.http_sock
+            .as_deref()
+            .map(|p| expand_explicit_path(p, env))
+            .transpose()?
+    })?;
+    let agent_sock = validate_pin(
+        req.agent_sock
+            .as_deref()
+            .map(|p| expand_explicit_path(p, env))
+            .transpose()?,
+    )?;
+    let register_sock = validate_pin(if req.leaf {
+        None
+    } else {
+        req.register_sock
+            .as_deref()
+            .map(|p| expand_explicit_path(p, env))
+            .transpose()?
+    })?;
+    let leaf_register_sock = validate_pin(if req.leaf {
+        req.leaf_register_sock
+            .as_deref()
+            .or(req.register_sock.as_deref())
+            .map(|p| expand_explicit_path(p, env))
+            .transpose()?
+    } else {
+        None
+    })?;
+
+    let ro_req = ResolveRequest {
+        writable: false,
+        ..req.clone()
+    };
+    let resolved_if_present = match resolve_install(&ro_req, env) {
+        Ok(r) => Some(r),
+        Err(InstallError::MissingStateRoot { .. }) => None,
+        Err(err) => return Err(err),
+    };
+
+    let staging_cache_dir = state_root.join("staging-cache");
+    Ok(PlannedInstallRoots {
+        platform: env.platform,
+        leaf: req.leaf,
+        state_root,
+        state_root_explicit: db_explicit,
+        config_root,
+        logs_dir,
+        staging_cache_dir,
+        db_path,
+        db_explicit,
+        enroll_state_dir,
+        enroll_explicit,
+        peers_file,
+        peers_explicit,
+        http_sock,
+        agent_sock,
+        register_sock,
+        leaf_register_sock,
+        resolved_if_present,
+    })
+}
+
 /// Resolves the complete installation state and enabled Unix endpoint set for a given request.
 /// Read-only callers (`writable = false`) never create directories or files.
 pub fn resolve_install(
@@ -1541,6 +1706,61 @@ mod tests {
         assert!(
             conflicts_mac.is_empty(),
             "macOS coordinator-only under old root must start"
+        );
+    }
+
+    #[test]
+    fn plan_install_roots_is_pure_and_creates_nothing_on_fresh_account() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("fresh-home");
+        fs::create_dir_all(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let lookup = FixtureHomeLookup(Some(home.clone()));
+        let mut env = make_env(&lookup, Platform::MacOs, Some(&home));
+        let xdg_state = tmp.path().join("custom-xdg-state");
+        env.xdg_state_home = Some(xdg_state.as_os_str().to_os_string());
+
+        let req = ResolveRequest {
+            writable: false,
+            enforce_legacy_guard: true,
+            ..Default::default()
+        };
+        // Read-only resolve_install refuses missing state root, whereas plan_install_roots
+        // computes the planned roots without creating any directory or file.
+        assert!(matches!(
+            resolve_install(&req, &env),
+            Err(InstallError::MissingStateRoot { .. })
+        ));
+        let planned = plan_install_roots(&req, &env).unwrap();
+        assert_eq!(planned.state_root, xdg_state.join("xmsg"));
+        assert_eq!(planned.db_path, xdg_state.join("xmsg/xmsg.db"));
+        assert!(planned.resolved_if_present.is_none());
+        assert!(
+            !xdg_state.exists(),
+            "plan_install_roots must have zero filesystem effects on a fresh account"
+        );
+        assert!(
+            !home.join("Library").exists(),
+            "plan_install_roots must not create Library dirs"
+        );
+
+        // Once the state root exists on disk, resolved_if_present populates read-only and matches
+        // resolve_install identically.
+        fs::create_dir_all(&planned.state_root).unwrap();
+        fs::set_permissions(&planned.state_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let planned2 = plan_install_roots(&req, &env).unwrap();
+        let resolved = resolve_install(&req, &env).unwrap();
+        assert_eq!(
+            planned2
+                .resolved_if_present
+                .as_ref()
+                .unwrap()
+                .http_sock
+                .as_ref()
+                .unwrap()
+                .path,
+            resolved.http_sock.as_ref().unwrap().path
         );
     }
 }
