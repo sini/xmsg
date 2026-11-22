@@ -7721,19 +7721,21 @@ impl CredentialReloader {
                 *self.file_hashes.lock().unwrap_or_else(|e| e.into_inner()) = current_hashes;
                 new_peers_map.log_ambiguous_alias_classes();
 
-                // Reconcile outbound pull loops
+                // Reconcile outbound pull loops (non-leaf nodes; `--leaf` runs `run_leaf_inbox_task`)
                 if let Some(ref fs) = self.fed_state {
-                    let mut active = self.active_pull_loops.lock().unwrap();
-                    for (peer_name, peer_cfg) in new_peers_map.iter() {
-                        if peer_cfg.is_outbound() && !active.contains(peer_name) {
-                            active.insert(peer_name.clone());
-                            let fs_clone = fs.clone();
-                            let peer_clone = peer_name.clone();
-                            let active_clone = self.active_pull_loops.clone();
-                            tokio::spawn(async move {
-                                run_outbound_peer_pull_loop(fs_clone, peer_clone.clone()).await;
-                                active_clone.lock().unwrap().remove(&peer_clone);
-                            });
+                    if fs.leaf_principal.is_none() {
+                        let mut active = self.active_pull_loops.lock().unwrap();
+                        for (peer_name, peer_cfg) in new_peers_map.iter() {
+                            if peer_cfg.is_outbound() && !active.contains(peer_name) {
+                                active.insert(peer_name.clone());
+                                let fs_clone = fs.clone();
+                                let peer_clone = peer_name.clone();
+                                let active_clone = self.active_pull_loops.clone();
+                                tokio::spawn(async move {
+                                    run_outbound_peer_pull_loop(fs_clone, peer_clone.clone()).await;
+                                    active_clone.lock().unwrap().remove(&peer_clone);
+                                });
+                            }
                         }
                     }
                 }
