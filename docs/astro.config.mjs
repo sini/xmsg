@@ -133,6 +133,7 @@ export default defineConfig({
 					label: 'CLI & API Reference',
 					items: [
 						{ label: 'CLI & MCP Server', slug: 'reference/cli-and-mcp' },
+						{ label: 'Claude Adapter Installation', slug: 'reference/claude-install' },
 						{ label: 'HTTP API & Unix Sockets', slug: 'reference/http-and-sockets' },
 						{ label: 'Daemon Protocol & Rust Client', slug: 'reference/service-client' },
 						{ label: 'Executor Contracts (planned)', slug: 'reference/executor-contracts' },

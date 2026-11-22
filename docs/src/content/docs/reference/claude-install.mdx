@@ -1,0 +1,75 @@
+---
+title: Claude adapter installation
+description: Preview and apply reversible user-scope Claude Code configuration.
+---
+
+import Status from '../../../components/Status.astro';
+
+<Status id="xmsg.claude-install" />
+
+`xmsg install claude` configures the user-scope `mcpServers.xmsg` entry,
+the xmsg `PreToolUse`, `PostToolUse`, `SubagentStart` and `SubagentStop` hooks,
+and the xmsg skill. It does not install the binary, start a service, invoke Claude,
+grant additional tool permissions or change project, local or organization settings.
+Native fresh-account Claude discovery is a separate staging check.
+
+```bash
+xmsg install claude
+xmsg install claude --dry-run --json
+# Quit Claude and stop every other configuration writer before applying.
+xmsg install claude --apply
+```
+
+Preview is the default. It creates no directories, lock files, backups or metadata.
+`--dry-run` follows the same read-only path and cannot be combined with `--apply`.
+Plans, diffs and refusals contain managed field names and operation names, not paths,
+configuration values or neighboring entries.
+
+| Option | Meaning |
+| --- | --- |
+| `--apply` | Explicitly write the planned changes or perform pending recovery. |
+| `--dry-run` | Preview only. |
+| `--json` | Print an allowlisted JSON plan or result. Parsed-command refusals also use JSON. |
+| `--db-path` / `XMSG_DB_PATH` | Select the same state root as the daemon. |
+| `--agent-sock`, `--http-sock`, `--register-sock` | Preserve corresponding explicit endpoint pins and their documented `XMSG_*` settings. |
+| `--enroll-state`, `--peers-file` | Preserve compatible selections while checking the shared installation contract. |
+
+Installed commands use this executable's absolute path, the planned database path,
+explicit socket pins and the selected XDG roots. Their registration does not change
+merely because the state directory becomes present after installation. CLI flags
+retain precedence over environment settings. See the [daemon path contract](/reference/cli-and-mcp/#xmsg-serve).
+
+The supported standalone layout is `~/.claude.json`, `~/.claude/settings.json`
+and `~/.claude/skills/xmsg/SKILL.md`, under the verified account home.
+A set `CLAUDE_CONFIG_DIR` is refused until its layout is qualified. Existing
+[Home Manager configuration](/operations/nixos-and-home-manager/) remains supported
+through its own module; the standalone adapter refuses symlinked targets.
+
+Stop **all** writers to these targets before apply or recovery, including Claude,
+other entry points and configuration-sync tools. A positively observed writer is
+refused. An unknown observation is not proof that writers are stopped. Managed
+policy conflicts that the adapter observes are refused; OS and remote policy, and
+whether a running session loaded the hooks, can remain unknown. Higher-precedence
+project or local entries can still shadow user-scope MCP configuration.
+
+The adapter preserves unrelated JSON bytes and ordering, rejects duplicate keys,
+and refuses incompatible or changed inputs. Identical unowned entries are reused
+without becoming owned. Repeat unchanged apply leaves backups and ownership metadata
+unchanged.
+
+Apply uses the account-private `~/.local/state/xmsg/claude-coordinator`, independent
+of XDG and database overrides. It records a durable intent and private backups before
+publishing replacements, then commits ownership last. A reference is retained under
+the selected state's `install/claude/`. This is recovery across files, not cross-file
+atomicity. Preview and doctor show pending recovery without performing it. Explicit
+apply restores matching transaction states or recognizes a completed commit; changed
+bytes and backups are preserved on conflict.
+
+```bash
+xmsg uninstall claude
+xmsg uninstall claude --apply
+```
+
+Uninstall removes only unchanged owned members and skill files. It preserves edited
+entries, identical unowned entries, user additions, daemon state, credentials, logs
+and backups. Conflicts produce a redacted non-success result.

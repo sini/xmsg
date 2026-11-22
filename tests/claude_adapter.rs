@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     os::{
         fd::AsRawFd,
         unix::{

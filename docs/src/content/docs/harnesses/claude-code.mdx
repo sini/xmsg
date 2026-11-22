@@ -84,6 +84,15 @@ events to `agent.sock`. Thus each subagent gets a delegated sub-address (`<P>/<n
 
 ## Manual setup without Home Manager
 
+<Status id="xmsg.claude-install" />
+
+For the standard user-scope layout, preview `xmsg install claude`, then quit Claude
+and other configuration writers before `xmsg install claude --apply`. The adapter
+preserves unrelated settings and does not add tool permissions. Use
+`xmsg uninstall claude` to preview removal of unchanged owned entries. See the
+[adapter reference](/reference/claude-install/) for pins, recovery and supported layouts.
+The manual configuration below remains useful for project scope and other layouts.
+
 After installing xmsg, run `command -v xmsg` and use that **absolute path** in the
 configuration below. `/absolute/path/to/xmsg` is a placeholder, not a command to copy unchanged.
 The daemon and Claude Code must run as the same user, with the same runtime directory.
