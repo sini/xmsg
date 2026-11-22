@@ -534,11 +534,28 @@ mod tests {
         assert_eq!(report.status, "applied");
         let settings = std::fs::read(home.join(".claude/settings.json")).unwrap();
         assert!(String::from_utf8_lossy(&settings).contains("register claude --hook"));
+        let retained = [
+            ("xmsg.db", b"synthetic-database-sentinel".as_slice()),
+            ("enroll/fed.key", b"synthetic-identity-sentinel".as_slice()),
+            ("logs/daemon.log", b"synthetic-log-sentinel".as_slice()),
+        ];
+        for (relative, bytes) in retained {
+            let file = request.state_root.join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        }
         plan(&request, Action::Uninstall).unwrap().apply().unwrap();
         assert!(
             !home.join(".claude/settings.json").exists(),
             "written hook lost its ownership record and survived uninstall"
         );
+        for (relative, bytes) in retained {
+            assert_eq!(
+                std::fs::read(request.state_root.join(relative)).unwrap(),
+                bytes,
+                "uninstall changed retained database, identity or logs"
+            );
+        }
         assert!(!home.join(".claude.json").exists());
         assert!(!home.join(".claude/skills/xmsg/SKILL.md").exists());
         assert!(
@@ -1059,5 +1076,47 @@ mod tests {
                 "empty capture changed originally unset root semantics"
             );
         }
+    }
+    #[test]
+    fn explicit_apply_refuses_an_observed_writer_even_when_unchanged() {
+        let (_root, request) = fixture();
+        plan(&request, Action::Install).unwrap().apply().unwrap();
+        let unchanged = plan(&request, Action::Install).unwrap();
+        assert_eq!(unchanged.report.status, "no_op");
+        let sessions = request.account_home.join(".claude/sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        let pid = std::process::id();
+        let start =
+            crate::process::starttime(std::path::Path::new(crate::process::LIVE_PROC_ROOT), pid)
+                .unwrap();
+        std::fs::write(
+            sessions.join("writer.json"),
+            serde_json::to_vec(&serde_json::json!({"pid":pid,"procStart":start})).unwrap(),
+        )
+        .unwrap();
+        let before = inventory(&request.account_home);
+        let result = unchanged.apply();
+        assert_eq!(
+            result.unwrap_err(),
+            Error::WriterObserved,
+            "no-op apply ignored a positively observed writer"
+        );
+        assert_eq!(inventory(&request.account_home), before);
+    }
+    #[test]
+    fn explicit_apply_rechecks_policy_after_planning() {
+        let (_root, request) = fixture();
+        plan(&request, Action::Install).unwrap().apply().unwrap();
+        let unchanged = plan(&request, Action::Install).unwrap();
+        let policy = request.account_home.join(".managed-policy-fixture");
+        std::fs::create_dir(&policy).unwrap();
+        std::fs::write(
+            policy.join("managed-mcp.json"),
+            b"{\"mcpServers\":{\"xmsg\":{}}}",
+        )
+        .unwrap();
+        let before = inventory(&request.account_home);
+        assert_eq!(unchanged.apply().unwrap_err(), Error::Conflict);
+        assert_eq!(inventory(&request.account_home), before);
     }
 }

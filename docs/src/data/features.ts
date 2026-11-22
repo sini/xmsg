@@ -31,6 +31,17 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		plannedSince: '2026-11-21',
 		note: 'Mechanism only; no production OS/runtime tuple is enabled.',
 	},
+	'xmsg.claude-install': {
+		id: 'xmsg.claude-install',
+		title: 'Reversible standalone Claude Code adapter',
+		owner: 'sini',
+		evidence: [
+			{ path: 'src/install/mod.rs', anchor: 'pub fn run_cli(' },
+			{ path: 'src/install/transaction.rs', anchor: 'fn save_intent(' },
+		],
+		plannedSince: '2026-11-21',
+		note: 'Standard user-scope layout; native fresh-Mac discovery and service staging remain separate gates.',
+	},
 	'teams.supervisor': {
 		id: 'teams.supervisor',
 		title: 'Fake-backend executor supervisor and workspace library',
