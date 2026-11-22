@@ -1007,7 +1007,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let shared = root.path().join("shared");
         std::fs::create_dir(&shared).unwrap();
-        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o2777)).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
         let home = shared.join("home");
         std::fs::create_dir(&home).unwrap();
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
