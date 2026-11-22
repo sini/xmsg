@@ -1484,3 +1484,66 @@ async fn test_oracle_15_the_queue_follows_into_a_second_sessions_dir() {
     );
     assert!(drained(p).await, "P still holds the queue");
 }
+
+async fn add_observe_only_dial_trap(node: &Node) -> tokio::net::TcpListener {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let mut peers: Value = serde_json::from_slice(&fs::read(&node.peers_file).unwrap()).unwrap();
+    let mut observer = entry(
+        listener.local_addr().unwrap().port(),
+        &node.tmp.path().join("ca.pem"),
+        "sini.collector",
+    );
+    observer["allow"] = json!(["observe"]);
+    peers["sini.collector"] = observer;
+    node.reload_peers(peers);
+    listener
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bare_send_resolution_does_not_dial_observe_only_peer() {
+    let m = mesh(&["sini.p", "sini.q"], &[]).await;
+    let (p, q) = (m.node("sini.p"), m.node("sini.q"));
+    park(p, X).await;
+    let trap = add_observe_only_dial_trap(q).await;
+    let (status, body) = tokio::select! {
+        biased;
+        connection = trap.accept() => panic!("send resolution dialled the observe-only peer: {connection:?}"),
+        result = http_send(q, X, "bare-send control") => result,
+    };
+    assert_eq!(status, 202, "{body}");
+    assert_eq!(body["address"], format!("{X}@sini.p"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn handoff_claims_lookup_does_not_dial_observe_only_peer() {
+    let m = mesh(&["sini.p", "sini.q"], &[]).await;
+    let p = m.node("sini.p");
+    park(p, X).await;
+    queue_at(p, "claims lookup control").await;
+    let trap = add_observe_only_dial_trap(p).await;
+    let q = &m.creds["sini.q"];
+    let asker = Origin {
+        cert_der: &q.cert_der,
+        key_der: &q.key_der,
+    };
+    let (status, body) = tokio::select! {
+        biased;
+        connection = trap.accept() => panic!("claims lookup dialled the observe-only peer: {connection:?}"),
+        result = hop_client::request(
+            &asker,
+            &m.creds["sini.p"].pin,
+            m.fed_ports["sini.p"],
+            "POST",
+            "/fed/v2/handoff",
+            Some(json!({"id": X})),
+        ) => result,
+    };
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body.to_string().contains("not live on sini.q alone"),
+        "{body}"
+    );
+    assert_eq!(p.queued(X).len(), 1);
+}

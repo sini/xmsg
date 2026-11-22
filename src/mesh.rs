@@ -176,7 +176,10 @@ pub(crate) async fn resolve(
         return Ok(Dest::Local);
     }
     if let Some(node) = cached(state, r)? {
-        if peers.contains_name(&node) {
+        if peers
+            .get_peer_config(&node)
+            .is_some_and(|peer| !peer.is_observe_only())
+        {
             return Ok(Dest::Peer {
                 node,
                 key: r.to_string(),
@@ -190,7 +193,7 @@ pub(crate) async fn resolve(
     let me = crate::fed::own_user(fs);
     let mut own = Vec::new();
     let mut rest = Vec::new();
-    for (key, cfg) in peers.iter() {
+    for (key, cfg) in peers.iter().filter(|(_, cfg)| !cfg.is_observe_only()) {
         let (fs, k) = (fs.clone(), key.clone());
         let asked = tokio::spawn(async move { crate::fed::list_peer(&fs, &k).await });
         let user = peer_user(cfg);

@@ -438,10 +438,16 @@ pub async fn handoff_handler(
     let peers = fs.current_peers();
     let mut keys: Vec<String> = peers
         .iter()
-        .filter(|(_, c)| crate::mesh::peer_user(c).as_deref() == Some(me.as_str()))
+        .filter(|(_, c)| {
+            !c.is_observe_only() && crate::mesh::peer_user(c).as_deref() == Some(me.as_str())
+        })
         .map(|(k, _)| k.clone())
         .collect();
-    if !keys.contains(&peer.name) {
+    if !keys.contains(&peer.name)
+        && peers
+            .get_peer_config(&peer.name)
+            .is_none_or(|cfg| !cfg.is_observe_only())
+    {
         keys.push(peer.name.clone());
     }
     let mut asked = tokio::task::JoinSet::new();
