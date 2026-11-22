@@ -174,6 +174,13 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [{ path: 'src/doctor_peers.rs', anchor: 'pub(crate) struct Report' }],
 	},
+	'xmsg.leaf-stalled-ack': {
+		id: 'xmsg.leaf-stalled-ack',
+		title: 'Leaf inbox stalled service ACK diagnostics',
+		owner: 'sini',
+		evidence: [],
+		plannedSince: '2026-11-22',
+	},
 	'xmsg.recipient-snapshot': {
 		id: 'xmsg.recipient-snapshot',
 		title: 'Read-only local recipient snapshot and process liveness',
