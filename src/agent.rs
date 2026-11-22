@@ -239,22 +239,6 @@ pub fn socket_dir_for_env(xdg_var: Option<&str>) -> Result<PathBuf, AppError> {
     }
 }
 
-/// Resolves the managed default socket directory via the shared installation contract.
-pub fn default_socket_dir() -> Result<PathBuf, AppError> {
-    let lookup = crate::install_paths::SystemHomeLookup;
-    let env = crate::install_paths::ResolveEnv::from_process(&lookup);
-    let req = crate::install_paths::ResolveRequest {
-        writable: false,
-        enforce_legacy_guard: false,
-        ..Default::default()
-    };
-    let resolved = crate::install_paths::resolve_install(&req, &env)
-        .map_err(|e| AppError::InsecureSocketDir(e.to_string()))?;
-    resolved
-        .runtime_namespace
-        .ok_or_else(|| AppError::InsecureSocketDir("no managed runtime namespace derived".into()))
-}
-
 pub fn default_register_sock_path() -> Result<PathBuf, AppError> {
     crate::install_paths::resolve_client_endpoint("register", None, None, false)
         .map_err(|e| AppError::InsecureSocketDir(e.to_string()))

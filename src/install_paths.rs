@@ -1397,18 +1397,6 @@ fn format_legacy_conflicts(conflicts: &[LegacyConflict]) -> String {
         .join("; ")
 }
 
-pub fn enforce_no_legacy_conflicts(
-    resolved: &ResolvedInstall,
-    env: &ResolveEnv<'_>,
-) -> Result<(), InstallError> {
-    let conflicts = check_legacy_components(resolved, env, &LegacyInventory::default())?;
-    if !conflicts.is_empty() {
-        let summary = format_legacy_conflicts(&conflicts);
-        return Err(InstallError::LegacyConflict { summary, conflicts });
-    }
-    Ok(())
-}
-
 enum FilePresence {
     Present,
     Absent,
@@ -1522,9 +1510,18 @@ pub fn resolve_client_endpoint(
         validate_socket_path(&expanded)?;
         return Ok(expanded);
     }
+    let env_db_path = db_path.map(Path::to_path_buf).or_else(|| {
+        std::env::var_os("XMSG_DB_PATH")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    });
+    let env_peers_file = std::env::var_os("XMSG_PEERS_FILE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
     let req = ResolveRequest {
         leaf,
-        db_path: db_path.map(Path::to_path_buf),
+        db_path: env_db_path,
+        peers_file: env_peers_file,
         writable: false,
         ..Default::default()
     };

@@ -707,6 +707,242 @@ fn s1_legacy_home_derived_checked_when_xdg_state_home_set_elsewhere() {
 }
 
 // ===========================================================================
+// S1: Per-entry-point legacy guard enforcement across real subprocesses
+//     (`serve`, `enroll-ca`, CLI client `list`) + in-process `enroll` default,
+//     and structural reporting without aborting in `doctor`
+// ===========================================================================
+#[test]
+fn s1_legacy_guard_enforced_across_every_entrypoint() {
+    let tmp = TempDir::new().unwrap();
+    let uid = unsafe { libc::geteuid() };
+
+    let fake_home = tmp.path().join("fake-home");
+    let clean_rt = tmp.path().join("clean-rt");
+    let legacy_xdg = tmp.path().join("legacy-xdg");
+    let legacy_enroll = legacy_xdg.join("xmsg/enroll");
+    let ca_dir = tmp.path().join("ca");
+    for d in [&fake_home, &clean_rt, &legacy_enroll, &ca_dir] {
+        make_private_dir(d);
+    }
+    fs::write(legacy_enroll.join("enroll.json"), b"{}").unwrap();
+    fs::write(legacy_enroll.join("peers.json"), b"{}").unwrap();
+
+    let policy_path = tmp.path().join("enroll-policy.json");
+    fs::write(
+        &policy_path,
+        r#"{"trust_domain":"legacy-guard.example","providers":{"fixture":{"issuer":"https://idp.example","device":{"enabled":true},"clients":{"device":{"client_id":"device-client"}}}},"users":[{"provider":"fixture","sub":"lg-sub","user":"alice"}],"issue_per_hour":200,"renew_per_hour":200}"#,
+    )
+    .unwrap();
+    fs::set_permissions(&policy_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let init_ca = Command::new(BIN)
+        .scrub_agy_env()
+        .env("HOME", &fake_home)
+        .args([
+            "enroll-ca",
+            "--enroll-ca-dir",
+            ca_dir.to_str().unwrap(),
+            "init",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        init_ca.status.success(),
+        "enroll-ca init failed: {}",
+        String::from_utf8_lossy(&init_ca.stderr)
+    );
+
+    // Target a fresh state root that does not exist yet so any entry point that misses the
+    // legacy guard would either create replacement state or advance past resolution.
+    let new_state = tmp.path().join("new-state");
+    let new_db = new_state.join("xmsg.db");
+
+    // 1. Real subprocess: `xmsg serve` refuses with LegacyConflict and creates nothing.
+    let mut serve_cmd = Command::new(BIN);
+    serve_cmd
+        .env_remove("XMSG_HTTP_SOCK")
+        .env_remove("XMSG_AGENT_SOCK")
+        .env_remove("XMSG_REGISTER_SOCK")
+        .env_remove("XMSG_LEAF_REGISTER_SOCK")
+        .env_remove("XMSG_PEERS_FILE")
+        .scrub_agy_env()
+        .env("HOME", &fake_home)
+        .env("XDG_STATE_HOME", &legacy_xdg)
+        .env("XDG_RUNTIME_DIR", &clean_rt)
+        .env("XMSG_DB_PATH", &new_db)
+        .args(["serve"]);
+    let (serve_refused, serve_err) =
+        run_expect_refusal_bounded(&mut serve_cmd, Duration::from_secs(5));
+    assert!(
+        serve_refused,
+        "serve must refuse legacy enrollment/peers conflict: {serve_err}"
+    );
+    assert!(
+        (serve_err.contains("LegacyConflict") || serve_err.contains("legacy state conflict"))
+            && serve_err.contains("enrollment")
+            && serve_err.contains("peers"),
+        "serve refusal must name legacy enrollment and peers conflicts, got: {serve_err}"
+    );
+    assert!(
+        !new_state.exists(),
+        "serve must not create replacement state on legacy refusal"
+    );
+
+    // 2. Real subprocess: `xmsg enroll-ca list` refuses with LegacyConflict and creates nothing.
+    let ca_out = Command::new(BIN)
+        .env_remove("XMSG_HTTP_SOCK")
+        .env_remove("XMSG_PEERS_FILE")
+        .scrub_agy_env()
+        .env("HOME", &fake_home)
+        .env("XDG_STATE_HOME", &legacy_xdg)
+        .env("XDG_RUNTIME_DIR", &clean_rt)
+        .env("XMSG_DB_PATH", &new_db)
+        .args([
+            "enroll-ca",
+            "--enroll-ca-dir",
+            ca_dir.to_str().unwrap(),
+            "--enroll-policy",
+            policy_path.to_str().unwrap(),
+            "list",
+        ])
+        .output()
+        .unwrap();
+    let ca_err = String::from_utf8_lossy(&ca_out.stderr);
+    assert!(
+        !ca_out.status.success(),
+        "enroll-ca list must refuse legacy enrollment/peers conflict"
+    );
+    assert!(
+        (ca_err.contains("LegacyConflict") || ca_err.contains("legacy state conflict"))
+            && ca_err.contains("enrollment")
+            && ca_err.contains("peers"),
+        "enroll-ca refusal must name legacy enrollment and peers conflicts, got: {ca_err}"
+    );
+    assert!(
+        !new_state.exists(),
+        "enroll-ca must not create replacement state on legacy refusal"
+    );
+
+    // 3. Real subprocess: CLI client (`xmsg list --json`) refuses with LegacyConflict and creates nothing.
+    let list_out = Command::new(BIN)
+        .env_remove("XMSG_HTTP_SOCK")
+        .env_remove("XMSG_AGENT_SOCK")
+        .env_remove("XMSG_REGISTER_SOCK")
+        .env_remove("XMSG_PEERS_FILE")
+        .scrub_agy_env()
+        .env("HOME", &fake_home)
+        .env("XDG_STATE_HOME", &legacy_xdg)
+        .env("XDG_RUNTIME_DIR", &clean_rt)
+        .env("XMSG_DB_PATH", &new_db)
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
+    let list_err = String::from_utf8_lossy(&list_out.stderr);
+    assert!(
+        !list_out.status.success(),
+        "CLI client `xmsg list` must refuse legacy enrollment/peers conflict"
+    );
+    assert!(
+        (list_err.contains("LegacyConflict") || list_err.contains("legacy state conflict"))
+            && list_err.contains("enrollment")
+            && list_err.contains("peers"),
+        "CLI client refusal must name legacy enrollment and peers conflicts, got: {list_err}"
+    );
+    assert!(
+        !new_state.exists(),
+        "CLI client must not create replacement state on legacy refusal"
+    );
+
+    // 4. In-process `xmsg enroll` default (`--state-dir` omitted, matching enroll_cli.rs):
+    //    ResolveRequest { writable: true, enforce_legacy_guard: true, ..Default::default() }
+    //    refuses legacy enrollment without creating replacement state.
+    let enroll_home = tmp.path().join("enroll-home");
+    let enroll_legacy_dir = enroll_home.join(".local/state/xmsg/enroll");
+    make_private_dir(&enroll_legacy_dir);
+    fs::write(enroll_legacy_dir.join("enroll.json"), b"{}").unwrap();
+    let enroll_new_xdg = tmp.path().join("enroll-new-xdg");
+    let enroll_lookup = FixtureHomeLookup(Some(enroll_home));
+    let mut enroll_env = fixture_env(Platform::Linux, &enroll_lookup, uid);
+    enroll_env.xdg_state_home = Some(enroll_new_xdg.as_os_str().to_os_string());
+    let enroll_err = resolve_install(
+        &ResolveRequest {
+            writable: true,
+            enforce_legacy_guard: true,
+            ..Default::default()
+        },
+        &enroll_env,
+    )
+    .expect_err("enroll default resolution must refuse legacy enrollment state");
+    assert!(
+        matches!(enroll_err, InstallError::LegacyConflict { .. }),
+        "enroll default resolution must return LegacyConflict, got: {enroll_err}"
+    );
+    assert!(
+        !enroll_new_xdg.exists(),
+        "enroll default resolution must not create replacement state on legacy refusal"
+    );
+
+    // 5. Real subprocess: `xmsg doctor --json` keeps `enforce_legacy_guard: false` so it reports
+    //    the legacy conflict structurally instead of aborting, while still creating nothing.
+    let doctor_out = Command::new(BIN)
+        .env_remove("XMSG_HTTP_SOCK")
+        .env_remove("XMSG_AGENT_SOCK")
+        .env_remove("XMSG_REGISTER_SOCK")
+        .env_remove("XMSG_PEERS_FILE")
+        .scrub_agy_env()
+        .env("HOME", &fake_home)
+        .env("XDG_STATE_HOME", &legacy_xdg)
+        .env("XDG_RUNTIME_DIR", &clean_rt)
+        .env("XMSG_DB_PATH", &new_db)
+        .args([
+            "doctor",
+            "--json",
+            "--http-sock",
+            clean_rt.join("http.sock").to_str().unwrap(),
+            "--agent-sock",
+            clean_rt.join("agent.sock").to_str().unwrap(),
+            "--register-sock",
+            clean_rt.join("register.sock").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let doctor_stdout = String::from_utf8_lossy(&doctor_out.stdout);
+    let doctor_stderr = String::from_utf8_lossy(&doctor_out.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&doctor_stdout).unwrap_or_else(|e| {
+        panic!(
+            "doctor --json must report legacy conflict structurally rather than aborting (parse err: {e}; stderr: {doctor_stderr}; stdout: {doctor_stdout})"
+        )
+    });
+    assert_eq!(
+        doc["endpoints_usable"], false,
+        "doctor must mark endpoints unusable when legacy conflicts exist: {doc}"
+    );
+    let conflicts = doc["install"]["legacy_conflicts"]
+        .as_array()
+        .expect("doctor JSON must include install.legacy_conflicts array");
+    let conflict_components: Vec<&str> = conflicts
+        .iter()
+        .filter_map(|c| c["component"].as_str())
+        .collect();
+    assert!(
+        conflict_components.contains(&"enrollment") && conflict_components.contains(&"peers"),
+        "doctor must structurally report both enrollment and peers legacy conflicts, got: {doc}"
+    );
+    assert!(
+        doc["install"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == "install.legacy_guard" && c["status"] == "fail"),
+        "doctor must fail install.legacy_guard check structurally, got: {doc}"
+    );
+    assert!(
+        !new_state.exists(),
+        "doctor must not create replacement state while reporting legacy conflicts"
+    );
+}
+
+// ===========================================================================
 // S1: Reference pod post-re-pin vectors, passwd-less start (M-S1f),
 //     one-level exclusive 0700 creation, unsafe parent refusals, CWD decoy
 //     non-reads, CLI + MCP handshake under unset HOME
