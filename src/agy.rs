@@ -1903,7 +1903,7 @@ pub async fn deliver_agy_envelope(
     #[cfg(target_os = "macos")]
     crate::spawn::cloexec_inherited_fds(&mut cmd);
 
-    let child = crate::client::caller_attribution::with_fd_inheritance_gate(|| cmd.spawn());
+    let child = spawn_delivery(&mut cmd);
     let output = match tokio::time::timeout(Duration::from_secs(5), async {
         child?.wait_with_output().await
     })
@@ -2945,6 +2945,10 @@ pub async fn run_register_server_with_listener(
     }
 }
 
+fn spawn_delivery(cmd: &mut tokio::process::Command) -> std::io::Result<tokio::process::Child> {
+    crate::client::caller_attribution::with_fd_inheritance_gate(|| cmd.spawn())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3258,6 +3262,63 @@ mod tests {
         assert!(
             matches!(err, AppError::Gone { .. }),
             "with no pin the request is refused for the missing lock, not for configuration: {err:?}"
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod attribution_spawn_tests {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    #[test]
+    fn actual_delivery_spawn_holds_the_receive_inheritance_gate_at_fork() {
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let fd = writer.as_raw_fd();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        unsafe {
+            command.pre_exec(move || {
+                let held =
+                    u8::from(crate::client::caller_attribution::inheritance_gate_held_for_test());
+                if libc::write(fd, (&held as *const u8).cast(), 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = super::spawn_delivery(&mut command).unwrap();
+        drop(writer);
+        let mut observed = [0];
+        let mut poll = libc::pollfd {
+            fd: reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert!(unsafe { libc::poll(&mut poll, 1, 2000) } > 0);
+        let read = reader.read_exact(&mut observed);
+        let status = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await
+        });
+        assert!(
+            read.is_ok(),
+            "actual delivery child did not publish its fork-time gate canary"
+        );
+        assert!(status.unwrap().unwrap().success());
+        assert_eq!(
+            observed,
+            [1],
+            "actual delivery spawn forked outside the shared receive-to-fcntl gate"
         );
     }
 }
