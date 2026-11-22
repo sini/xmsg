@@ -189,6 +189,7 @@ fn s8_socket_byte_budget_and_multibyte_darwin_bounds() {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s8_proof_authorized_stale_cleanup_and_unproven_refusal() {
+    let _guard = HOOK_SERIAL.lock().await;
     let tmp = TempDir::new().unwrap();
     let uid = unsafe { libc::geteuid() };
     let state1 = tmp.path().join("state1");
@@ -516,7 +517,7 @@ async fn s8_competing_manual_owners_serialized_by_endpoint_lock() {
 
     let sock_for_t1 = sock.clone();
     let state1_clone = state1.clone();
-    let t1 = tokio::spawn(async move {
+    let mut t1 = tokio::spawn(async move {
         let st1 = StateLock::try_acquire(&state1_clone).unwrap();
         let ep1 = EndpointLock::try_acquire(&sock_for_t1, uid).unwrap();
         let mut owner1 = OwnerRecord::new(uid, None);
@@ -535,9 +536,15 @@ async fn s8_competing_manual_owners_serialized_by_endpoint_lock() {
 
     // Wait for owner 1 to reach the publish barrier while holding its endpoint lock.
     let reached = barrier.clone();
-    tokio::task::spawn_blocking(move || reached.wait())
-        .await
-        .unwrap();
+    let reach_task = tokio::task::spawn_blocking(move || reached.wait());
+    tokio::select! {
+        res = reach_task => {
+            res.unwrap();
+        }
+        early = &mut t1 => {
+            panic!("owner 1 exited before reaching publish barrier: {early:?}");
+        }
+    }
 
     // Owner 2 (distinct state root) tries to acquire the manual endpoint lock while owner 1
     // is paused at the publish barrier. Capture the result and release the barrier BEFORE
@@ -590,30 +597,37 @@ async fn s8_incumbent_collision_barrier_per_primitive_arm() {
             make_private_dir(&run);
 
             // Part A: Clean publish on this arm -> record primitive + verify real client connect!
-            let clean_sock = run.join("clean.sock");
-            let st_lock = StateLock::try_acquire(&state).unwrap();
-            let ep_lock = (kind == BindingKind::Manual)
-                .then(|| EndpointLock::try_acquire(&clean_sock, uid).unwrap());
-            let mut owner = OwnerRecord::new(uid, None);
-            let (listener, used_prim) = bind_and_publish_socket(
-                &st_lock,
-                ep_lock.as_ref(),
-                &state,
-                "agent",
-                &clean_sock,
-                kind,
-                &mut owner,
-                uid,
-            )
-            .unwrap_or_else(|e| panic!("clean publish failed for {arm_name}/{kind:?}: {e}"));
-            assert_eq!(
-                used_prim, forced_prim,
-                "P2: recorded primitive must match exercised arm {arm_name}"
-            );
-            println!("s8-publish-arm: {arm_name} kind={kind:?} primitive={used_prim:?} clean=ok");
-            let _client = StdUnixStream::connect(&clean_sock)
-                .unwrap_or_else(|e| panic!("client connect failed on {arm_name}/{kind:?}: {e}"));
-            let _ = listener.accept().await.unwrap();
+            // Scoped in its own block so Part A's StateLock and EndpointLock are guaranteed to be
+            // dropped strictly BEFORE Part B spawns `candidate`.
+            {
+                let clean_sock = run.join("clean.sock");
+                let st_lock = StateLock::try_acquire(&state).unwrap();
+                let ep_lock = (kind == BindingKind::Manual)
+                    .then(|| EndpointLock::try_acquire(&clean_sock, uid).unwrap());
+                let mut owner = OwnerRecord::new(uid, None);
+                let (listener, used_prim) = bind_and_publish_socket(
+                    &st_lock,
+                    ep_lock.as_ref(),
+                    &state,
+                    "agent",
+                    &clean_sock,
+                    kind,
+                    &mut owner,
+                    uid,
+                )
+                .unwrap_or_else(|e| panic!("clean publish failed for {arm_name}/{kind:?}: {e}"));
+                assert_eq!(
+                    used_prim, forced_prim,
+                    "P2: recorded primitive must match exercised arm {arm_name}"
+                );
+                println!(
+                    "s8-publish-arm: {arm_name} kind={kind:?} primitive={used_prim:?} clean=ok"
+                );
+                let _client = StdUnixStream::connect(&clean_sock).unwrap_or_else(|e| {
+                    panic!("client connect failed on {arm_name}/{kind:?}: {e}")
+                });
+                let _ = listener.accept().await.unwrap();
+            }
 
             // Part B: Incumbent barrier immediately before atomic publication call (H5 / M-S8e / M-S8g):
             // Pause candidate AFTER pending record is durable and ALL userspace checks completed,
@@ -626,7 +640,7 @@ async fn s8_incumbent_collision_barrier_per_primitive_arm() {
 
             let state_c = state.clone();
             let sock_c = collide_sock.clone();
-            let candidate = tokio::spawn(async move {
+            let mut candidate = tokio::spawn(async move {
                 let st2 = StateLock::try_acquire(&state_c).unwrap();
                 let ep2 = (kind == BindingKind::Manual)
                     .then(|| EndpointLock::try_acquire(&sock_c, uid).unwrap());
@@ -643,15 +657,18 @@ async fn s8_incumbent_collision_barrier_per_primitive_arm() {
                 )
             });
 
-            // Drop locks from Part A before Part B candidate acquires StateLock!
-            drop(ep_lock);
-            drop(st_lock);
-
             // Wait until candidate reaches the barrier immediately before atomic publication.
+            // Select against `candidate` so an unexpected early exit fails fast instead of hanging.
             let b_reach = barrier.clone();
-            tokio::task::spawn_blocking(move || b_reach.wait())
-                .await
-                .unwrap();
+            let reach_task = tokio::task::spawn_blocking(move || b_reach.wait());
+            tokio::select! {
+                res = reach_task => {
+                    res.unwrap();
+                }
+                early = &mut candidate => {
+                    panic!("candidate exited before reaching publish barrier ({arm_name}/{kind:?}): {early:?}");
+                }
+            }
 
             // Confirm pending record is already durable on disk BEFORE planting incumbent.
             let pending_disk = OwnerRecord::load(&state).unwrap().unwrap();
@@ -714,6 +731,7 @@ async fn s8_incumbent_collision_barrier_per_primitive_arm() {
 // ===========================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn s8_one_byte_temp_name_exhaustion_refuses_without_binding_final() {
+    let _guard = HOOK_SERIAL.lock().await;
     let tmp = TempDir::new().unwrap();
     let uid = unsafe { libc::geteuid() };
     let state = tmp.path().join("state");
