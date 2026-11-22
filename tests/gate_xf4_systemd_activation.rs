@@ -1759,6 +1759,18 @@ async fn oracle_5_recv_notify_timeout_dumps_exit_status_and_stderr() {
         .expect("spawn deliberately failing xmsg serve");
     let mut guard = ChildGuard::new(child);
 
+    // Wait for the deliberately-failing child to exit (up to 10s under parallel spawn contention)
+    // before triggering the 250ms `recv_notify_datagram` timeout; `tokio::process::Child::try_wait`
+    // retains its `ExitStatus` for `format_timeout_diagnostics`.
+    let exit_deadline = Instant::now() + Duration::from_secs(10);
+    while matches!(guard.child_mut().try_wait(), Ok(None)) {
+        assert!(
+            Instant::now() < exit_deadline,
+            "deliberately-failing child did not exit within 10s"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
     let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         recv_notify_datagram(&notify_sock, Duration::from_millis(250), &mut guard)
     }));

@@ -20,7 +20,8 @@ use tempfile::TempDir;
 use xmsg::install_paths::{
     canonicalize_best_effort, check_legacy_components, compute_namespace_identity,
     ensure_explicit_private_dir, probe_legacy_listeners, resolve_install, validate_private_dir,
-    BindingKind, FixtureHomeLookup, InstallError, Platform, ResolveEnv, ResolveRequest,
+    validate_private_mode_bits, BindingKind, FixtureHomeLookup, InstallError, Platform, ResolveEnv,
+    ResolveRequest,
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_xmsg");
@@ -983,23 +984,47 @@ fn s1_pod_vectors_and_passwd_less_pins_start_without_home() {
 // ===========================================================================
 #[test]
 fn s1_preexisting_setgid_02700_dirs_accepted() {
+    // Unconditionally verify the mode-bit validator accepts 02700 and rejects 0755 so M-S1h
+    // is killed even inside Nix sandboxes that strip or forbid the setgid bit on chmod.
+    assert!(
+        validate_private_mode_bits(0o042700).is_ok(),
+        "M-S1h: validate_private_mode_bits must accept 02700"
+    );
+    assert!(
+        validate_private_mode_bits(0o040755).is_err(),
+        "validate_private_mode_bits must reject 0755"
+    );
+
     let tmp = TempDir::new().unwrap();
     let uid = unsafe { libc::geteuid() };
+    let in_nix_sandbox = std::env::var_os("NIX_BUILD_TOP").is_some();
     let db_dir = tmp.path().join("setgid-state");
     let ep_dir = tmp.path().join("setgid-run");
     fs::create_dir_all(&db_dir).unwrap();
     fs::create_dir_all(&ep_dir).unwrap();
-    fs::set_permissions(&db_dir, fs::Permissions::from_mode(0o2700)).unwrap();
-    fs::set_permissions(&ep_dir, fs::Permissions::from_mode(0o2700)).unwrap();
+    for dir in [&db_dir, &ep_dir] {
+        match fs::set_permissions(dir, fs::Permissions::from_mode(0o2700)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && in_nix_sandbox => {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Err(e) => panic!("failed to chmod {} to 02700: {e}", dir.display()),
+        }
+    }
 
-    // Verify the filesystem actually preserved the setgid bit so M-S1h is genuinely exercised.
+    // On native hosts (outside Nix sandbox-exec / userns), require that the filesystem actually
+    // preserved the 02700 setgid bit so M-S1h is also exercised end-to-end on disk.
     let actual_mode = fs::symlink_metadata(&db_dir).unwrap().mode();
-    assert_eq!(
-        actual_mode & 0o7777,
-        0o2700,
-        "test filesystem must preserve 02700 setgid bit (got {:o})",
-        actual_mode & 0o7777
-    );
+    if !in_nix_sandbox {
+        assert_eq!(
+            actual_mode & 0o7777,
+            0o2700,
+            "test filesystem must preserve 02700 setgid bit (got {:o})",
+            actual_mode & 0o7777
+        );
+    } else {
+        assert_eq!(actual_mode & 0o777, 0o700);
+    }
 
     validate_private_dir(&db_dir, uid)
         .expect("M-S1h: pre-existing 02700 state dir must be accepted");
@@ -1284,7 +1309,7 @@ fn s1_systemd_adopted_http_listener_and_foreign_listener_control() {
     ));
 
     // With validated adoption of `legacy_http` -> excluded from probe!
-    probe_legacy_listeners(&resolved, &env, &[legacy_http.clone()], &[])
+    probe_legacy_listeners(&resolved, &env, std::slice::from_ref(&legacy_http), &[])
         .expect("M-S1g: validated systemd-adopted endpoint must be excluded from legacy probe");
 
     // 3. On Linux, also run a full live `xmsg serve` with LISTEN_PID/LISTEN_FDS/LISTEN_FDNAMES=http
