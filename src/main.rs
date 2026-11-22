@@ -535,6 +535,8 @@ async fn enrollment_operator(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Keep the Mach-O __DATA,__xmsg_rev metadata section live across LTO and symbol stripping.
+    xmsg::build_meta::retain_embedded_revision();
     // Restrict newly created state, config, log, and socket files to owner-only before any write.
     xmsg::install_paths::apply_process_umask();
     let cli = Cli::parse();

@@ -40,6 +40,7 @@
               && !(
                 base == "nix"
                 || base == "docs"
+                || base == "packaging"
                 || base == ".github"
                 || base == "README.md"
                 || base == "AGENTS.md"
