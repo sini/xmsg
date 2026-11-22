@@ -203,6 +203,16 @@ fn bridge_scripted_socket_positive_admits_bound_principal() {
         "valid bound scripted response did not reach admission"
     );
     assert_eq!(reply["status"], "ok");
+
+    use xmsg::client::caller_attribution::{FailureReason, Reply, VERSION};
+    let (reply, rows) = run_scripted_bridge(|reply| {
+        *reply = Reply::Unavailable {
+            v: VERSION,
+            reason: FailureReason::Unsupported,
+        };
+    });
+    assert_eq!(reply["code"], "attestation_unavailable");
+    assert_eq!(rows, 0, "unavailable attribution reached durable admission");
 }
 
 #[test]

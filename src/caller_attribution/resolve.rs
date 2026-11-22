@@ -462,7 +462,7 @@ pub fn resolve(
     Err(FailureReason::Limit)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "resolve_tests.rs"]
 mod tests;
 
