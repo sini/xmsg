@@ -793,41 +793,29 @@ pub fn plan_install_roots(
         }
     }
 
-    let validate_pin = |pin: Option<PathBuf>| -> Result<Option<PathBuf>, InstallError> {
-        if let Some(ref p) = pin {
-            if let Ok(meta) = fs::symlink_metadata(p) {
-                if meta.file_type().is_symlink() {
-                    return Err(InstallError::SymlinkNotAllowed { path: p.clone() });
-                }
-            }
-            validate_socket_path(p)?;
-        }
-        Ok(pin)
-    };
-
-    let http_sock = validate_pin(if req.leaf {
+    // 3. Expand explicit endpoint pins per mode (preserving disabled-component exemptions).
+    let http_pin = if req.leaf {
         None
     } else {
         req.http_sock
             .as_deref()
             .map(|p| expand_explicit_path(p, env))
             .transpose()?
-    })?;
-    let agent_sock = validate_pin(
-        req.agent_sock
-            .as_deref()
-            .map(|p| expand_explicit_path(p, env))
-            .transpose()?,
-    )?;
-    let register_sock = validate_pin(if req.leaf {
+    };
+    let agent_pin = req
+        .agent_sock
+        .as_deref()
+        .map(|p| expand_explicit_path(p, env))
+        .transpose()?;
+    let reg_pin = if req.leaf {
         None
     } else {
         req.register_sock
             .as_deref()
             .map(|p| expand_explicit_path(p, env))
             .transpose()?
-    })?;
-    let leaf_register_sock = validate_pin(if req.leaf {
+    };
+    let leaf_reg_pin = if req.leaf {
         req.leaf_register_sock
             .as_deref()
             .or(req.register_sock.as_deref())
@@ -835,17 +823,87 @@ pub fn plan_install_roots(
             .transpose()?
     } else {
         None
-    })?;
+    };
 
-    let ro_req = ResolveRequest {
-        writable: false,
-        ..req.clone()
+    let all_pinned = if req.leaf {
+        agent_pin.is_some() && leaf_reg_pin.is_some()
+    } else {
+        http_pin.is_some() && agent_pin.is_some() && reg_pin.is_some()
     };
-    let resolved_if_present = match resolve_install(&ro_req, env) {
-        Ok(r) => Some(r),
-        Err(InstallError::MissingStateRoot { .. }) => None,
-        Err(err) => return Err(err),
+
+    // 4. Run every validation `resolve_install` runs, in the same order, skipping only the
+    //    existence requirement and directory creation when `state_root` does not yet exist.
+    let state_root_present = fs::symlink_metadata(&state_root).is_ok();
+    let (resolved_if_present, planned_namespace) = if all_pinned || state_root_present {
+        let ro_req = ResolveRequest {
+            writable: false,
+            ..req.clone()
+        };
+        let resolved = resolve_install(&ro_req, env)?;
+        let ns = resolved.runtime_namespace.clone();
+        (Some(resolved), ns)
+    } else {
+        // Explicit `--db-path` requires its state_root's parent to exist before creation.
+        if db_explicit {
+            let parent = state_root
+                .parent()
+                .ok_or_else(|| InstallError::MissingParent {
+                    parent: PathBuf::new(),
+                    target: state_root.clone(),
+                })?;
+            let _ = fs::canonicalize(parent).map_err(|source| {
+                if source.kind() == io::ErrorKind::NotFound {
+                    InstallError::MissingParent {
+                        parent: parent.to_path_buf(),
+                        target: state_root.clone(),
+                    }
+                } else {
+                    InstallError::Io {
+                        path: parent.to_path_buf(),
+                        source,
+                    }
+                }
+            })?;
+        }
+        // Validate the applicable runtime parent with an exact-length placeholder namespace
+        // (`xmsg-<euid>-<12hex>`) so relative/unsafe `XDG_RUNTIME_DIR`, unsafe `/tmp`, and
+        // socket byte-budget checks match `resolve_install` without creating anything on disk.
+        let placeholder_dir = format!("xmsg-{}-000000000000", env.euid);
+        let parent = select_runtime_parent(env, &placeholder_dir, "register.sock")?;
+        (None, Some(parent.path.join(placeholder_dir)))
     };
+
+    // 5. When `resolved_if_present` is `None` (fresh unpinned state root), run the exact same
+    //    per-endpoint symlink, byte-budget, and parent-path checks that `resolve_install` runs.
+    if resolved_if_present.is_none() {
+        let validate_endpoint =
+            |pin: Option<&PathBuf>, default_leaf: &'static str| -> Result<(), InstallError> {
+                let path = match pin {
+                    Some(p) => p.clone(),
+                    None => planned_namespace
+                        .as_ref()
+                        .expect("planned namespace derived when unpinned")
+                        .join(default_leaf),
+                };
+                if let Ok(meta) = fs::symlink_metadata(&path) {
+                    if meta.file_type().is_symlink() {
+                        return Err(InstallError::SymlinkNotAllowed { path });
+                    }
+                }
+                validate_socket_path(&path)?;
+                let _ = classify_binding(&path, planned_namespace.as_deref())?;
+                Ok(())
+            };
+
+        if req.leaf {
+            validate_endpoint(agent_pin.as_ref(), "agent.sock")?;
+            validate_endpoint(leaf_reg_pin.as_ref(), "register.sock")?;
+        } else {
+            validate_endpoint(http_pin.as_ref(), "http.sock")?;
+            validate_endpoint(agent_pin.as_ref(), "agent.sock")?;
+            validate_endpoint(reg_pin.as_ref(), "register.sock")?;
+        }
+    }
 
     let staging_cache_dir = state_root.join("staging-cache");
     Ok(PlannedInstallRoots {
@@ -862,10 +920,10 @@ pub fn plan_install_roots(
         enroll_explicit,
         peers_file,
         peers_explicit,
-        http_sock,
-        agent_sock,
-        register_sock,
-        leaf_register_sock,
+        http_sock: http_pin,
+        agent_sock: agent_pin,
+        register_sock: reg_pin,
+        leaf_register_sock: leaf_reg_pin,
         resolved_if_present,
     })
 }
@@ -973,7 +1031,7 @@ pub fn resolve_install(
     let (runtime_namespace, namespace_identity, runtime_parent) = if all_pinned {
         (None, None, None)
     } else {
-        let canon_state = if state_root.exists() {
+        let canon_state = if fs::symlink_metadata(&state_root).is_ok() {
             validate_private_dir(&state_root, env.euid)?
         } else if req.writable {
             if db_explicit {
@@ -1795,5 +1853,329 @@ mod tests {
                 .path,
             resolved.http_sock.as_ref().unwrap().path
         );
+    }
+
+    #[test]
+    fn plan_install_roots_matches_resolve_install_refusal_classes_without_side_effects() {
+        let tmp = tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let unsafe_dir = tmp.path().join("unsafe-0755");
+        fs::create_dir_all(&unsafe_dir).unwrap();
+        fs::set_permissions(&unsafe_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let regular_file = tmp.path().join("not-a-dir");
+        fs::write(&regular_file, b"x").unwrap();
+
+        let sym_target = tmp.path().join("sym-target");
+        fs::create_dir_all(&sym_target).unwrap();
+        fs::set_permissions(&sym_target, fs::Permissions::from_mode(0o700)).unwrap();
+        let sym_dir = tmp.path().join("sym-rt");
+        std::os::unix::fs::symlink(&sym_target, &sym_dir).unwrap();
+
+        let sock_sym = tmp.path().join("sym.sock");
+        std::os::unix::fs::symlink(tmp.path().join("real.sock"), &sock_sym).unwrap();
+
+        let assert_same_refusal = |label: &str,
+                                   req: &ResolveRequest,
+                                   plan_env: &ResolveEnv<'_>,
+                                   apply_env: &ResolveEnv<'_>,
+                                   fresh_root: &Path| {
+            let plan_err = plan_install_roots(req, plan_env)
+                .expect_err(&format!("{label}: plan_install_roots must refuse"));
+            assert!(
+                !fresh_root.exists(),
+                "{label}: plan_install_roots must have zero filesystem effects"
+            );
+            let apply_req = ResolveRequest {
+                writable: true,
+                ..req.clone()
+            };
+            let apply_err = resolve_install(&apply_req, apply_env)
+                .expect_err(&format!("{label}: resolve_install(writable) must refuse"));
+            assert_eq!(
+                std::mem::discriminant(&plan_err),
+                std::mem::discriminant(&apply_err),
+                "{label}: error variant mismatch (plan={plan_err:?}, apply={apply_err:?})"
+            );
+        };
+
+        let lookup = FixtureHomeLookup(Some(home.clone()));
+        let req_default = ResolveRequest {
+            writable: false,
+            enforce_legacy_guard: true,
+            ..Default::default()
+        };
+
+        // 1. Relative XDG_RUNTIME_DIR on fresh Linux unpinned preview.
+        {
+            let plan_state = tmp.path().join("c1-plan");
+            let apply_state = tmp.path().join("c1-apply");
+            let mut p_env = make_env(&lookup, Platform::Linux, Some(&home));
+            p_env.xdg_state_home = Some(plan_state.as_os_str().to_os_string());
+            p_env.xdg_runtime_dir = Some(OsString::from("relative/runtime"));
+            let mut a_env = make_env(&lookup, Platform::Linux, Some(&home));
+            a_env.xdg_state_home = Some(apply_state.as_os_str().to_os_string());
+            a_env.xdg_runtime_dir = Some(OsString::from("relative/runtime"));
+            assert_same_refusal(
+                "relative XDG_RUNTIME_DIR",
+                &req_default,
+                &p_env,
+                &a_env,
+                &plan_state,
+            );
+        }
+
+        // 2. Unsafe mode 0755 XDG_RUNTIME_DIR on fresh Linux unpinned preview.
+        {
+            let plan_state = tmp.path().join("c2-plan");
+            let apply_state = tmp.path().join("c2-apply");
+            let mut p_env = make_env(&lookup, Platform::Linux, Some(&home));
+            p_env.xdg_state_home = Some(plan_state.as_os_str().to_os_string());
+            p_env.xdg_runtime_dir = Some(unsafe_dir.as_os_str().to_os_string());
+            let mut a_env = make_env(&lookup, Platform::Linux, Some(&home));
+            a_env.xdg_state_home = Some(apply_state.as_os_str().to_os_string());
+            a_env.xdg_runtime_dir = Some(unsafe_dir.as_os_str().to_os_string());
+            assert_same_refusal(
+                "unsafe 0755 XDG_RUNTIME_DIR",
+                &req_default,
+                &p_env,
+                &a_env,
+                &plan_state,
+            );
+        }
+
+        // 3. Symlink XDG_RUNTIME_DIR on fresh Linux unpinned preview.
+        {
+            let plan_state = tmp.path().join("c3-plan");
+            let apply_state = tmp.path().join("c3-apply");
+            let mut p_env = make_env(&lookup, Platform::Linux, Some(&home));
+            p_env.xdg_state_home = Some(plan_state.as_os_str().to_os_string());
+            p_env.xdg_runtime_dir = Some(sym_dir.as_os_str().to_os_string());
+            let mut a_env = make_env(&lookup, Platform::Linux, Some(&home));
+            a_env.xdg_state_home = Some(apply_state.as_os_str().to_os_string());
+            a_env.xdg_runtime_dir = Some(sym_dir.as_os_str().to_os_string());
+            assert_same_refusal(
+                "symlink XDG_RUNTIME_DIR",
+                &req_default,
+                &p_env,
+                &a_env,
+                &plan_state,
+            );
+        }
+
+        // 4. Non-directory XDG_RUNTIME_DIR on fresh Linux unpinned preview.
+        {
+            let plan_state = tmp.path().join("c4-plan");
+            let apply_state = tmp.path().join("c4-apply");
+            let mut p_env = make_env(&lookup, Platform::Linux, Some(&home));
+            p_env.xdg_state_home = Some(plan_state.as_os_str().to_os_string());
+            p_env.xdg_runtime_dir = Some(regular_file.as_os_str().to_os_string());
+            let mut a_env = make_env(&lookup, Platform::Linux, Some(&home));
+            a_env.xdg_state_home = Some(apply_state.as_os_str().to_os_string());
+            a_env.xdg_runtime_dir = Some(regular_file.as_os_str().to_os_string());
+            assert_same_refusal(
+                "file XDG_RUNTIME_DIR",
+                &req_default,
+                &p_env,
+                &a_env,
+                &plan_state,
+            );
+        }
+
+        // 5. Unsafe shared /tmp fallback (non-sticky user-owned dir) on fresh preview.
+        {
+            let plan_state = tmp.path().join("c5-plan");
+            let apply_state = tmp.path().join("c5-apply");
+            let mut p_env = make_env(&lookup, Platform::MacOs, Some(&home));
+            p_env.xdg_state_home = Some(plan_state.as_os_str().to_os_string());
+            p_env.system_tmp = unsafe_dir.clone();
+            let mut a_env = make_env(&lookup, Platform::MacOs, Some(&home));
+            a_env.xdg_state_home = Some(apply_state.as_os_str().to_os_string());
+            a_env.system_tmp = unsafe_dir.clone();
+            assert_same_refusal(
+                "unsafe shared tmp",
+                &req_default,
+                &p_env,
+                &a_env,
+                &plan_state,
+            );
+        }
+
+        // 6. Relative XDG_STATE_HOME.
+        {
+            let sentinel = tmp.path().join("c6-unused");
+            let mut p_env = make_env(&lookup, Platform::Linux, Some(&home));
+            p_env.xdg_state_home = Some(OsString::from("relative/state"));
+            let mut a_env = make_env(&lookup, Platform::Linux, Some(&home));
+            a_env.xdg_state_home = Some(OsString::from("relative/state"));
+            assert_same_refusal(
+                "relative XDG_STATE_HOME",
+                &req_default,
+                &p_env,
+                &a_env,
+                &sentinel,
+            );
+        }
+
+        // 7. AccountHomeUnavailable & HomeMismatch.
+        {
+            let sentinel = tmp.path().join("c7-unused");
+            let missing_lookup = FixtureHomeLookup(None);
+            let p_env = make_env(&missing_lookup, Platform::Linux, None);
+            let a_env = make_env(&missing_lookup, Platform::Linux, None);
+            assert_same_refusal(
+                "missing account home",
+                &req_default,
+                &p_env,
+                &a_env,
+                &sentinel,
+            );
+
+            let other = tmp.path().join("other-home");
+            let p_mis = make_env(&lookup, Platform::Linux, Some(&other));
+            let a_mis = make_env(&lookup, Platform::Linux, Some(&other));
+            assert_same_refusal("HOME mismatch", &req_default, &p_mis, &a_mis, &sentinel);
+        }
+
+        // 7b. LegacyConflict on fresh state root.
+        {
+            let leg_home = tmp.path().join("c7b-home");
+            let leg_dir = leg_home.join(".local/state/xmsg");
+            fs::create_dir_all(&leg_dir).unwrap();
+            fs::write(leg_dir.join("xmsg.db"), b"legacy").unwrap();
+            let leg_lookup = FixtureHomeLookup(Some(leg_home.clone()));
+            let plan_state = tmp.path().join("c7b-plan");
+            let apply_state = tmp.path().join("c7b-apply");
+            let mut p_env = make_env(&leg_lookup, Platform::MacOs, Some(&leg_home));
+            p_env.xdg_state_home = Some(plan_state.as_os_str().to_os_string());
+            let mut a_env = make_env(&leg_lookup, Platform::MacOs, Some(&leg_home));
+            a_env.xdg_state_home = Some(apply_state.as_os_str().to_os_string());
+            assert_same_refusal("legacy conflict", &req_default, &p_env, &a_env, &plan_state);
+        }
+
+        // 8. Missing parent of explicit --db-path on unpinned preview.
+        {
+            let missing_parent = tmp.path().join("c8-no-parent/state");
+            let req = ResolveRequest {
+                db_path: Some(missing_parent.join("xmsg.db")),
+                writable: false,
+                enforce_legacy_guard: false,
+                ..Default::default()
+            };
+            let p_env = make_env(&lookup, Platform::MacOs, Some(&home));
+            let a_env = make_env(&lookup, Platform::MacOs, Some(&home));
+            assert_same_refusal(
+                "explicit db missing parent",
+                &req,
+                &p_env,
+                &a_env,
+                &missing_parent,
+            );
+        }
+
+        // 9. Explicit socket path byte-budget overflow & symlink on fresh unpinned preview.
+        {
+            let plan_state = tmp.path().join("c9-plan");
+            let apply_state = tmp.path().join("c9-apply");
+            let ok_rt = tmp.path().join("c9-rt");
+            fs::create_dir_all(&ok_rt).unwrap();
+            fs::set_permissions(&ok_rt, fs::Permissions::from_mode(0o700)).unwrap();
+
+            let overlong = PathBuf::from(format!(
+                "/tmp/{}/http.sock",
+                "a".repeat(sun_path_capacity())
+            ));
+            let req_long = ResolveRequest {
+                http_sock: Some(overlong),
+                writable: false,
+                enforce_legacy_guard: false,
+                ..Default::default()
+            };
+            let mut p_env = make_env(&lookup, Platform::Linux, Some(&home));
+            p_env.xdg_state_home = Some(plan_state.as_os_str().to_os_string());
+            p_env.xdg_runtime_dir = Some(ok_rt.as_os_str().to_os_string());
+            let mut a_env = make_env(&lookup, Platform::Linux, Some(&home));
+            a_env.xdg_state_home = Some(apply_state.as_os_str().to_os_string());
+            a_env.xdg_runtime_dir = Some(ok_rt.as_os_str().to_os_string());
+            assert_same_refusal(
+                "socket byte budget overflow",
+                &req_long,
+                &p_env,
+                &a_env,
+                &plan_state,
+            );
+
+            let plan_state_sym = tmp.path().join("c9b-plan");
+            let apply_state_sym = tmp.path().join("c9b-apply");
+            let req_sym = ResolveRequest {
+                agent_sock: Some(sock_sym),
+                writable: false,
+                enforce_legacy_guard: false,
+                ..Default::default()
+            };
+            let mut p_env2 = make_env(&lookup, Platform::Linux, Some(&home));
+            p_env2.xdg_state_home = Some(plan_state_sym.as_os_str().to_os_string());
+            p_env2.xdg_runtime_dir = Some(ok_rt.as_os_str().to_os_string());
+            let mut a_env2 = make_env(&lookup, Platform::Linux, Some(&home));
+            a_env2.xdg_state_home = Some(apply_state_sym.as_os_str().to_os_string());
+            a_env2.xdg_runtime_dir = Some(ok_rt.as_os_str().to_os_string());
+            assert_same_refusal(
+                "symlink explicit socket",
+                &req_sym,
+                &p_env2,
+                &a_env2,
+                &plan_state_sym,
+            );
+        }
+
+        // 10. All-pinned & disabled-component exemptions are preserved with zero filesystem effects.
+        {
+            let fresh_all_pinned = tmp.path().join("c10-all-pinned");
+            let pinned_dir = tmp.path().join("c10-socks");
+            fs::create_dir_all(&pinned_dir).unwrap();
+            fs::set_permissions(&pinned_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let overlong_disabled = PathBuf::from(format!(
+                "/tmp/{}/disabled.sock",
+                "z".repeat(sun_path_capacity())
+            ));
+
+            let mut bad_rt_env = make_env(&lookup, Platform::Linux, Some(&home));
+            bad_rt_env.xdg_state_home = Some(fresh_all_pinned.as_os_str().to_os_string());
+            bad_rt_env.xdg_runtime_dir = Some(OsString::from("relative/ignored-when-all-pinned"));
+
+            // Non-leaf all-pinned ignores relative XDG_RUNTIME_DIR and disabled leaf_register_sock.
+            let req_all_pinned = ResolveRequest {
+                leaf: false,
+                http_sock: Some(pinned_dir.join("http.sock")),
+                agent_sock: Some(pinned_dir.join("agent.sock")),
+                register_sock: Some(pinned_dir.join("register.sock")),
+                leaf_register_sock: Some(overlong_disabled.clone()),
+                writable: false,
+                enforce_legacy_guard: false,
+                ..Default::default()
+            };
+            let planned = plan_install_roots(&req_all_pinned, &bad_rt_env)
+                .expect("all-pinned non-leaf preview must ignore relative XDG_RUNTIME_DIR and disabled leaf_register_sock");
+            assert!(planned.resolved_if_present.is_some());
+            assert!(!fresh_all_pinned.exists());
+
+            // Leaf all-pinned ignores relative XDG_RUNTIME_DIR and disabled http_sock.
+            let req_leaf_pinned = ResolveRequest {
+                leaf: true,
+                http_sock: Some(overlong_disabled),
+                agent_sock: Some(pinned_dir.join("agent.sock")),
+                leaf_register_sock: Some(pinned_dir.join("leaf-reg.sock")),
+                writable: false,
+                enforce_legacy_guard: false,
+                ..Default::default()
+            };
+            let planned_leaf = plan_install_roots(&req_leaf_pinned, &bad_rt_env)
+                .expect("all-pinned leaf preview must ignore relative XDG_RUNTIME_DIR and disabled http_sock");
+            assert!(planned_leaf.resolved_if_present.is_some());
+            assert!(!fresh_all_pinned.exists());
+        }
     }
 }
