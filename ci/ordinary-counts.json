@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Baseline 634c11f88d9e79e59770bd064c5f2550485e9ecc + src/harnesses.rs (+3 lib tests) + tests/harness_descriptors.rs (+6 integration tests): 1567 passed, 0 failed, 7 ignored, 117 summaries; all 114 integration targets executed",
-    "darwin": "Measured natively on macOS against 634c11f88d9e79e59770bd064c5f2550485e9ecc + src/harnesses.rs (+3 lib tests) + tests/harness_descriptors.rs (+6 integration tests): 1582 passed, 0 failed, 9 ignored, 117 summaries; all 114 integration targets executed"
+    "linux": "Measured on f7a358679d2255b73de77834092f54d239c97ff0, CI run 45063422883 / job 137338253412: 1777 passed, 0 failed, 12 ignored, 122 summaries; all 119 integration targets executed",
+    "darwin": "Measured on f7a358679d2255b73de77834092f54d239c97ff0, native run 45063422772 / job 137334186714 and Nix job 137334186725 independently agree: 1752 passed, 0 failed, 11 ignored, 122 summaries; all 119 integration targets executed"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -9,6 +9,7 @@
     "tests/agy_proc_locks.rs",
     "tests/agy_spawn_fds.rs",
     "tests/ancestor_walk.rs",
+    "tests/claude_adapter.rs",
     "tests/claude_lstart_macos.rs",
     "tests/discovery_mdns.rs",
     "tests/doctor.rs",
@@ -125,16 +126,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1741,
+      "passed": 1777,
       "failed": 0,
-      "ignored": 10,
-      "summaries": 121
+      "ignored": 12,
+      "summaries": 122
     },
     "darwin": {
-      "passed": 1716,
+      "passed": 1752,
       "failed": 0,
-      "ignored": 9,
-      "summaries": 121
+      "ignored": 11,
+      "summaries": 122
     }
   }
 }
