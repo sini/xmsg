@@ -17,6 +17,8 @@ XMSG, HERMES, PLUGIN, SETTINGS = sys.argv[1:5]
 TMP = os.environ.get("TMPDIR", "/tmp")
 RUN = os.path.join(TMP, "run")
 SOCKS = os.path.join(RUN, "xmsg")
+STATE = os.path.join(TMP, "xmsg-state")
+DB_PATH = os.path.join(STATE, "xmsg.db")
 HOME = os.path.join(TMP, "home")
 HH = os.path.join(HOME, ".hermes")
 procs = []
@@ -279,7 +281,7 @@ def acked(message_id):
     """Whether a plugin session's queued message was acked: the queue row's `delivered_at`
     (src/storage.rs). The send's `outcome` is `queued` until the ack and `delivered` after it."""
     import sqlite3
-    db = sqlite3.connect(f"file:{os.path.join(TMP, 'xmsg.db')}?mode=ro", uri=True)
+    db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     try:
         row = db.execute("SELECT delivered_at FROM pi_pending_messages WHERE id = ?", (message_id,)).fetchone()
     finally:
@@ -335,7 +337,6 @@ def turn(text, secs=60):
 # --- run ---------------------------------------------------------------------------------
 
 os.makedirs(os.path.join(HH, "plugins"), exist_ok=True)
-STATE = os.path.join(TMP, "xmsg-state")
 for d in (RUN, SOCKS, STATE):
     os.makedirs(d, mode=0o700, exist_ok=True)
     os.chmod(d, 0o700)
@@ -377,7 +378,7 @@ procs.append(subprocess.Popen(
         XMSG,
         "serve",
         "--db-path",
-        os.path.join(STATE, "xmsg.db"),
+        DB_PATH,
         "--http-sock",
         os.path.join(SOCKS, "http.sock"),
         "--agent-sock",

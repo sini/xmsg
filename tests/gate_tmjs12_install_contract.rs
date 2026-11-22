@@ -128,8 +128,12 @@ fn wait_for_socket(path: &Path, child: &mut Child, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
             panic!(
-                "xmsg serve exited early ({status}) before binding {}",
+                "xmsg serve exited early ({status}) before binding {}: {stderr}",
                 path.display()
             );
         }
@@ -1312,17 +1316,19 @@ fn s1_systemd_adopted_http_listener_and_foreign_listener_control() {
     probe_legacy_listeners(&resolved, &env, std::slice::from_ref(&legacy_http), &[])
         .expect("M-S1g: validated systemd-adopted endpoint must be excluded from legacy probe");
 
-    // 3. On Linux, also run a full live `xmsg serve` with LISTEN_PID/LISTEN_FDS/LISTEN_FDNAMES=http
-    //    adopting the bound listener at `$XDG_RUNTIME_DIR/xmsg/http.sock` (DirectoryMode=0700),
-    //    serving `/healthz`, and retaining the socket node after daemon exit!
-    #[cfg(target_os = "linux")]
+    // 3. Run a full live `xmsg serve` with LISTEN_PID/LISTEN_FDS/LISTEN_FDNAMES=http adopting
+    //    the bound listener at `$XDG_RUNTIME_DIR/xmsg/http.sock` (DirectoryMode=0700), serving
+    //    `/healthz`, and retaining the socket node after daemon exit!
     {
         use std::os::unix::io::AsRawFd;
         use std::os::unix::process::CommandExt;
 
         let adopted_fd = _foreign_listener.as_raw_fd();
-        let mut cmd = Command::new(BIN);
-        cmd.scrub_agy_env()
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("export LISTEN_PID=$$; exec \"$0\" \"$@\"")
+            .arg(BIN)
+            .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &legacy_xdg_rt)
             .env("LISTEN_FDS", "1")
@@ -1349,12 +1355,6 @@ fn s1_systemd_adopted_http_listener_and_foreign_listener_control() {
                 if flags >= 0 {
                     libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
                 }
-                let pid_str = format!("{}\0", libc::getpid());
-                libc::setenv(
-                    b"LISTEN_PID\0".as_ptr() as *const libc::c_char,
-                    pid_str.as_ptr() as *const libc::c_char,
-                    1,
-                );
                 Ok(())
             });
         }

@@ -243,6 +243,7 @@ def user_texts(session):
 home = os.path.join(TMP, "home")
 os.makedirs(os.path.join(home, ".config", "opencode", "plugin"), exist_ok=True)
 STATE = os.path.join(TMP, "xmsg-state")
+DB_PATH = os.path.join(STATE, "xmsg.db")
 for d in (RUN, SOCKS, STATE):
     os.makedirs(d, mode=0o700, exist_ok=True)
     os.chmod(d, 0o700)
@@ -276,7 +277,7 @@ def serve():
             XMSG,
             "serve",
             "--db-path",
-            os.path.join(STATE, "xmsg.db"),
+            DB_PATH,
             "--http-sock",
             os.path.join(SOCKS, "http.sock"),
             "--agent-sock",
@@ -462,7 +463,7 @@ ok(f"C1/C8: the child's send is attributed to {d['from_name']} and xmsg-reclaim.
 # `POST /v1/messages` to `<P>/<child>` returns `queued`. The inbox result holds that message
 # and the child's own address. The message's outcome becomes `delivered`.
 def child_in_turn():
-    c = sqlite3.connect(os.path.join(TMP, "xmsg.db"))
+    c = sqlite3.connect(DB_PATH)
     r = c.execute("SELECT turn_pid FROM subagents WHERE parent = ? AND agent_id = ?", (p_bare, child)).fetchone()
     c.close()
     return r is not None and r[0] is not None
@@ -487,7 +488,7 @@ if inbox_payload.get("address") != child_sub_addr:
     fail(f"C4: inbox address {inbox_payload.get('address')!r} != {child_sub_addr!r}")
 if not any(body_c4 in m.get("body", "") for m in inbox_payload.get("messages", [])):
     fail(f"C4: inbox messages did not contain {body_c4!r}: {inbox_payload}")
-db_conn = sqlite3.connect(os.path.join(TMP, "xmsg.db"))
+db_conn = sqlite3.connect(DB_PATH)
 row_c4 = db_conn.execute("SELECT outcome FROM messages WHERE id = ?", (sent_c4["message_id"],)).fetchone()
 db_conn.close()
 if not row_c4 or row_c4[0] != "delivered":
@@ -497,7 +498,7 @@ ok(f"C4: in-turn message {sent_c4['message_id']} delivered via xmsg_inbox to {ch
 # C5: Turn end, then fallback. After the child's turn ends, a send to `<P>/<child>` appears
 # as a user prompt in s1 containing `to=<P>/<child> agent_id=<child>`, within 30 s.
 def child_turn_cleared():
-    c = sqlite3.connect(os.path.join(TMP, "xmsg.db"))
+    c = sqlite3.connect(DB_PATH)
     r = c.execute("SELECT turn_pid FROM subagents WHERE parent = ? AND agent_id = ?", (p_bare, child)).fetchone()
     c.close()
     return r is not None and r[0] is None

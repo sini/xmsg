@@ -280,13 +280,18 @@ async fn test_oracle_1_multi_dir_listed_and_deliverable() {
     drop(lines_b);
 }
 
-/// Oracle 2: No flag => behavior identical to today (default dir only).
+/// Oracle 2: No flag => default `~/.claude/sessions` when account home validates (or empty when omitted).
 #[test]
 fn test_oracle_2_default_dir_resolution() {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let default_expected = PathBuf::from(&home).join(".claude").join("sessions");
+    let lookup = xmsg::install_paths::SystemHomeLookup;
+    let env = xmsg::install_paths::ResolveEnv::from_process(&lookup);
+    let default_expected: Vec<PathBuf> = xmsg::install_paths::resolve_optional_home(&env)
+        .into_iter()
+        .map(|h| h.join(".claude").join("sessions"))
+        .collect();
 
-    // When no dirs are provided and no env vars set, resolve to ~/.claude/sessions
+    // When no dirs are provided and no env vars set, resolve to ~/.claude/sessions (when account
+    // home validates; omitted rather than trusting a mismatched HOME such as Nix /homeless-shelter).
     // Temporarily clear any XMSG_SESSIONS_DIR env var to simulate default run
     let orig_env = std::env::var("XMSG_SESSIONS_DIR").ok();
     let orig_env_dirs = std::env::var("XMSG_SESSIONS_DIRS").ok();
@@ -295,9 +300,8 @@ fn test_oracle_2_default_dir_resolution() {
 
     let resolved_default = resolve_sessions_dirs(vec![]);
     assert_eq!(
-        resolved_default,
-        vec![default_expected.clone()],
-        "Default without flag/env must be ~/.claude/sessions"
+        resolved_default, default_expected,
+        "Default without flag/env must match validated account ~/.claude/sessions (or empty when unavailable)"
     );
 
     // Test with colon-separated paths in env var
