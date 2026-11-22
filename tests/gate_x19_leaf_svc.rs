@@ -3346,6 +3346,10 @@ async fn leaf_replay_acks_pruned_delivery_and_waits_for_unacked_service_message(
                         .is_err(),
                     "hub acknowledged a pending replay before the service"
                 );
+                assert!(
+                    !storage::has_svc_message(&leaf.db.lock().unwrap(), fresh).unwrap(),
+                    "leaf pulled the next item while waiting for the service ACK"
+                );
             }
             let ack = serde_json::json!({"action": "ack", "messageId": id});
             writer

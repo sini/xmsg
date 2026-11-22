@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -78,6 +79,8 @@ pub(crate) struct Report {
     own_leaf: Option<Certificate>,
     own_expiry: &'static str,
     peers: Vec<Peer>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    stalled_leaf_ack_seconds: BTreeMap<String, u64>,
     partial: bool,
     truncated: bool,
     budget_exhausted: bool,
@@ -309,6 +312,7 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
             own_leaf: None,
             own_expiry: "unknown",
             peers: Vec::new(),
+            stalled_leaf_ack_seconds: BTreeMap::new(),
             partial: true,
             truncated: false,
             budget_exhausted: false,
@@ -410,6 +414,7 @@ pub(crate) async fn collect(fed: Option<Arc<FedState>>) -> Report {
         own_leaf,
         own_expiry,
         peers,
+        stalled_leaf_ack_seconds: fed.svc_store.stalled_leaf_ack_ages(MAX_PEERS),
         partial,
         truncated,
         budget_exhausted,

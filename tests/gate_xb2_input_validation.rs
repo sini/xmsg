@@ -71,7 +71,7 @@ fn make_test_state(tmp: &std::path::Path) -> Arc<AppState> {
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: Arc::new(RwLock::new(HashMap::new())),
         pi_notify_tx: pi_tx,
-        svc_store: Arc::new(RwLock::new(HashMap::new())),
+        svc_store: xmsg::svc::new_svc_store(),
         svc_notify_tx: svc_tx,
         node_name: "sini.leaf".to_string(),
         max_body: 65536,

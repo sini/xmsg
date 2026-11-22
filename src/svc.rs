@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -146,10 +146,109 @@ impl Drop for SvcRegistrationGuard {
     }
 }
 
-pub type SvcStore = Arc<RwLock<HashMap<String, SvcSessionInfo>>>;
+type ServiceSessions = RwLock<HashMap<String, SvcSessionInfo>>;
+type LeafAckWaits = Mutex<BTreeMap<String, Arc<tokio::time::Instant>>>;
+
+#[derive(Clone, Default)]
+pub struct SvcStore {
+    sessions: Arc<ServiceSessions>,
+    leaf_ack_waits: Arc<LeafAckWaits>,
+}
+
+impl std::ops::Deref for SvcStore {
+    type Target = ServiceSessions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sessions
+    }
+}
 
 pub fn new_svc_store() -> SvcStore {
-    Arc::new(RwLock::new(HashMap::new()))
+    SvcStore::default()
+}
+
+const LEAF_ACK_STALL: Duration = Duration::from_secs(60);
+const LEAF_ACK_POLL: Duration = Duration::from_millis(50);
+
+impl SvcStore {
+    pub(crate) fn stalled_leaf_ack_ages(&self, limit: usize) -> BTreeMap<String, u64> {
+        let now = tokio::time::Instant::now();
+        self.leaf_ack_waits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(hub, started)| {
+                let elapsed = now.saturating_duration_since(**started);
+                (elapsed >= LEAF_ACK_STALL).then(|| (hub.clone(), elapsed.as_secs()))
+            })
+            .take(limit)
+            .collect()
+    }
+}
+
+struct LeafAckWait<'a> {
+    waits: &'a LeafAckWaits,
+    hub: &'a str,
+    started: Arc<tokio::time::Instant>,
+}
+
+impl Drop for LeafAckWait<'_> {
+    fn drop(&mut self) {
+        let mut waits = self.waits.lock().unwrap();
+        if waits
+            .get(self.hub)
+            .is_some_and(|started| Arc::ptr_eq(started, &self.started))
+        {
+            waits.remove(self.hub);
+        }
+    }
+}
+
+async fn wait_for_leaf_service_ack(
+    services: &SvcStore,
+    db: &Mutex<rusqlite::Connection>,
+    hub: &str,
+    message_id: &str,
+) {
+    let started = Arc::new(tokio::time::Instant::now());
+    services
+        .leaf_ack_waits
+        .lock()
+        .unwrap()
+        .insert(hub.to_owned(), started.clone());
+    let _wait = LeafAckWait {
+        waits: &services.leaf_ack_waits,
+        hub,
+        started: started.clone(),
+    };
+    let deadline = *started + LEAF_ACK_STALL;
+    let mut warned = false;
+    loop {
+        let acked = db
+            .lock()
+            .ok()
+            .is_some_and(|conn| storage::is_svc_message_acked(&conn, message_id).unwrap_or(false));
+        if acked {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        if !warned && now >= deadline {
+            tracing::warn!(
+                message_id,
+                hub,
+                elapsed_secs = (now - *started).as_secs(),
+                "Leaf inbox stalled waiting for service ACK"
+            );
+            warned = true;
+        }
+        let next_poll = now + LEAF_ACK_POLL;
+        tokio::time::sleep_until(if warned {
+            next_poll
+        } else {
+            next_poll.min(deadline)
+        })
+        .await;
+    }
 }
 
 static NEXT_SVC_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -1162,17 +1261,8 @@ pub async fn run_leaf_inbox_task(
                 }
 
                 if !already_acked {
-                    let ack = async {
-                        loop {
-                            let acked = db.lock().ok().is_some_and(|conn| {
-                                storage::is_svc_message_acked(&conn, &msg.id).unwrap_or(false)
-                            });
-                            if acked {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
-                    };
+                    let ack =
+                        wait_for_leaf_service_ack(&fed_state.svc_store, &db, &peer_name, &msg.id);
                     let legacy_controls = async {
                         loop {
                             if !control_worker.legacy() {
@@ -1338,4 +1428,83 @@ pub(crate) fn strict_registration_connected(info: &SvcSessionInfo) -> bool {
     info.liveness
         .as_ref()
         .is_some_and(|witness| witness.connected.load(Ordering::Acquire))
+}
+
+#[cfg(test)]
+mod leaf_ack_tests {
+    use super::*;
+    use std::future::{poll_fn, Future};
+    use std::pin::Pin;
+    use std::task::Poll;
+    use tracing::instrument::WithSubscriber;
+
+    async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
+        poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_leaf_ack_warns_once_and_waits_for_late_service_ack() {
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        storage::init_db(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO svc_pending_messages (id,session_id,created_at,from_name,bytes,text,envelope,origin)
+             VALUES ('head-id','service-id',0,'sender',14,'secret-content','{}','{}')",
+            [],
+        ).unwrap();
+        let db = Mutex::new(conn);
+        let services = new_svc_store();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let output = bytes.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || Capture(output.clone()))
+            .finish();
+        let wait = wait_for_leaf_service_ack(&services, &db, "test-hub", "head-id")
+            .with_subscriber(subscriber);
+        tokio::pin!(wait);
+        assert!(poll_once(wait.as_mut()).await.is_pending());
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(poll_once(wait.as_mut()).await.is_pending());
+        assert!(bytes.lock().unwrap().is_empty());
+        assert!(services.stalled_leaf_ack_ages(32).is_empty());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(poll_once(wait.as_mut()).await.is_pending());
+        assert_eq!(
+            services.stalled_leaf_ack_ages(32),
+            BTreeMap::from([("test-hub".into(), 60)])
+        );
+        tokio::time::advance(Duration::from_secs(120)).await;
+        assert!(poll_once(wait.as_mut()).await.is_pending());
+        {
+            let output = bytes.lock().unwrap();
+            let log = std::str::from_utf8(&output).unwrap();
+            assert_eq!(log.lines().count(), 1, "{log}");
+            for field in [
+                "WARN",
+                "message_id=\"head-id\"",
+                "hub=\"test-hub\"",
+                "elapsed_secs=60",
+            ] {
+                assert!(log.contains(field), "{log}");
+            }
+            assert!(!log.contains("secret-content"), "{log}");
+        }
+        assert!(storage::ack_svc_message(&db.lock().unwrap(), "service-id", "head-id").unwrap());
+        tokio::time::advance(LEAF_ACK_POLL).await;
+        assert!(poll_once(wait.as_mut()).await.is_ready());
+        assert!(services.stalled_leaf_ack_ages(32).is_empty());
+    }
 }

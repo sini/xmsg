@@ -201,6 +201,11 @@ Planned: the federation section also reports a Warn for ambiguous dynamic alias 
 `pattern admits ambiguous aliases; give pods concrete CA leaf entries`. This check uses the
 loaded configuration, without another network probe or full URI witnesses in the warning.
 
+Planned: on a leaf, doctor also reports a WARN for any hub whose current inbox head
+has waited at least 60 seconds for a service ACK. JSON includes
+`stalled_leaf_ack_seconds`, a map from hub names to ages in whole seconds, only
+when a head is stalled. The age measures the running leaf worker's current wait.
+
 The invocation probes at most 32 configured peers in sorted order, with at most four
 concurrent attempts, two seconds per peer and an eight-second total deadline. Doctor's
 IPC deadline is nine seconds. A configured `leaf` (<Status id="xmsg.doctor-peers" />) with an empty address

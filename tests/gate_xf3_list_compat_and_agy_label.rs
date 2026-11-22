@@ -1745,7 +1745,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             agy_store: xmsg::agy::new_agy_store(),
             pi_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             pi_notify_tx: inproc_pi_notify,
-            svc_store: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            svc_store: xmsg::svc::new_svc_store(),
             svc_notify_tx: inproc_svc_notify,
             reply_ttl: Duration::from_secs(3600),
             idempotency_ttl: Duration::from_secs(3600),

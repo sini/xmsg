@@ -73,6 +73,8 @@ struct Report {
     endpoints_usable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     install: Option<xmsg::doctor_install::InstallDoctorReport>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    stalled_leaf_ack_seconds: BTreeMap<String, u64>,
     checks: Vec<Check>,
     passed: usize,
     warnings: usize,
@@ -93,6 +95,7 @@ impl Report {
             leaf_register_socket: None,
             endpoints_usable: false,
             install: None,
+            stalled_leaf_ack_seconds: BTreeMap::new(),
             checks: vec![],
             passed: 0,
             warnings: 0,
@@ -683,6 +686,24 @@ fn unknown_federation(report: &mut Report, names: &[String]) {
     }
 }
 
+fn add_stalled_leaf_ack_checks(report: &mut Report, ages: &serde_json::Value) {
+    if let Some(ages) = ages.as_object() {
+        for (hub, age) in ages.iter().take(MAX_PEERS) {
+            if let Some(seconds) = age.as_u64() {
+                report.stalled_leaf_ack_seconds.insert(hub.clone(), seconds);
+                report.add(
+                    format!("federation.stalled_leaf_ack.{hub}"),
+                    Status::Warn,
+                    format!(
+                        "Leaf inbox for hub {hub} has waited {seconds} seconds for a service ACK."
+                    ),
+                    Some("Check the local service's custody capacity and delivery health."),
+                );
+            }
+        }
+    }
+}
+
 async fn federation(report: &mut Report, path: Option<&Path>, configured_names: &[String]) {
     let Some(path) = path else {
         unknown_federation(report, configured_names);
@@ -709,6 +730,7 @@ async fn federation(report: &mut Report, path: Option<&Path>, configured_names: 
         unknown_federation(report, configured_names);
         return;
     }
+    add_stalled_leaf_ack_checks(report, &value["stalled_leaf_ack_seconds"]);
     match value["ambiguous_aliases"].as_bool() {
         Some(true) => report.add(
             "federation.aliases",
@@ -1113,6 +1135,21 @@ pub fn run(args: DoctorArgs) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_reports_stalled_leaf_ack_seconds_only_when_stalled() {
+        let mut report = Report::new();
+        add_stalled_leaf_ack_checks(&mut report, &serde_json::Value::Null);
+        let healthy = serde_json::to_value(&report).unwrap();
+        assert!(healthy.get("stalled_leaf_ack_seconds").is_none());
+        assert!(report.checks.is_empty());
+
+        add_stalled_leaf_ack_checks(&mut report, &serde_json::json!({"test-hub": 62}));
+        let stalled = serde_json::to_value(&report).unwrap();
+        assert_eq!(stalled["stalled_leaf_ack_seconds"]["test-hub"], 62);
+        assert_eq!(stalled["checks"][0]["status"], "warn");
+        assert!(report.checks[0].message.contains("62 seconds"));
+    }
 
     #[test]
     fn linked_sqlite_versions_are_informational_even_when_unsupported() {
