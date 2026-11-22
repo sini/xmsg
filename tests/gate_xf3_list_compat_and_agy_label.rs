@@ -401,7 +401,6 @@ async fn start_node_with_bin(
     };
 
     let mut child = tokio::process::Command::new(bin_path)
-        .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("XMSG_AGY_PRESENCE_DIR", &presence_dir)
@@ -412,6 +411,7 @@ async fn start_node_with_bin(
         .env("CODEX_HOME", run_dir.join(".codex"))
         .env("PATH", &path_env)
         .env("RUST_LOG", "info")
+        .scrub_agy_env()
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
