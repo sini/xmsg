@@ -248,7 +248,7 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32, uid: u32) -> Result<(), Error
             parent.as_raw_fd(),
             name.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            mode as libc::mode_t,
+            mode as libc::c_uint,
         )
     };
     if fd < 0 {

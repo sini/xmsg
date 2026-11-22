@@ -555,11 +555,24 @@ async fn enrollment_operator(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Restrict newly created state, config, log, and socket files to owner-only before any write.
     xmsg::install_paths::apply_process_umask();
-    let adapter_command=std::env::args_os().nth(1).is_some_and(|command|command=="install"||command=="uninstall");
-    let cli = match Cli::try_parse(){Ok(cli)=>cli,Err(error)=>{
-        if adapter_command&&!matches!(error.kind(),clap::error::ErrorKind::DisplayHelp|clap::error::ErrorKind::DisplayVersion){eprintln!("claude: refused invalid_arguments");std::process::exit(2);}
-        error.exit()
-    }};
+    let adapter_command = std::env::args_os()
+        .nth(1)
+        .is_some_and(|command| command == "install" || command == "uninstall");
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if adapter_command
+                && !matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                )
+            {
+                eprintln!("claude: refused invalid_arguments");
+                std::process::exit(2);
+            }
+            error.exit()
+        }
+    };
 
     match cli.command {
         Commands::ObserveCollector(args) => {
