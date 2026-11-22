@@ -1159,6 +1159,9 @@ pub async fn run_leaf_inbox_task(
 
                 if newly_queued {
                     let _ = svc_notify_tx.send(target_session_id.clone());
+                    if let Some(ref irt) = msg.in_reply_to {
+                        let _ = fed_state.notify_tx.send(irt.clone());
+                    }
                 }
 
                 if !already_acked {
