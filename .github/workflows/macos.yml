@@ -298,36 +298,70 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install toolchain
         run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
-      - name: Darwin attribution refusal source control
-        shell: bash
+      - name: Darwin attribution source controls
         run: |
-          set -euo pipefail
-          source_file=src/caller_attribution.rs
-          backup="$(mktemp)"
-          red_log="$(mktemp)"
-          cp "$source_file" "$backup"
-          trap 'cp "$backup" "$source_file"; rm -f "$backup" "$red_log"' EXIT
           python3 - <<'PYTHON'
           from pathlib import Path
-          path = Path("src/caller_attribution.rs")
-          source = path.read_text()
-          guard = '    if cfg!(target_os = "macos") {\n        return Err(FailureReason::Unsupported);\n    }\n'
-          assert source.count(guard) == 1
-          path.write_text(source.replace(guard, "", 1))
+          import subprocess
+
+          controls = [
+              (
+                  "src/caller_attribution.rs",
+                  '    if cfg!(target_os = "macos") {\n        return Err(FailureReason::Unsupported);\n    }\n',
+                  "",
+                  "caller_attribution::darwin_tests::darwin_refuses_attribution_before_receiving_rights",
+                  "Darwin attribution must refuse before receiving rights:",
+              ),
+              (
+                  "src/agy.rs",
+                  "crate::client::caller_attribution::with_fd_inheritance_gate(|| cmd.spawn())",
+                  "cmd.spawn()",
+                  "agy::attribution_spawn_tests::actual_delivery_spawn_holds_the_receive_inheritance_gate_at_fork",
+                  "actual delivery spawn forked outside the shared receive-to-fcntl gate",
+              ),
+              (
+                  "src/client/caller_attribution.rs",
+                  'let _guard = INHERITANCE_GATE\n        .lock()\n        .map_err(|_| io::Error::other("FD inheritance gate poisoned"))?;',
+                  "let _guard = ();",
+                  "client::caller_attribution::tests::actual_inheritance_gate_owns_the_shared_mutex_during_spawn_operation",
+                  "spawn operation did not own the shared receive-to-fcntl mutex",
+              ),
+              (
+                  "src/client/caller_attribution.rs",
+                  "mark_cloexec(owned.as_raw_fd())?;",
+                  "let _ = owned;",
+                  "client::caller_attribution::tests::attribution_wire_passes_one_descriptor_without_consuming_original",
+                  "received original descriptor was not close-on-exec",
+              ),
+          ]
+
+          def run(witness):
+              result = subprocess.run(
+                  ["cargo", "test", "--locked", "--lib", witness, "--", "--exact"],
+                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                  timeout=600,
+              )
+              print(result.stdout, flush=True)
+              return result
+
+          for filename, needle, replacement, witness, diagnostic in controls:
+              path = Path(filename)
+              source = path.read_text()
+              assert source.count(needle) == 1
+              try:
+                  path.write_text(source.replace(needle, replacement, 1))
+                  result = run(witness)
+                  assert result.returncode == 101
+                  assert f"test {witness} ... FAILED" in result.stdout
+                  assert diagnostic in result.stdout
+              finally:
+                  path.write_text(source)
+
+          for _, _, _, witness, _ in controls:
+              result = run(witness)
+              assert result.returncode == 0
+              assert f"test {witness} ... ok" in result.stdout
           PYTHON
-          witness=caller_attribution::darwin_tests::darwin_refuses_attribution_before_receiving_rights
-          if cargo test --locked --lib "$witness" -- --exact > "$red_log" 2>&1; then
-            cat "$red_log"
-            exit 1
-          else
-            status=$?
-          fi
-          cat "$red_log"
-          test "$status" -eq 101
-          grep -Fx "test $witness ... FAILED" "$red_log"
-          grep -F 'Darwin attribution must refuse before receiving rights:' "$red_log"
-          cp "$backup" "$source_file"
-          cargo test --locked --lib "$witness" -- --exact
       - name: cargo test
         run: cargo test --locked --no-fail-fast
 

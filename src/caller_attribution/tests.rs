@@ -9,7 +9,7 @@ use std::{
     sync::Mutex,
 };
 
-fn state(root: &std::path::Path) -> Arc<AppState> {
+pub(crate) fn state(root: &std::path::Path) -> Arc<AppState> {
     let sessions = root.join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
     let connection = rusqlite::Connection::open(root.join("state.db")).unwrap();
@@ -405,7 +405,7 @@ fn stalled_clients_have_fixed_workers_and_bounded_shutdown() {
     }
     let stats = handle.stats();
     let ready = Instant::now() + AUTHORITY_BUDGET;
-    while stats.active() != 4 && Instant::now() < ready {
+    while (stats.active() != 4 || stats.peak() != 4) && Instant::now() < ready {
         std::thread::yield_now();
     }
     assert_eq!(

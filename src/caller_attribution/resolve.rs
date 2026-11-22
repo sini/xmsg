@@ -468,5 +468,5 @@ mod tests;
 
 #[cfg(test)]
 thread_local! {
-    static REVALIDATION_BARRIER:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};
+    pub(crate) static REVALIDATION_BARRIER:std::cell::RefCell<Option<Box<dyn FnOnce()>>>=const{std::cell::RefCell::new(None)};
 }

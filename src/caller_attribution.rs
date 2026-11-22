@@ -6,7 +6,7 @@ mod lineage_tests;
 mod noninterference_tests;
 pub(crate) mod resolve;
 #[cfg(all(test, target_os = "linux"))]
-mod tests;
+pub(crate) mod tests;
 
 use crate::{client::caller_attribution as wire, http::AppState};
 use sha2::{Digest, Sha256};

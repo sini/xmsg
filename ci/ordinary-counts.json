@@ -122,7 +122,7 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1704,
+      "passed": 1705,
       "failed": 0,
       "ignored": 10,
       "summaries": 118

@@ -74,11 +74,23 @@ fn strict_original_metadata_retains_nondefault_timeouts_flags_and_bytes() {
 #[cfg(target_os = "linux")]
 #[test]
 fn strict_original_error_path_does_not_clear_pending_socket_error() {
-    fn pending() -> UnixStream {
+    fn unread() -> (UnixStream, UnixStream) {
         let (mut original, peer) = UnixStream::pair().unwrap();
         original.write_all(b"unread-pending-error").unwrap();
-        drop(peer);
-        original
+        (original, peer)
+    }
+    fn wait_for_error(stream: &UnixStream) {
+        let mut poll = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: 0,
+            revents: 0,
+        };
+        assert!(unsafe { libc::poll(&mut poll, 1, 2000) } > 0);
+        assert_ne!(
+            poll.revents & libc::POLLERR,
+            0,
+            "socket error was not published"
+        );
     }
     fn error(stream: &UnixStream) -> i32 {
         let mut value: libc::c_int = 0;
@@ -97,10 +109,22 @@ fn strict_original_error_path_does_not_clear_pending_socket_error() {
         );
         value
     }
-    let control = pending();
+    let (control, peer) = unread();
+    let retained = peer.try_clone().unwrap();
+    drop(peer);
+    assert_eq!(
+        error(&control),
+        0,
+        "the retained peer must delay the socket error"
+    );
+    drop(retained);
+    wait_for_error(&control);
     let expected = error(&control);
     assert_ne!(expected, 0, "pending socket error control did not fire");
-    let original = pending();
+
+    let (original, peer) = unread();
+    drop(peer);
+    wait_for_error(&original);
     let result = crate::process::strict_peer_cred_from_fd(
         original.as_fd(),
         Path::new(crate::process::LIVE_PROC_ROOT),

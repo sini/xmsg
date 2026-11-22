@@ -3583,11 +3583,8 @@ mod readonly_attribution_tests {
             Some(crate::client::caller_attribution::FailureReason::Context)
         );
     }
-    #[test]
-    fn readonly_existing_child_checks_owner_generation_and_turn_without_repair() {
-        let mut f = fixture();
-        root(&mut f, A, 1);
-        let (dev, ino) = rollout(&f, CHILD, A, Some(A));
+    fn attach_child(f: &mut Fixture) {
+        let (dev, ino) = rollout(f, CHILD, A, Some(A));
         let state = CodexChildState {
             root_id: A.into(),
             child_id: CHILD.into(),
@@ -3602,6 +3599,13 @@ mod readonly_attribution_tests {
             stopped_all: false,
         };
         f.store.children.insert((A.into(), CHILD.into()), state);
+    }
+
+    #[test]
+    fn readonly_existing_child_checks_owner_generation_and_turn_without_repair() {
+        let mut f = fixture();
+        root(&mut f, A, 1);
+        attach_child(&mut f);
         let snapshot = f
             .store
             .readonly_attribution_binding(
@@ -3675,6 +3679,95 @@ mod readonly_attribution_tests {
             HashSet::from(["turn-a".into()])
         );
     }
+    #[test]
+    fn readonly_resolver_rechecks_root_and_child_generations_after_capture() {
+        use crate::caller_attribution::resolve::{resolve, REVALIDATION_BARRIER};
+        use crate::client::caller_attribution::{CallerContext, FailureReason};
+        use crate::process::PeerCred;
+
+        let mut f = fixture();
+        root(&mut f, A, 1);
+        attach_child(&mut f);
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        symlink(&exe, f.config.proc_root.join("100/exe")).unwrap();
+        f.config.trusted_codex_exes = vec![exe];
+        let query_dir = f.config.proc_root.join("900");
+        std::fs::create_dir(&query_dir).unwrap();
+        let caller_stat = std::fs::read_to_string(f.config.proc_root.join("100/stat")).unwrap();
+        std::fs::write(
+            query_dir.join("stat"),
+            caller_stat.replacen("100 (", "900 (", 1),
+        )
+        .unwrap();
+
+        let mut app = crate::caller_attribution::tests::state(f._dir.path());
+        Arc::get_mut(&mut app).unwrap().agy_config.proc_root = f.config.proc_root.clone();
+        let runtime = init_for_state(&app, f.config.clone());
+        let store = std::mem::take(&mut f.store);
+        crate::storage::upsert_codex_root(&app.db.lock().unwrap(), &store.roots[A].snapshot())
+            .unwrap();
+        runtime.lock().unwrap().store = store;
+        crate::storage::subagent_start_turn(
+            &app.db.lock().unwrap(),
+            A,
+            CHILD,
+            100,
+            "42",
+            None,
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+
+        let uid = crate::client::current_uid();
+        let caller = PeerCred::unpinned(uid, 100);
+        let executor = PeerCred::unpinned(uid, 900);
+        for (generation, thread) in [(1, A), (2, CHILD)] {
+            let context = CallerContext::Codex {
+                session_id: A.into(),
+                thread_id: thread.into(),
+                turn_id: (thread == CHILD).then(|| "turn-a".into()),
+            };
+            let query = || resolve(&app, &caller, &executor, Some(&context), deadline());
+            let before = query().expect("root and child witnesses must resolve before drift");
+            assert_eq!(before.stamp.root_generation, Some(generation));
+            assert_eq!(
+                before.stamp.child_generation,
+                (thread == CHILD).then_some(generation)
+            );
+
+            let app = app.clone();
+            let runtime = runtime.clone();
+            REVALIDATION_BARRIER.with(|barrier| {
+                *barrier.borrow_mut() = Some(Box::new(move || {
+                    let mut runtime = runtime.lock().unwrap();
+                    let root = runtime.store.roots.get_mut(A).unwrap();
+                    root.generation = generation + 1;
+                    let snapshot = root.snapshot();
+                    runtime
+                        .store
+                        .children
+                        .get_mut(&(A.into(), CHILD.into()))
+                        .unwrap()
+                        .root_generation = generation + 1;
+                    crate::storage::upsert_codex_root(&app.db.lock().unwrap(), &snapshot).unwrap();
+                }));
+            });
+            assert_eq!(
+                query().err(),
+                Some(FailureReason::Changed),
+                "generation changed after capture but the resolver published stale authority for {thread}"
+            );
+            let after = query().expect("a fresh capture must see the new eligible generation");
+            assert_eq!(after.stamp.root_generation, Some(generation + 1));
+            assert_eq!(
+                after.stamp.child_generation,
+                (thread == CHILD).then_some(generation + 1)
+            );
+        }
+    }
+
     #[test]
     fn readonly_root_rollout_nonstring_parent_is_not_root_scope() {
         let mut f = fixture();
