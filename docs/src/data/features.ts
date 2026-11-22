@@ -329,6 +329,19 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		],
 		note: 'Retains history for removed or unconfigured nodes for retention_after_inactive_secs (default 604800 = 7 days) after last accepted ingest.',
 	},
+	'xmsg.install-contract': {
+		id: 'xmsg.install-contract',
+		title: 'Shared installation path contract, legacy guard, schema preservation fence, and atomic socket publication',
+		owner: 'sini',
+		evidence: [
+			{ path: 'src/install_paths.rs', anchor: 'pub fn resolve_install(' },
+			{ path: 'src/runtime_lock.rs', anchor: 'pub fn bind_and_publish_socket(' },
+			{ path: 'src/doctor_install.rs', anchor: 'pub fn inspect_install(' },
+			{ path: 'src/storage.rs', anchor: 'pub fn init_db(' },
+		],
+		plannedSince: '2026-11-21',
+		note: 'Breaking default path change with coordinated re-pin; Claude adapter and Homebrew staging follow in separate PRs.',
+	},
 };
 
 export const SIBLING_ALLOWLIST: SiblingAllowlistEntry[] = [

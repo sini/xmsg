@@ -499,16 +499,13 @@ pub fn compute_namespace_identity(
     let dev = meta.dev();
     let ino = meta.ino();
     let uid = meta.uid();
-    let marker_bytes = serde_json::to_vec(&(
-        canonical_state_root.as_os_str().as_bytes(),
-        dev,
-        ino,
-        uid,
-    ))
-    .map_err(|e| InstallError::Io {
-        path: canonical_state_root.to_path_buf(),
-        source: io::Error::other(e),
-    })?;
+    let marker_bytes =
+        serde_json::to_vec(&(canonical_state_root.as_os_str().as_bytes(), dev, ino, uid)).map_err(
+            |e| InstallError::Io {
+                path: canonical_state_root.to_path_buf(),
+                source: io::Error::other(e),
+            },
+        )?;
     let digest = hex::encode(&Sha256::digest(&marker_bytes)[..6]);
     let dir_name = format!("xmsg-{uid}-{digest}");
     Ok(NamespaceIdentity {
@@ -806,12 +803,7 @@ pub fn resolve_install(
             });
         };
         let ns_id = compute_namespace_identity(&canon_state)?;
-        let longest = if req.leaf {
-            "register.sock"
-        } else {
-            "register.sock"
-        };
-        let parent = select_runtime_parent(env, &ns_id.dir_name, longest)?;
+        let parent = select_runtime_parent(env, &ns_id.dir_name, "register.sock")?;
         let ns_dir = parent.path.join(&ns_id.dir_name);
         (Some(ns_dir), Some(ns_id), Some(parent))
     };
@@ -1048,8 +1040,7 @@ fn check_legacy_components_raw(
         // Database check (only when DB is unpinned).
         if !db_explicit {
             let legacy_db = root.join("xmsg.db");
-            let canon =
-                canonicalize_best_effort(&legacy_db).unwrap_or_else(|_| legacy_db.clone());
+            let canon = canonicalize_best_effort(&legacy_db).unwrap_or_else(|_| legacy_db.clone());
             if canon != resolved_db_canon && seen_db.insert(canon) {
                 match inspect_regular_file(&legacy_db)? {
                     FilePresence::Present => {
@@ -1128,18 +1119,19 @@ fn check_legacy_components_raw(
                     || resolved_peers_canon
                         .as_ref()
                         .is_some_and(|rp| rp == &canon_peers);
-                if !same_as_resolved && seen_peers.insert(canon_peers) {
-                    if matches!(inspect_regular_file(&legacy_peers)?, FilePresence::Present) {
-                        conflicts.push(LegacyConflict {
-                            component: "peers".into(),
-                            legacy_path: legacy_peers.clone(),
-                            compatible_pin: format!(
-                                "--peers-file {} (or XMSG_PEERS_FILE / --enroll-state {})",
-                                legacy_peers.display(),
-                                legacy_enroll_dir.display()
-                            ),
-                        });
-                    }
+                if !same_as_resolved
+                    && seen_peers.insert(canon_peers)
+                    && matches!(inspect_regular_file(&legacy_peers)?, FilePresence::Present)
+                {
+                    conflicts.push(LegacyConflict {
+                        component: "peers".into(),
+                        legacy_path: legacy_peers.clone(),
+                        compatible_pin: format!(
+                            "--peers-file {} (or XMSG_PEERS_FILE / --enroll-state {})",
+                            legacy_peers.display(),
+                            legacy_enroll_dir.display()
+                        ),
+                    });
                 }
             }
         }

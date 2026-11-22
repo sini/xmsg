@@ -340,7 +340,8 @@ pub fn default_state_directory() -> PathBuf {
     default_state_directory_checked().unwrap_or_else(|_| PathBuf::new())
 }
 
-pub fn default_state_directory_checked() -> std::result::Result<PathBuf, crate::install_paths::InstallError> {
+pub fn default_state_directory_checked(
+) -> std::result::Result<PathBuf, crate::install_paths::InstallError> {
     let lookup = crate::install_paths::SystemHomeLookup;
     let env = crate::install_paths::ResolveEnv::from_process(&lookup);
     Ok(crate::install_paths::default_state_root(&env)?.join("enroll"))

@@ -349,8 +349,9 @@ pub fn inspect_install_with_http_probe(
         checks.push(InstallCheck {
             id: "install.home_observations".into(),
             status: "info",
-            message: "account home unavailable: Claude adapter and coordinator observations are unknown."
-                .into(),
+            message:
+                "account home unavailable: Claude adapter and coordinator observations are unknown."
+                    .into(),
             hint: None,
         });
     }

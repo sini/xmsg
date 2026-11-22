@@ -36,14 +36,18 @@ impl McpConfig {
             .unwrap_or_default();
         let agent_sock = std::env::var("XMSG_AGENT_SOCK")
             .ok()
-            .and_then(|v| crate::install_paths::expand_explicit_path(std::path::Path::new(&v), &env).ok())
+            .and_then(|v| {
+                crate::install_paths::expand_explicit_path(std::path::Path::new(&v), &env).ok()
+            })
             .unwrap_or_else(|| {
                 crate::agent::default_agent_sock_path()
                     .unwrap_or_else(|_| PathBuf::from("/nonexistent/agent.sock"))
             });
         let http_sock = std::env::var("XMSG_HTTP_SOCK")
             .ok()
-            .and_then(|v| crate::install_paths::expand_explicit_path(std::path::Path::new(&v), &env).ok())
+            .and_then(|v| {
+                crate::install_paths::expand_explicit_path(std::path::Path::new(&v), &env).ok()
+            })
             .or_else(|| crate::http::default_http_sock_path().ok());
         Self {
             sessions_dirs,

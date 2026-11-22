@@ -262,7 +262,11 @@ fn s7_doctor_never_touches_held_serve_lock_and_emits_unredacted_endpoints_withou
     let enroll_dir = state.join("enroll");
     make_private_dir(&enroll_dir);
     let fed_key = enroll_dir.join("fed.key");
-    fs::write(&fed_key, format!("-----BEGIN PRIVATE KEY-----\n{secret_canary}\n-----END PRIVATE KEY-----\n")).unwrap();
+    fs::write(
+        &fed_key,
+        format!("-----BEGIN PRIVATE KEY-----\n{secret_canary}\n-----END PRIVATE KEY-----\n"),
+    )
+    .unwrap();
     fs::set_permissions(&fed_key, fs::Permissions::from_mode(0o600)).unwrap();
 
     let db_path = state.join("xmsg.db");
@@ -429,7 +433,10 @@ fn s7_doctor_never_touches_held_serve_lock_and_emits_unredacted_endpoints_withou
     );
     let live_json: serde_json::Value = serde_json::from_str(&live_stdout).unwrap();
     assert_eq!(live_json["endpoints_usable"], true, "{live_json}");
-    assert_eq!(live_json["http_socket"], http_sock.to_string_lossy().as_ref());
+    assert_eq!(
+        live_json["http_socket"],
+        http_sock.to_string_lossy().as_ref()
+    );
     drop(serve);
 
     // 4. Unsafe mode case (0755 state root): snapshot unchanged, endpoints_usable = false, install.state_root fails.
