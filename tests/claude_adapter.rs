@@ -241,7 +241,12 @@ fn check_command_pins(original_runtime_unset: bool) {
         client.env(key, value.as_str().unwrap());
     }
     let output=run(client,b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"list\",\"arguments\":{}}}\n");
-    assert!(output.status.success(), "installed MCP command failed");
+    assert!(
+        output.status.success(),
+        "installed MCP command failed: status={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let replies = String::from_utf8(output.stdout)
         .unwrap()
         .lines()
@@ -263,7 +268,12 @@ fn check_command_pins(original_runtime_unset: bool) {
     let mut shell = command(Path::new("/bin/sh"), &home, runtime_b.path(), &wrong_db);
     shell.arg("-c").arg(hook);
     let output=run(shell,b"{\"hook_event_name\":\"SubagentStart\",\"agent_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_type\":\"fixture\"}");
-    assert!(output.status.success(), "installed hook command failed");
+    assert!(
+        output.status.success(),
+        "installed hook command failed: status={} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let events = peers.events.lock().unwrap().clone();
     assert!(events.iter().all(|(endpoint,_)|*endpoint==expected),"installed commands resolved changed-environment endpoints instead of the selected endpoint: {events:?}");
     assert_eq!(
