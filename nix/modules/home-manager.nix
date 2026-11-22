@@ -23,7 +23,7 @@ let
   fed = srv.federation;
   oc = cfg.observeCollector;
   exe = lib.getExe cfg.package;
-  skill = ./skills/xmsg;
+  skill = ../../assets/claude/xmsg;
 
   # The hermes plugin directory (plugin.yaml and __init__.py). `extraPlugins` links it as
   # `plugins/nix-managed-<name>`; hermes keys a plugin by its manifest name, `xmsg`.

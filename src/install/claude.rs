@@ -2,7 +2,7 @@ use super::json_edit::{Document, Kind, Node};
 use super::*;
 use serde_json::{json, Value};
 
-pub(super) const SKILL: &[u8] = include_bytes!("../../nix/modules/skills/xmsg/SKILL.md");
+pub(super) const SKILL: &[u8] = include_bytes!("../../assets/claude/xmsg/SKILL.md");
 fn value(document: &Document, node: &Node) -> Result<Value, Error> {
     document.value(node).map_err(|_| Error::InvalidJson)
 }
@@ -38,25 +38,40 @@ fn remove(bytes: &[u8], parent: &[&str], key: &str) -> Result<Vec<u8>, Error> {
 fn raw_hash(d: &Document, node: &Node) -> String {
     hash(&d.source[node.span.clone()])
 }
+fn quote_text(text: &str) -> Result<String, Error> {
+    if text.contains('\0') {
+        return Err(Error::Unsafe);
+    }
+    Ok(format!("'{}'", text.replace('\'', "'\\''")))
+}
 fn quote(path: &std::path::Path) -> Result<String, Error> {
     let text = path.to_str().ok_or(Error::Unsupported)?;
     if !path.is_absolute() || text.contains('\0') {
         return Err(Error::Unsafe);
     }
-    Ok(format!("'{}'", text.replace('\'', "'\\''")))
+    quote_text(text)
 }
 type DesiredHooks = Vec<(ManagedField, String, Value)>;
 fn desired(request: &Request) -> Result<(Value, DesiredHooks), Error> {
     let executable = request.executable.to_str().ok_or(Error::Unsupported)?;
-    let mut args = vec![Value::String("mcp".into())];
+    let mut args = vec![json!("mcp"), json!("--db-path"), json!(request.db_path)];
     if let Some(path) = &request.agent_socket {
         args.extend([json!("--agent-sock"), json!(path)]);
     }
     if let Some(path) = &request.http_socket {
         args.extend([json!("--http-sock"), json!(path)]);
     }
-    let mcp = json!({"type":"stdio","command":executable,"args":args});
-    let mut command = format!("{} register claude --hook", quote(&request.executable)?);
+    let mcp =
+        json!({"type":"stdio","command":executable,"args":args,"env":request.command_environment});
+    let mut command = String::new();
+    for (name, value) in &request.command_environment {
+        command.push_str(&format!("{name}={} ", quote_text(value)?));
+    }
+    command.push_str(&format!(
+        "{} register claude --hook --db-path {}",
+        quote(&request.executable)?,
+        quote(&request.db_path)?
+    ));
     if let Some(path) = &request.agent_socket {
         command.push_str(&format!(" --sock {}", quote(path)?));
     }

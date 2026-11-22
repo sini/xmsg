@@ -133,11 +133,12 @@ transport or operational error: report it rather than retrying blindly.
 
 ## Without the tools: `http.sock`
 
-The same surface is an HTTP API on the unix socket `xmsg/http.sock` under `$XDG_RUNTIME_DIR`, or on macOS with
-`XDG_RUNTIME_DIR` unset, under the Darwin user temp directory (`getconf DARWIN_USER_TEMP_DIR`):
+The same surface has a local HTTP Unix socket. Read its verified path from `xmsg doctor --json` rather than
+guessing a runtime directory. Supply the same `--db-path` and any manual `--http-sock` pin you selected for
+the daemon. The example requires Python 3 and refuses when doctor cannot verify the endpoint:
 
 ```bash
-dir="${XDG_RUNTIME_DIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)}"; sock="${dir%/}/xmsg/http.sock"
+sock="$(xmsg doctor --json | python3 -c 'import json,sys; d=json.load(sys.stdin); p=d.get("http_socket"); assert d.get("endpoints_usable") is True and isinstance(p,str) and p; print(p)')"
 curl -s --unix-socket "$sock" http://localhost/v1/recipients
 curl -s --unix-socket "$sock" http://localhost/v1/messages \
   -H 'content-type: application/json' -d '{"to": "reviewer", "text": "Please review.", "from": "ci"}'
