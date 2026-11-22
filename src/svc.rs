@@ -1095,6 +1095,16 @@ pub async fn run_leaf_inbox_task(
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     let existed_before = storage::has_svc_message(&tx, &msg.id)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
+                    if storage::get_message(&tx, &msg.id)
+                        .map_err(|e| AppError::Internal(e.to_string()))?
+                        .is_some()
+                    {
+                        // A replay can outlive its service row when the hub misses our ACK.
+                        let already_acked = !existed_before
+                            || storage::is_svc_message_acked(&tx, &msg.id)
+                                .map_err(|e| AppError::Internal(e.to_string()))?;
+                        return Ok((already_acked, false));
+                    }
                     crate::fed::received_refs(
                         &fed_state,
                         &tx,

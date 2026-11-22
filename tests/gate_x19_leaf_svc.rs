@@ -3183,3 +3183,193 @@ async fn test_leaf_reply_oracle_6_both_paths_deliver_once_with_attested_service_
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leaf_replay_acks_pruned_delivery_and_waits_for_unacked_service_message() {
+    use xmsg::storage::{
+        self, MessageRecord, Origin, PeerMailboxInsert, PeerMailboxMessage, SvcPendingMessage,
+    };
+
+    let hub_creds = generate_self_signed_ed25519("hub").unwrap();
+    let leaf_creds = generate_self_signed_ed25519("leaf").unwrap();
+    let peer = |name: &str, address: String, pin: String, leaf| PeerConfig {
+        observe_labels: false,
+        name: name.into(),
+        address,
+        pin: Some(pin),
+        ca: None,
+        identities: None,
+        allow: vec!["send".into(), "reply".into()],
+        from: None,
+        leaf,
+        principals: Vec::new(),
+        targets: None,
+        dial: None,
+    };
+    let hub = create_hub_test_node(
+        "hub",
+        vec![peer(
+            "leaf",
+            "127.0.0.1:54329".into(),
+            leaf_creds.2.clone(),
+            true,
+        )],
+        hub_creds.clone(),
+    )
+    .await;
+    let leaf = create_leaf_test_node_opts(
+        "leaf",
+        vec![peer("hub", hub.fed_addr.to_string(), hub_creds.2, false)],
+        leaf_creds,
+        "svc:guard",
+        false,
+    )
+    .await;
+
+    let delivered = "pruned-delivery";
+    let pending = "unacked-delivery";
+    let fresh = "behind-duplicate";
+    let now = storage::now_epoch_secs();
+    let origin = Origin::service("sender", "hub");
+    {
+        let conn = leaf.db.lock().unwrap();
+        for (id, outcome) in [(delivered, "delivered"), (pending, "queued")] {
+            storage::insert_message(
+                &conn,
+                &MessageRecord {
+                    id: id.into(),
+                    created_at: now,
+                    session_id: "guard".into(),
+                    from_name: "sender@hub".into(),
+                    bytes: id.len(),
+                    outcome: outcome.into(),
+                    recipient_harness: "svc".into(),
+                    return_harness: Some("svc".into()),
+                    return_session_id: Some("sender".into()),
+                    thread_id: id.into(),
+                    return_host: Some("hub".into()),
+                },
+            )
+            .unwrap();
+        }
+        assert!(storage::insert_svc_message_with_cap(
+            &conn,
+            &SvcPendingMessage {
+                id: pending.into(),
+                session_id: "guard".into(),
+                created_at: now,
+                from_name: "sender@hub".into(),
+                bytes: pending.len(),
+                text: pending.into(),
+                envelope: pending.into(),
+                delivered_at: None,
+                origin: origin.clone(),
+                in_reply_to: None,
+            },
+            64,
+        )
+        .unwrap());
+        assert!(!storage::has_svc_message(&conn, delivered).unwrap());
+    }
+    {
+        let conn = hub.db.lock().unwrap();
+        for id in [delivered, pending, fresh] {
+            assert_eq!(
+                storage::insert_peer_mailbox(
+                    &conn,
+                    &PeerMailboxMessage {
+                        id: id.into(),
+                        peer: "leaf".into(),
+                        target_ref: "guard".into(),
+                        created_at: now,
+                        from_name: "sender@hub".into(),
+                        bytes: id.len(),
+                        body: id.into(),
+                        envelope: "{}".into(),
+                        origin: origin.clone(),
+                    },
+                )
+                .unwrap(),
+                PeerMailboxInsert::Inserted
+            );
+        }
+    }
+
+    let first = xmsg::fed::get_federated_inbox(&leaf.fed_state, "hub", 0)
+        .await
+        .unwrap()
+        .expect("seeded hub message must be readable");
+    assert!(matches!(first, xmsg::fed::FedInboxItem::Message(msg) if msg.id == delivered));
+
+    let fed_state = leaf.fed_state.clone();
+    let worker = tokio::spawn(async move {
+        let db = fed_state.db.clone();
+        let notify = fed_state.svc_notify_tx.clone();
+        run_leaf_inbox_task(fed_state, "hub".into(), "svc:guard".into(), db, notify).await;
+    });
+    let hub_head = || {
+        storage::get_next_peer_mailbox_message(&hub.db.lock().unwrap(), "leaf")
+            .unwrap()
+            .map(|msg| msg.id)
+    };
+    let wait_for_advance = |id: &'static str| async {
+        while hub_head().as_deref() == Some(id) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(3), wait_for_advance(delivered))
+        .await
+        .expect("stored delivery without a pending row still blocks the hub mailbox");
+    assert_eq!(hub_head().as_deref(), Some(pending));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (mut reader, mut writer) = connect_svc(&leaf.reg_sock).await;
+        writer
+            .write_all(b"{\"harness\":\"svc\",\"name\":\"guard\"}\n")
+            .await
+            .unwrap();
+        assert_eq!(read_json_line(&mut reader).await["status"], "ok");
+        for id in [pending, fresh] {
+            writer
+                .write_all(b"{\"action\":\"poll\",\"waitSecs\":3}\n")
+                .await
+                .unwrap();
+            let delivery = read_json_line(&mut reader).await;
+            assert_eq!(delivery["action"], "deliver");
+            assert_eq!(delivery["messageId"], id);
+            assert_eq!(delivery["text"], id);
+            assert_eq!(hub_head().as_deref(), Some(id));
+            if id == pending {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), wait_for_advance(id))
+                        .await
+                        .is_err(),
+                    "hub acknowledged a pending replay before the service"
+                );
+            }
+            let ack = serde_json::json!({"action": "ack", "messageId": id});
+            writer
+                .write_all(format!("{ack}\n").as_bytes())
+                .await
+                .unwrap();
+            assert_eq!(read_json_line(&mut reader).await["status"], "ok");
+            wait_for_advance(id).await;
+        }
+    })
+    .await
+    .expect("service did not deliver and acknowledge the items behind the stored replay");
+
+    assert!(hub_head().is_none());
+    let conn = leaf.db.lock().unwrap();
+    assert!(!storage::has_svc_message(&conn, delivered).unwrap());
+    assert_eq!(
+        storage::get_message(&conn, delivered)
+            .unwrap()
+            .unwrap()
+            .outcome,
+        "delivered"
+    );
+    assert!(storage::is_svc_message_acked(&conn, pending).unwrap());
+    assert!(storage::is_svc_message_acked(&conn, fresh).unwrap());
+    worker.abort();
+}
