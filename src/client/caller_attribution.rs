@@ -845,8 +845,12 @@ mod tests {
             postponed,
             "independent holder must postpone EOF despite receiver cleanup"
         );
-        peer.set_nonblocking(false).unwrap();
-        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        wait(
+            peer.as_raw_fd(),
+            libc::POLLIN,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("receiver cleanup did not make EOF observable");
         assert!(
             matches!(peer.read(&mut [0]), Ok(0)),
             "receiver cleanup leaked after independent holder was released"

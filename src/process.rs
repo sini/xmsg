@@ -2454,7 +2454,7 @@ pub fn strict_open_file_vnodes(
                 return Err(FailureReason::AuthorityUnavailable);
             }
             let info = unsafe { info.assume_init() };
-            let raw = info.pvip.vip_path.as_slice();
+            let raw = info.pvip.vip_path.as_flattened();
             let end = raw
                 .iter()
                 .position(|b| *b == 0)
