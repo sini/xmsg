@@ -1203,3 +1203,86 @@ async fn list_limit_federation_oracle() {
         "raw peer vector unchanged"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn observe_only_peer_skipped_in_list_fanout() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let creds_a = generate_self_signed_ed25519("a").unwrap();
+    let creds_b = generate_self_signed_ed25519("b").unwrap();
+    let creds_obs = generate_self_signed_ed25519("sini.collector").unwrap();
+    let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let trap_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let trap_addr = trap_listener.local_addr().unwrap().to_string();
+    let b_addr = listener_b.local_addr().unwrap().to_string();
+    let dials = Arc::new(AtomicUsize::new(0));
+    let dials_bg = Arc::clone(&dials);
+    let _trap_task = tokio::spawn(async move {
+        while trap_listener.accept().await.is_ok() {
+            dials_bg.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    let peer = |name: &str, address: String, pin: String, allow: Vec<&str>| PeerConfig {
+        observe_labels: false,
+        name: name.into(),
+        address,
+        pin: Some(pin),
+        ca: None,
+        identities: None,
+        allow: allow.into_iter().map(String::from).collect(),
+        from: None,
+        leaf: false,
+        principals: vec![],
+        targets: None,
+        dial: None,
+    };
+
+    let a = create_fed_test_node(
+        "a",
+        vec![
+            peer(
+                "sini.collector",
+                trap_addr,
+                creds_obs.2.clone(),
+                vec!["observe"],
+            ),
+            peer("b.observer", b_addr.clone(), creds_obs.2, vec!["observe"]),
+            peer("b", b_addr, creds_b.2.clone(), vec!["list"]),
+        ],
+        creds_a.clone(),
+        vec![],
+        Some(listener_a),
+        None,
+    )
+    .await;
+    let b = create_fed_test_node(
+        "b",
+        vec![peer("a", a.fed_addr.to_string(), creds_a.2, vec!["list"])],
+        creds_b,
+        vec![],
+        Some(listener_b),
+        None,
+    )
+    .await;
+    limit_fixtures(&b, 1).await;
+
+    let result = limit_get(&a, "/v1/recipients").await;
+    let nodes = result["nodes"].as_array().unwrap();
+    let node_names: Vec<&str> = nodes.iter().filter_map(|n| n["node"].as_str()).collect();
+    assert!(
+        node_names.contains(&"b"),
+        "list-granting peer at shared address must appear: {nodes:?}"
+    );
+    assert!(
+        !node_names.contains(&"sini.collector") && !node_names.contains(&"b.observer"),
+        "observe-only peers must not appear in nodes: {nodes:?}"
+    );
+    assert_eq!(
+        dials.load(Ordering::SeqCst),
+        0,
+        "observe-only peer must not be dialled"
+    );
+}

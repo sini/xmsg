@@ -425,14 +425,21 @@ fn unknown_node_in_view(state: &AppState, n: &str) -> AppError {
 /// Peers in `peers` whose canonical name or entry key has host part `host` (sorted).
 fn peer_keys_for_host(peers: &crate::fed::PeersMap, host: &str) -> Vec<String> {
     let mut matched = std::collections::BTreeSet::new();
-    for (key, _) in peers.iter() {
+    for (key, cfg) in peers.iter() {
+        if cfg.is_observe_only() {
+            continue;
+        }
         let canon = peers.canonical_name(key).unwrap_or(key.as_str());
         if host_part(canon) == Some(host) || host_part(key) == Some(host) {
             matched.insert(key.clone());
         }
     }
     for name in peers.admitted_names() {
-        if host_part(&name) == Some(host) {
+        if host_part(&name) == Some(host)
+            && !peers
+                .get_peer_config(&name)
+                .is_some_and(|cfg| cfg.is_observe_only())
+        {
             matched.insert(name);
         }
     }
@@ -487,10 +494,19 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
     let fed_state = state.fed_state.as_ref();
     let (local, peers): (bool, Vec<String>) = match (query.node.as_deref(), fed_state) {
         (Some(n), _) if n == node => (true, Vec::new()),
-        (Some(n), Some(fs)) if fs.current_peers().contains_name(n) => (
-            false,
-            vec![fs.current_peers().key_for(n).unwrap_or(n).to_string()],
-        ),
+        (Some(n), Some(fs)) if fs.current_peers().contains_name(n) => {
+            let current = fs.current_peers();
+            let key = current.key_for(n).unwrap_or(n);
+            let peers = if current
+                .get_peer_config(key)
+                .is_some_and(|cfg| cfg.is_observe_only())
+            {
+                Vec::new()
+            } else {
+                vec![key.to_string()]
+            };
+            (false, peers)
+        }
         (Some(n), _) if !n.contains('.') => {
             let local_match = host_part(node) == Some(n);
             let peer_matches = fed_state
@@ -503,7 +519,14 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
             }
         }
         (Some(n), _) => return Err(unknown_node_in_view(state, n)),
-        (None, Some(fs)) => (true, fs.current_peers().keys().cloned().collect()),
+        (None, Some(fs)) => (
+            true,
+            fs.current_peers()
+                .iter()
+                .filter(|(_, cfg)| !cfg.is_observe_only())
+                .map(|(k, _)| k.clone())
+                .collect(),
+        ),
         (None, None) => (true, Vec::new()),
     };
 

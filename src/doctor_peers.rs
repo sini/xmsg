@@ -69,7 +69,7 @@ fn outbound_only(peer: &PeerConfig) -> bool {
 }
 
 fn observe_only(peer: &PeerConfig) -> bool {
-    peer.allow.len() == 1 && peer.allow[0] == "observe"
+    peer.is_observe_only()
 }
 
 #[derive(Debug, Serialize)]

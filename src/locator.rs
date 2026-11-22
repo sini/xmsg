@@ -353,9 +353,21 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
         let current_peers = fs.current_peers();
         let peers: Vec<String> = match node {
             Some(name) if current_peers.contains_name(name) => {
-                vec![current_peers.key_for(name).unwrap_or(name).to_owned()]
+                let key = current_peers.key_for(name).unwrap_or(name);
+                if current_peers
+                    .get_peer_config(key)
+                    .is_some_and(|cfg| cfg.is_observe_only())
+                {
+                    Vec::new()
+                } else {
+                    vec![key.to_owned()]
+                }
             }
-            None => current_peers.keys().cloned().collect(),
+            None => current_peers
+                .iter()
+                .filter(|(_, cfg)| !cfg.is_observe_only())
+                .map(|(k, _)| k.clone())
+                .collect(),
             _ => Vec::new(),
         };
         let mut requests = tokio::task::JoinSet::new();
