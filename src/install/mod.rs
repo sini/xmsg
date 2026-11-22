@@ -631,7 +631,18 @@ mod tests {
     }
     #[test]
     fn repeat_and_preview_leave_all_content_and_metadata_unchanged() {
-        let (_root, request) = fixture();
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let original_home = root.path().join("raw-home");
+        symlink(&home, &original_home).unwrap();
+        let canonical_home = std::fs::canonicalize(&home).unwrap();
+        let build = |home: &std::path::Path| {
+            request_for_home(home)
+                .with_fixture_policy_roots(vec![canonical_home.join("fixture-managed-policy")])
+        };
+        let request = build(&original_home);
         let before = inventory(&request.account_home);
         let preview = plan(&request, Action::Install).unwrap();
         let _ = preview.render(false);
@@ -641,9 +652,24 @@ mod tests {
             before,
             "preview performed eager preparation"
         );
+        let wanted_mcp = preview.targets[0].after.clone();
+        let wanted_hooks = preview.targets[1].after.clone();
         preview.apply().unwrap();
         let installed = inventory(&request.account_home);
-        let repeat = plan(&request_for_home(&request.account_home), Action::Install).unwrap();
+        let repeat_request = build(&original_home);
+        assert_eq!(
+            repeat_request.db_path, request.db_path,
+            "fixture changed the original literal DB pin"
+        );
+        let repeat = plan(&repeat_request, Action::Install).unwrap();
+        assert_eq!(
+            repeat.targets[0].after, wanted_mcp,
+            "fixture changed desired MCP commands"
+        );
+        assert_eq!(
+            repeat.targets[1].after, wanted_hooks,
+            "fixture changed desired hook commands"
+        );
         assert_eq!(repeat.report.status, "no_op");
         repeat.apply().unwrap();
         assert_eq!(
@@ -651,15 +677,18 @@ mod tests {
             installed,
             "repeat install changed backups or ownership metadata"
         );
-        plan(&request_for_home(&request.account_home), Action::Uninstall)
+        let uninstall_request = build(&original_home);
+        assert_eq!(uninstall_request.db_path, request.db_path);
+        plan(&uninstall_request, Action::Uninstall)
             .unwrap()
             .apply()
             .unwrap();
         let removed = inventory(&request.account_home);
-        plan(&request_for_home(&request.account_home), Action::Uninstall)
-            .unwrap()
-            .apply()
-            .unwrap();
+        let repeated_uninstall_request = build(&original_home);
+        assert_eq!(repeated_uninstall_request.db_path, request.db_path);
+        let repeated_uninstall = plan(&repeated_uninstall_request, Action::Uninstall).unwrap();
+        assert_eq!(repeated_uninstall.report.status, "no_op");
+        repeated_uninstall.apply().unwrap();
         assert_eq!(
             inventory(&request.account_home),
             removed,
