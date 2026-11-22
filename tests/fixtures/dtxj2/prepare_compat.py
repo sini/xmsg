@@ -11,6 +11,8 @@ def prepare(source, destination, newer):
     for directory in ("src", "tests"):
         shutil.copytree(source / directory, destination / directory,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if (source / "assets").exists():
+        shutil.copytree(source / "assets", destination / "assets")
     if newer:
         file = destination / "src/observe_export.rs"
         text = file.read_text()

@@ -1,5 +1,6 @@
 """Exercise read-only CA diagnostics against source faults on the native host."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -39,6 +40,11 @@ def green(tree, selected, label, artifacts):
     print(f"{label}: GREEN 1 passed; 0 failed; 0 ignored", flush=True)
 
 
+def asset_hashes(root):
+    return {str(f.relative_to(root)): hashlib.sha256(f.read_bytes()).hexdigest()
+            for f in (root / "assets").rglob("*") if f.is_file()}
+
+
 def main():
     artifacts = ROOT / ".artifacts" / "ca-health-mutants"
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -49,9 +55,11 @@ def main():
         tree = Path(temp)
         for name in ("Cargo.toml", "Cargo.lock"):
             shutil.copyfile(ROOT / name, tree / name)
-        for name in ("src", "tests", "scripts", "ci"):
+        for name in ("src", "tests", "scripts", "ci", "assets"):
             if (ROOT / name).exists():
                 shutil.copytree(ROOT / name, tree / name)
+        compile_assets = asset_hashes(ROOT)
+        require(asset_hashes(tree) == compile_assets, "compile assets differ after source copy")
         for name, filename, old, new, selected, reason in CASES:
             source = tree / filename
             original = source.read_text()
@@ -71,8 +79,9 @@ def main():
             finally:
                 source.write_text(original)
             green(tree, selected, name + "-restored", artifacts)
+            require(asset_hashes(tree) == compile_assets, "compile assets changed during source gate")
             completed.append(name)
-    manifest = {"system": platform.system(), "machine": platform.machine(), "native": True, "completed": completed}
+    manifest = {"system": platform.system(), "machine": platform.machine(), "native": True, "completed": completed, "compile_assets_sha256": compile_assets}
     (artifacts / "completion.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
     print("ca-health-source-faults-complete " + json.dumps(manifest, sort_keys=True), flush=True)
 
