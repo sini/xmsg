@@ -215,11 +215,7 @@ fn ensure(path: &Path, uid: u32, private: bool) -> Result<Vec<DirProof>, Error> 
         }
         let opened = dir(&current).map_err(|_| Error::Unsafe)?;
         let meta = opened.metadata().map_err(|_| Error::Io)?;
-        let sticky = meta.uid() == 0 && meta.mode() & libc::S_ISVTX != 0;
-        if !meta.is_dir()
-            || (!sticky && meta.mode() & 0o022 != 0)
-            || (created && (meta.uid() != uid || meta.mode() & 0o777 != 0o700))
-        {
+        if !meta.is_dir() || (created && (meta.uid() != uid || meta.mode() & 0o777 != 0o700)) {
             return Err(Error::Unsafe);
         }
         if created {
@@ -233,14 +229,14 @@ fn ensure(path: &Path, uid: u32, private: bool) -> Result<Vec<DirProof>, Error> 
     }
     if private {
         private_dir(path, uid)?;
-    } else if dir(path)
-        .map_err(|_| Error::Unsafe)?
-        .metadata()
-        .map_err(|_| Error::Io)?
-        .uid()
-        != uid
-    {
-        return Err(Error::Unsafe);
+    } else {
+        let meta = dir(path)
+            .map_err(|_| Error::Unsafe)?
+            .metadata()
+            .map_err(|_| Error::Io)?;
+        if meta.uid() != uid || meta.mode() & 0o022 != 0 {
+            return Err(Error::Unsafe);
+        }
     }
     Ok(made)
 }
@@ -357,12 +353,20 @@ struct IntentFile {
 #[serde(deny_unknown_fields)]
 struct Intent {
     version: u32,
+    transaction_id: String,
     set_id: String,
     targets: Vec<PathBuf>,
     before_ownership: Option<String>,
     after_ownership: String,
     files: Vec<IntentFile>,
     created_dirs: Vec<DirProof>,
+}
+fn save_intent(journal: &Path, intent: &Intent, uid: u32) -> Result<(), Error> {
+    atomic(
+        journal,
+        &serde_json::to_vec(intent).map_err(|_| Error::Io)?,
+        uid,
+    )
 }
 fn match_state(current: Option<&Snapshot>, expected: Option<&Fingerprint>) -> bool {
     match (current, expected) {
@@ -431,7 +435,7 @@ fn verify_plan(plan: &Plan) -> Result<(), Error> {
     }
     Ok(())
 }
-fn recover(request: &Request, key: &str) -> Result<(), Error> {
+fn recover(request: &Request, key: &str, expected_targets: &[PathBuf]) -> Result<(), Error> {
     let area = area(request, key);
     let journal = area.join("intent.json");
     let Some(snapshot) = read(&journal, request.uid)? else {
@@ -439,8 +443,49 @@ fn recover(request: &Request, key: &str) -> Result<(), Error> {
     };
     super::json_edit::Document::parse(&snapshot.bytes).map_err(|_| Error::InvalidJson)?;
     let intent: Intent = serde_json::from_slice(&snapshot.bytes).map_err(|_| Error::InvalidJson)?;
-    if intent.version != 1 || intent.set_id != key {
+    if intent.version != 1
+        || intent.set_id != key
+        || intent.targets != expected_targets
+        || hash(&serde_json::to_vec(&intent.targets).map_err(|_| Error::Conflict)?) != key
+        || intent.transaction_id.len() != 26
+        || !intent
+            .transaction_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric())
+    {
         return Err(Error::Conflict);
+    }
+    let mut unique = std::collections::BTreeSet::new();
+    let backup_root = area.join("backups").join(&intent.transaction_id);
+    for file in &intent.files {
+        if !intent.targets.contains(&file.path) || !unique.insert(file.path.clone()) {
+            return Err(Error::Conflict);
+        }
+        if let Some(backup) = &file.backup {
+            if backup.parent() != Some(backup_root.as_path()) {
+                return Err(Error::Conflict);
+            }
+        }
+        if let Some(staged) = &file.staged {
+            if staged.parent() != file.path.parent()
+                || !staged
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(".xmsg-install-") && n.ends_with(".tmp"))
+            {
+                return Err(Error::Conflict);
+            }
+        }
+    }
+    for proof in &intent.created_dirs {
+        if !intent.targets.iter().any(|target| {
+            target
+                .parent()
+                .is_some_and(|parent| parent.starts_with(&proof.path))
+        }) || !proof.path.starts_with(&request.account_home)
+        {
+            return Err(Error::Conflict);
+        }
     }
     let ownership = ownership_hash(request, key)?;
     let currents = intent
@@ -529,6 +574,8 @@ fn recover(request: &Request, key: &str) -> Result<(), Error> {
 }
 #[cfg(test)]
 thread_local! {pub(super) static AFTER_PUBLICATION:std::cell::RefCell<Option<Box<dyn FnMut(usize)>>>=const{std::cell::RefCell::new(None)};}
+#[cfg(test)]
+thread_local! {pub(super) static BEFORE_PUBLICATION:std::cell::RefCell<Option<Box<dyn FnMut()>>>=const{std::cell::RefCell::new(None)};}
 
 pub(super) fn apply(mut plan: Plan) -> Result<Report, Error> {
     let file_changes = plan.targets.iter().any(|target| {
@@ -543,13 +590,33 @@ pub(super) fn apply(mut plan: Plan) -> Result<Report, Error> {
     let _lock = lock(&plan.request)?;
     overlap(&plan)?;
     if plan.pending {
-        recover(&plan.request, &plan.ownership.set_id)?;
+        recover(
+            &plan.request,
+            &plan.ownership.set_id,
+            &plan.ownership.targets,
+        )?;
         plan = super::plan(&plan.request, plan.report.action)?;
+        plan.report.changes.insert(
+            0,
+            Change {
+                field: ManagedField::Recovery,
+                operation: Operation::Recover,
+            },
+        );
     }
     verify_plan(&plan)?;
     if plan.report.status == "no_op" {
+        if plan
+            .report
+            .changes
+            .iter()
+            .any(|c| c.operation == Operation::Recover)
+        {
+            plan.report.status = "recovered";
+        }
         return Ok(plan.report);
     }
+    plan.request.prepare_roots()?;
     let area = area(&plan.request, &plan.ownership.set_id);
     ensure(&area, plan.request.uid, true)?;
     let paths = serde_json::to_vec(&plan.ownership.targets).map_err(|_| Error::Io)?;
@@ -562,10 +629,12 @@ pub(super) fn apply(mut plan: Plan) -> Result<Report, Error> {
         atomic(&index, &paths, plan.request.uid)?;
     }
     let ownership = serde_json::to_vec(&plan.ownership).map_err(|_| Error::Io)?;
-    let tx = area.join("backups").join(ulid::Ulid::new().to_string());
+    let transaction_id = ulid::Ulid::new().to_string();
+    let tx = area.join("backups").join(&transaction_id);
     ensure(&tx, plan.request.uid, true)?;
     let mut intent = Intent {
         version: 1,
+        transaction_id,
         set_id: plan.ownership.set_id.clone(),
         targets: plan.ownership.targets.clone(),
         before_ownership: plan.before_ownership.clone(),
@@ -600,11 +669,7 @@ pub(super) fn apply(mut plan: Plan) -> Result<Report, Error> {
         });
     }
     let journal = area.join("intent.json");
-    atomic(
-        &journal,
-        &serde_json::to_vec(&intent).map_err(|_| Error::Io)?,
-        plan.request.uid,
-    )?;
+    save_intent(&journal, &intent, plan.request.uid)?;
     for file in &mut intent.files {
         intent.created_dirs.extend(ensure(
             file.path.parent().ok_or(Error::Unsafe)?,
@@ -630,8 +695,9 @@ pub(super) fn apply(mut plan: Plan) -> Result<Report, Error> {
             );
         }
     }
+    save_intent(&journal, &intent, plan.request.uid)?;
     atomic(
-        &journal,
+        &tx.join("manifest.json"),
         &serde_json::to_vec(&intent).map_err(|_| Error::Io)?,
         plan.request.uid,
     )?;
@@ -651,6 +717,12 @@ pub(super) fn apply(mut plan: Plan) -> Result<Report, Error> {
     if read(&reference, plan.request.uid)?.is_none_or(|s| s.bytes != reference_data) {
         atomic(&reference, &reference_data, plan.request.uid)?;
     }
+    #[cfg(test)]
+    BEFORE_PUBLICATION.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook()
+        }
+    });
     for (index, file) in intent.files.iter().enumerate() {
         let current = read(&file.path, plan.request.uid)?;
         if current.as_ref().map(|s| &s.fingerprint) != file.before.as_ref() {

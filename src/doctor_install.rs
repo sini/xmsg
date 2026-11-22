@@ -133,11 +133,25 @@ pub fn inspect_install_with_http_probe(
     let executable_revision = option_env!("XMSG_BUILD_REVISION").unwrap_or("unknown");
 
     let mut checks = Vec::new();
-    let (claude_adapter_status, claude_coordinator_status) = if account_home.is_some() {
-        ("not_installed", "absent")
-    } else {
-        ("unknown", "unknown")
-    };
+    let adapter = std::env::current_exe()
+        .ok()
+        .and_then(|executable| {
+            crate::install::Request::resolve(
+                &ro_req,
+                env,
+                executable,
+                std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+            )
+            .ok()
+        })
+        .map(|request| crate::install::observe(&request));
+    let (claude_adapter_status, claude_coordinator_status) = adapter
+        .as_ref()
+        .map(|a| (a.adapter, a.coordinator))
+        .unwrap_or(("unknown", "unknown"));
+    if let Some(adapter) = &adapter {
+        checks.push(InstallCheck{id:"install.claude_adapter".into(),status:if matches!(adapter.adapter,"unsafe"|"invalid"|"drift"|"conflict"|"policy_conflict"|"recovery_pending"){"warn"}else{"info"},message:format!("standalone Claude adapter {}; coordinator {}; writers {}; shadowing {}; loaded hooks {}",adapter.adapter,adapter.coordinator,adapter.writers,adapter.shadowing,adapter.loaded_hooks),hint:Some("Quiesce all Claude configuration writers before explicit adapter apply; loaded hooks and unobserved policy remain unverified.")});
+    }
 
     let resolved = match resolve_install(&ro_req, env) {
         Ok(r) => r,
