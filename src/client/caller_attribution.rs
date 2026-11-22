@@ -267,6 +267,8 @@ pub fn original_endpoint(fd: BorrowedFd<'_>, expected: &Path) -> Result<(), Fail
     {
         return Err(FailureReason::Endpoint);
     }
+    // XNU rejects getpeername on listening sockets and does not expose SO_ACCEPTCONN.
+    #[cfg(target_os = "linux")]
     if unsafe {
         libc::getsockopt(
             fd.as_raw_fd(),
@@ -1076,6 +1078,42 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn attribution_reply_backpressure_obeys_deadline() {
+        use std::io::Write;
+
+        let (_client, mut server) = UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut blocked = false;
+        for _ in 0..1024 {
+            match server.write(&[0; 4096]) {
+                Ok(size) => assert!(size > 0),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    blocked = true;
+                    break;
+                }
+                Err(error) => panic!("could not fill the reply socket: {error}"),
+            }
+        }
+        assert!(blocked, "reply socket did not reach backpressure");
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(100);
+        assert_eq!(
+            send_reply(
+                &server,
+                &Reply::Unavailable {
+                    v: VERSION,
+                    reason: FailureReason::Unqualified,
+                },
+                deadline,
+            ),
+            Err(FailureReason::Deadline),
+            "backpressured reply exceeded the send budget"
+        );
+        assert!(Instant::now() >= deadline);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
     #[test]
     fn attribution_reply_without_eof_cannot_be_decoded() {
         use std::io::Write;

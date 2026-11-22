@@ -408,6 +408,14 @@ mod darwin_tests {
             .unwrap();
         let mut peer = UnixStream::connect(&lifecycle_socket).unwrap();
         let (original, _) = listener.accept().unwrap();
+        assert_eq!(
+            wire::original_endpoint(listener.as_fd(), &lifecycle_socket),
+            Err(FailureReason::Endpoint)
+        );
+        assert_eq!(
+            wire::original_endpoint(original.as_fd(), &lifecycle_socket),
+            Ok(())
+        );
         let (caller, worker) = UnixStream::pair().unwrap();
         let uid = crate::client::current_uid();
         let config = ServerConfig {
