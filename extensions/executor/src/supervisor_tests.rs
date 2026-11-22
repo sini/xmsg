@@ -746,9 +746,6 @@ fn real_sender(
     texts: Vec<String>,
 ) -> (FixtureDaemon, UnixStream, Vec<String>) {
     let (parent, child) = UnixStream::pair().unwrap();
-    parent
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .unwrap();
     let data = SenderFixture {
         run: run.into(),
         receiver: receiver.into(),
@@ -782,10 +779,12 @@ fn real_sender(
             Ok(())
         });
     }
-    let child = command.spawn().unwrap();
-    let sender = FixtureDaemon(child);
+    // The result follows registration and all sends, rather than one supervisor RPC.
+    let expires = std::time::Instant::now() + Duration::from_secs(30);
+    let sender = FixtureDaemon(command.spawn().unwrap());
+    drop(child);
     drop(data);
-    let ids = read_frame(&parent).unwrap();
+    let ids = read_frame_until(&parent, expires).unwrap();
     (sender, parent, ids)
 }
 struct FixtureDaemon(Child);
