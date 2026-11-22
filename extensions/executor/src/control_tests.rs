@@ -199,11 +199,25 @@ fn run_scripted_bridge_clock(
                 resume_tx.send(()).unwrap();
             }
         }
-        client
-            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-            .unwrap();
-        let mut result = String::new();
-        client.read_to_string(&mut result).unwrap();
+        client.set_nonblocking(true).unwrap();
+        let reply_deadline = Instant::now() + std::time::Duration::from_secs(3);
+        let mut result = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            match client.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(size) => result.extend_from_slice(&chunk[..size]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < reply_deadline,
+                        "executor reply did not finish"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("reading executor fixture reply: {error}"),
+            }
+        }
+        let result = String::from_utf8(result).unwrap();
         handler.join().unwrap();
         let script = script.join().unwrap();
         assert!(

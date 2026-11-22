@@ -2116,6 +2116,7 @@ mod strict_peer {
     #[derive(Debug, Clone, Default)]
     pub(crate) struct TestReadings {
         pub credential_pid: Option<i32>,
+        #[cfg(target_os = "linux")]
         pub pidfd_errno: Option<i32>,
         #[cfg(target_os = "linux")]
         pub pin: Option<PinReading>,
@@ -2127,7 +2128,9 @@ mod strict_peer {
     mod tests {
         use super::*;
         use std::io::{Read, Write};
-        use std::os::fd::{AsFd, OwnedFd};
+        use std::os::fd::AsFd;
+        #[cfg(target_os = "linux")]
+        use std::os::fd::OwnedFd;
         fn reset() {
             TEST_READINGS.with(|r| *r.borrow_mut() = None);
         }
@@ -2291,6 +2294,7 @@ mod strict_peer {
             let (_sender, original) = std::os::unix::net::UnixStream::pair().unwrap();
             TEST_READINGS.with(|r| {
                 *r.borrow_mut() = Some(TestReadings {
+                    #[cfg(target_os = "linux")]
                     pidfd_errno: Some(libc::ENOPROTOOPT),
                     ..Default::default()
                 })
@@ -2299,6 +2303,7 @@ mod strict_peer {
             TEST_READINGS.with(|r| {
                 *r.borrow_mut() = Some(TestReadings {
                     credential_pid: Some(pid as i32 + 1),
+                    #[cfg(target_os = "linux")]
                     pidfd_errno: Some(libc::ENOPROTOOPT),
                     ..Default::default()
                 })
