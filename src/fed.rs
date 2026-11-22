@@ -89,6 +89,10 @@ impl PeerConfig {
     pub fn is_outbound(&self) -> bool {
         self.dial.as_deref() == Some("outbound")
     }
+
+    pub fn is_observe_only(&self) -> bool {
+        self.allow.len() == 1 && self.allow[0] == "observe"
+    }
 }
 
 /// Filter-entry prefixes from before XA2. An entry starting with one of these and `:` is
