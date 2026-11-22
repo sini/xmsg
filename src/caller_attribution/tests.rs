@@ -384,13 +384,14 @@ fn stalled_clients_have_fixed_workers_and_bounded_shutdown() {
         .unwrap();
     let _entered = runtime.enter();
     let socket = directory.path().join("query.sock");
+    let app = state(directory.path());
     let handle = bind_unqualified(
         ServerConfig {
             query_socket: socket.clone(),
             lifecycle_socket: directory.path().join("life.sock"),
             expected_uid: crate::client::current_uid(),
         },
-        state(directory.path()),
+        app.clone(),
     )
     .unwrap();
     assert_eq!(
@@ -417,6 +418,43 @@ fn stalled_clients_have_fixed_workers_and_bounded_shutdown() {
         4,
         "inflight work exceeded the reserved worker bound"
     );
+    use tower::ServiceExt as _;
+    let response = runtime.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::http::build_router(app).oneshot(
+                axum::http::Request::get("/v1/recipients")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("ordinary list blocked behind the attribution workers")
+        .unwrap()
+    });
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    drop(clients.pop());
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while stats.active() == 4 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(
+        stats.active() < 4,
+        "an abandoned query did not release its worker"
+    );
+    let replacement = UnixStream::connect(&socket).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while stats.accepted() < 5 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        stats.accepted(),
+        5,
+        "released worker did not accept a replacement"
+    );
+    clients.push(replacement);
+
     let stop = Instant::now();
     handle.stop();
     assert!(
