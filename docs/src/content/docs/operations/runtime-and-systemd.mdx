@@ -244,6 +244,10 @@ legacy-component conflict.
    the resolved endpoints and check the service/client agreement. Reconfigure
    direct socket consumers from that result. Never move old runtime sockets
    into the new namespace; the daemon recreates them with ownership checks.
+   For the standalone Claude adapter, stop Claude and other configuration
+   writers, then preview `xmsg install claude` with the intended new settings
+   and use `--apply` to refresh its owned MCP/hook commands. Unsetting the
+   parent environment alone does not edit their already-pinned arguments.
 
 Tools hard-coding `<runtime>/xmsg/http.sock`, `agent.sock` or `register.sock`
 must use compatible explicit pins or the resolver/discovered endpoint. Moving
