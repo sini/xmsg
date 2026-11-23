@@ -443,6 +443,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_N)?;
         conn.execute_batch(crate::session_context::SCHEMA)?;
         conn.execute_batch(crate::activity::SCHEMA)?;
+        conn.execute_batch(crate::pairing::store::SCHEMA)?;
         let has_admitted: bool = conn.query_row(
             "SELECT COUNT(*)>0 FROM pragma_table_info('peer_mailbox') WHERE name='admitted'",
             [],
@@ -574,6 +575,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     tx.execute_batch(SCHEMA_N)?;
     tx.execute_batch(crate::session_context::SCHEMA)?;
     tx.execute_batch(crate::activity::SCHEMA)?;
+    tx.execute_batch(crate::pairing::store::SCHEMA)?;
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
     tx.commit()
 }
