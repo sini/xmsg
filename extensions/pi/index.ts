@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -49,38 +49,78 @@ export function defaultRuntimeDir(): string | undefined {
   return darwinUserTempDir ?? undefined;
 }
 
-export function defaultRegisterSockPath(): string | undefined {
-  if (process.env.XMSG_REGISTER_SOCK) {
-    return process.env.XMSG_REGISTER_SOCK;
-  }
-  const runtimeDir = defaultRuntimeDir();
-  if (runtimeDir) {
-    return path.join(runtimeDir, "xmsg", "register.sock");
-  }
-  return undefined;
+export type Endpoint = "register" | "agent" | "http";
+export type DoctorResult = { stdout: string; stderr: string; error: any };
+export type DoctorProbe = () => Promise<DoctorResult>;
+export interface EndpointResolver {
+  resolve(name: Endpoint): Promise<string | undefined>;
+  invalidate(): void;
+}
+export class XmsgEndpointError extends Error {}
+
+const ENDPOINT_ENV = { register: "XMSG_REGISTER_SOCK", agent: "XMSG_AGENT_SOCK", http: "XMSG_HTTP_SOCK" } as const;
+// Only the exact clap parse error of a CLI that predates `doctor` falls through to the legacy path.
+const UNSUPPORTED_DOCTOR = "error: unrecognized subcommand 'doctor'\n\nUsage: xmsg <COMMAND>\n\nFor more information, try '--help'.\n";
+
+const runDoctor: DoctorProbe = () =>
+  new Promise((resolve) =>
+    execFile("xmsg", ["doctor", "--json"], { timeout: 3000, maxBuffer: 64 * 1024, killSignal: "SIGKILL", encoding: "utf8" },
+      (error, stdout, stderr) => resolve({ error, stdout, stderr })),
+  );
+
+// The daemon's sockets: XMSG_*_SOCK, else what `xmsg doctor --json` resolves (run once and
+// cached until invalidate(), which a caller makes after a disconnect), else the legacy
+// <runtime dir>/xmsg/ when no CLI with doctor is installed. A doctor that answers with
+// unusable endpoints, malformed output or a timeout is refused, never rerouted.
+export function createEndpointResolver(probe: DoctorProbe = runDoctor, log = (line: string) => console.error(line)): EndpointResolver {
+  let found: Promise<Partial<Record<Endpoint, string>> | string> | undefined;
+  let loggedFallback = false;
+  const refuse = (why: string): never => {
+    throw new XmsgEndpointError(`xmsg doctor ${why}`);
+  };
+  const discover = async () => {
+    const { stdout, stderr, error } = await probe();
+    if (error?.killed || error?.signal || error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") refuse("exceeded its time or output bound");
+    if (error?.code === "ENOENT") return "xmsg CLI not found";
+    if (error?.code === 2 && stdout === "" && stderr === UNSUPPORTED_DOCTOR) return "xmsg CLI has no doctor";
+    let report: any;
+    try {
+      report = JSON.parse(stdout);
+    } catch {
+      refuse("returned invalid JSON");
+    }
+    if (report?.endpoints_usable === false) refuse("reports the endpoints unusable; run `xmsg doctor`");
+    if (report?.endpoints_usable !== true) refuse("returned an invalid endpoint report");
+    const fields = { register: report.register_socket ?? report.leaf_register_socket, agent: report.agent_socket, http: report.http_socket };
+    const paths: Partial<Record<Endpoint, string>> = {};
+    for (const [name, value] of Object.entries(fields) as [Endpoint, unknown][]) {
+      if (value === null || value === undefined) continue;
+      if (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")) refuse(`returned a non-absolute ${name} socket`);
+      paths[name] = value as string;
+    }
+    return paths;
+  };
+  return {
+    async resolve(name) {
+      const pinned = process.env[ENDPOINT_ENV[name]];
+      if (pinned) return pinned;
+      const result = await (found ??= discover());
+      if (typeof result !== "string") return result[name] ?? refuse(`reported no ${name} socket`);
+      if (!loggedFallback) {
+        loggedFallback = true;
+        log(`[xmsg] ${result}; using the legacy socket directory`);
+      }
+      const runtimeDir = defaultRuntimeDir();
+      return runtimeDir ? path.join(runtimeDir, "xmsg", `${name}.sock`) : undefined;
+    },
+    invalidate() {
+      found = undefined;
+    },
+  };
 }
 
-export function defaultAgentSockPath(): string | undefined {
-  if (process.env.XMSG_AGENT_SOCK) {
-    return process.env.XMSG_AGENT_SOCK;
-  }
-  const runtimeDir = defaultRuntimeDir();
-  if (runtimeDir) {
-    return path.join(runtimeDir, "xmsg", "agent.sock");
-  }
-  return undefined;
-}
-
-export function defaultHttpSockPath(): string | undefined {
-  if (process.env.XMSG_HTTP_SOCK) {
-    return process.env.XMSG_HTTP_SOCK;
-  }
-  const runtimeDir = defaultRuntimeDir();
-  if (runtimeDir) {
-    return path.join(runtimeDir, "xmsg", "http.sock");
-  }
-  return undefined;
-}
+// One doctor probe per process, shared by every bridge.
+export const endpoints = createEndpointResolver();
 
 export function verifySecureSocketDir(sockPath: string): boolean {
   try {
@@ -163,6 +203,7 @@ export interface ExtensionOptions {
   reclaimPath?: string;
   pollWaitSecs?: number;
   reconnectDelayMs?: number;
+  endpoints?: EndpointResolver;
 }
 
 export class XmsgPiBridge {
@@ -174,6 +215,8 @@ export class XmsgPiBridge {
   private reclaimPath: string;
   private pollWaitSecs: number;
   private reconnectDelayMs: number;
+  private endpoints: EndpointResolver;
+  private lastWarning?: string;
   private socket?: net.Socket;
   private rl?: readline.Interface;
   private running = false;
@@ -184,9 +227,10 @@ export class XmsgPiBridge {
 
   constructor(pi: ExtensionAPI, options: ExtensionOptions = {}) {
     this.pi = pi;
-    this.sockPath = options.sockPath || defaultRegisterSockPath();
-    this.agentSockPath = options.agentSockPath || defaultAgentSockPath();
-    this.httpSockPath = options.httpSockPath || defaultHttpSockPath();
+    this.sockPath = options.sockPath;
+    this.agentSockPath = options.agentSockPath;
+    this.httpSockPath = options.httpSockPath;
+    this.endpoints = options.endpoints ?? endpoints;
     this.xmsgUrl = options.xmsgUrl || defaultXmsgUrl();
     this.reclaimPath = options.reclaimPath || defaultReclaimPath();
     this.pollWaitSecs = options.pollWaitSecs ?? 30;
@@ -210,16 +254,19 @@ export class XmsgPiBridge {
     return this.currentSessionId;
   }
 
+  // An explicit path, else the shared resolver.
+  public endpoint(name: Endpoint): Promise<string | undefined> {
+    const explicit = { register: this.sockPath, agent: this.agentSockPath, http: this.httpSockPath }[name];
+    return explicit ? Promise.resolve(explicit) : this.endpoints.resolve(name);
+  }
+
+  private warn(line: string) {
+    if (line !== this.lastWarning) console.warn(line);
+    this.lastWarning = line;
+  }
+
   public start() {
     if (this.running) return;
-    if (!this.sockPath) {
-      console.warn("[xmsg-pi] socket directory not found (XDG_RUNTIME_DIR is unset, the macOS fallback is unavailable, and no sockPath was provided); disabling socket polling");
-      return;
-    }
-    if (!verifySecureSocketDir(this.sockPath)) {
-      console.warn(`[xmsg-pi] socket directory for ${this.sockPath} failed security check; disabling socket polling`);
-      return;
-    }
     this.running = true;
     this.connectLoop();
   }
@@ -243,11 +290,30 @@ export class XmsgPiBridge {
         continue;
       }
 
+      let sockPath: string | undefined;
+      let refused = false;
       try {
-        await this.runConnection();
-      } catch (_err) {
-        // connection closed or failed
+        sockPath = await this.endpoint("register");
+      } catch (err: any) {
+        refused = true;
+        this.warn(`[xmsg-pi] ${err.message || err}; retrying`);
       }
+      if (!sockPath && !refused) {
+        console.warn("[xmsg-pi] socket directory not found (XDG_RUNTIME_DIR is unset, the macOS fallback is unavailable, and no sockPath was provided); disabling socket polling");
+        this.running = false;
+        return;
+      }
+      if (sockPath && !verifySecureSocketDir(sockPath)) {
+        this.warn(`[xmsg-pi] socket directory for ${sockPath} failed security check; retrying`);
+      } else if (sockPath) {
+        try {
+          await this.runConnection(sockPath);
+        } catch (_err) {
+          // connection closed or failed
+        }
+      }
+      // Re-resolve after a disconnect, so a restarted daemon is found through the backoff.
+      this.endpoints.invalidate();
 
       if (this.running) {
         await new Promise((r) => setTimeout(r, this.reconnectDelayMs));
@@ -255,16 +321,16 @@ export class XmsgPiBridge {
     }
   }
 
-  private runConnection(): Promise<void> {
+  private runConnection(sockPath: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      if (!this.sockPath || !this.piSessionId) {
+      if (!this.piSessionId) {
         return resolve();
       }
       const piKey = this.piSessionId;
       const store = loadReclaimStore(this.reclaimPath);
       const saved = store[piKey];
 
-      const socket = net.connect(this.sockPath);
+      const socket = net.connect(sockPath);
       this.socket = socket;
 
       let settled = false;
@@ -373,14 +439,23 @@ export class XmsgPiBridge {
     });
   }
 
-  private callAgentSock(req: any): Promise<any> {
-    if (!this.agentSockPath) {
-      return Promise.resolve({
+  private async callAgentSock(req: any): Promise<any> {
+    let agentSockPath: string | undefined;
+    try {
+      agentSockPath = await this.endpoint("agent");
+    } catch (err: any) {
+      return {
+        content: [{ type: "text", text: `Error: ${err.message || err}` }],
+        details: { error: "endpoint_refused", detail: String(err.message || err) },
+      };
+    }
+    if (!agentSockPath) {
+      return {
         content: [{ type: "text", text: "Error: agent.sock path unknown (XDG_RUNTIME_DIR unset)" }],
         details: { error: "agent_sock_unknown" },
-      });
+      };
     }
-    if (!verifySecureSocketDir(this.agentSockPath)) {
+    if (!verifySecureSocketDir(agentSockPath)) {
       return Promise.resolve({
         content: [{ type: "text", text: "Error: agent.sock directory failed security check" }],
         details: { error: "insecure_socket_dir" },
@@ -390,7 +465,7 @@ export class XmsgPiBridge {
     return new Promise((resolve) => {
       let client: net.Socket;
       try {
-        client = net.connect(this.agentSockPath!, () => {
+        client = net.connect(agentSockPath, () => {
           client.write(JSON.stringify(req) + "\n");
         });
       } catch (err: any) {
@@ -410,6 +485,7 @@ export class XmsgPiBridge {
       });
 
       client.on("error", (err) => {
+        this.endpoints.invalidate();
         resolve({
           content: [{ type: "text", text: `Error connecting to agent socket: ${err.message}` }],
           details: { error: "socket_error", detail: err.message },
@@ -483,7 +559,15 @@ export class XmsgPiBridge {
           }
         }
 
-        const sockPath = this.httpSockPath || defaultHttpSockPath();
+        let sockPath: string | undefined;
+        try {
+          sockPath = await this.endpoint("http");
+        } catch (err: any) {
+          return {
+            content: [{ type: "text", text: `Error listing sessions: ${err.message || err}` }],
+            details: { error: "endpoint_refused", detail: String(err.message || err) },
+          };
+        }
         if (!sockPath) {
           const expectedPath = "$XDG_RUNTIME_DIR/xmsg/http.sock";
           return {
@@ -550,6 +634,7 @@ export class XmsgPiBridge {
           }
 
           req.on("error", (err: any) => {
+            this.endpoints.invalidate();
             resolve({
               content: [{ type: "text", text: `Error connecting to http socket (${sockPath}): ${err.message}` }],
               details: { error: "socket_error", socketPath: sockPath, detail: err.message },
@@ -686,8 +771,7 @@ export default function (pi: ExtensionAPI) {
   if (process.env.XMSG_ACTIVITY === "1") {
     let actSeq = 0;
     const emitPiActivity = (ev: string, sessionId: string, block?: string, correlation?: string) => {
-      const dir = process.env.XDG_RUNTIME_DIR;
-      if (!dir || !sessionId) return;
+      if (!sessionId) return;
       actSeq += 1;
       const frame = JSON.stringify({
         action: "activity",
@@ -702,12 +786,12 @@ export default function (pi: ExtensionAPI) {
         wake: "absent",
       });
       if (frame.length >= 1024) return;
-      try {
-        const net = require("node:net");
-        const c = net.createConnection(`${dir}/xmsg/agent.sock`, () => c.end(`${frame}\n`));
+      bridge.endpoint("agent").then((sock) => {
+        if (!sock) return;
+        const c = net.createConnection(sock, () => c.end(`${frame}\n`));
         c.setTimeout(50, () => c.destroy());
         c.on("error", () => {});
-      } catch {}
+      }, () => {});
     };
     for (const ev of ["agent_start", "turn_start", "agent_settled", "agent_end"] as const) {
       pi.on(ev as any, async (_e: any, ctx: any) => {
