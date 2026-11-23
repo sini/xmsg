@@ -10,9 +10,13 @@
 #   renders, against a real `xmsg serve` and a mock model on loopback
 #   (extensions/opencode/check.py). This is nixpkgs' opencode, 1.x.
 # - `opencode2-plugin`: the same oracles against opencode 2.x, llm-agents.nix's `opencode2`.
+# - `opencode-endpoints`: how the opencode plugin finds the daemon's sockets, with a fake
+#   `xmsg doctor` and fake sockets (extensions/opencode/test-endpoints.mjs).
 # - `hermes-plugin` (XH3 oracles 1-6): the real hermes CLI on a pty, and hermes's tui_gateway
 #   (the desktop host), with the plugin and config.yaml settings the module renders, against a
 #   real `xmsg serve` and a mock model on loopback (extensions/hermes/check.py).
+# - `hermes-endpoints`: how the hermes plugin finds the daemon's sockets, with a fake
+#   `xmsg doctor` and fake sockets (extensions/hermes/test_endpoints.py).
 # - `pi-extension`, `pi-paths`: the pi extension's own node tests (extensions/pi). The
 #   extension's darwin `getconf DARWIN_USER_TEMP_DIR` fallback is not covered by CI.
 # - `pre-xl1-compat` (XF3.1, XC1, HA9-A.codex C10): runs `gate_xf3_list_compat_and_agy_label` with
@@ -479,9 +483,21 @@
         pi-extension = nodeCheck "pi-extension" "test.mjs";
         pi-paths = nodeCheck "pi-paths" "test-paths.mjs";
 
+        opencode-endpoints =
+          pkgs.runCommand "xmsg-opencode-endpoints" { nativeBuildInputs = [ pkgs.nodejs ]; }
+            ''
+              node --experimental-transform-types --no-warnings ${../../extensions/opencode}/test-endpoints.mjs
+              touch $out
+            '';
         opencode-plugin = opencodeCheck "opencode-plugin" pkgs.opencode;
         opencode2-plugin = opencodeCheck "opencode2-plugin" llm-agents.packages.${system}.opencode2;
 
+        hermes-endpoints =
+          pkgs.runCommand "xmsg-hermes-endpoints" { nativeBuildInputs = [ pkgs.python3 ]; }
+            ''
+              python3 ${../../extensions/hermes}/test_endpoints.py
+              touch $out
+            '';
         hermes-plugin =
           pkgs.runCommand "xmsg-hermes-plugin"
             {

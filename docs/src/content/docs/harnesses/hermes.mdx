@@ -22,6 +22,27 @@ for each Hermes process.
   default, Hermes puts plugin tools behind its Tool Search bridge (`tools.tool_search`). Thus
   models find and call them through `tool_search` and `tool_call`.
 
+## Finding the daemon
+
+<Status id="harness.plugin-endpoints" />
+
+The plugin looks for the daemon's sockets in this order:
+
+1. **Environment pins:** `XMSG_REGISTER_SOCK` and `XMSG_AGENT_SOCK` name a socket directly.
+2. **`xmsg doctor --json`:** without a pin, the plugin runs `xmsg doctor --json` from `PATH`
+   once and uses the endpoints it reports (`register_socket`, else `leaf_register_socket`;
+   `agent_socket`). These are the daemon's default sockets, in its managed
+   `xmsg-<uid>-<12hex>/` directory. The answer is cached; the plugin asks again only after a
+   connection to the daemon drops, at its next reconnect.
+3. **Legacy directory:** when `xmsg` is not on `PATH`, or is too old to have `doctor`, the plugin
+   logs one line and uses `$XDG_RUNTIME_DIR/xmsg/` (on macOS without `XDG_RUNTIME_DIR`, the Darwin
+   user temporary directory).
+
+If `doctor` answers but reports the endpoints unusable (`endpoints_usable: false`), prints
+malformed output, or takes longer than 3 seconds, the plugin refuses to connect and logs why. It
+never falls back to the legacy directory in that case. Run `xmsg doctor` to see the failing check,
+or pin the sockets with the environment variables above in the harness's environment.
+
 ## Session lifecycle and compaction
 
 - **Ending a session (`on_session_finalize`):** These actions release the session's address

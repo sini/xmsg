@@ -28,7 +28,9 @@ env:
     ci-self-input
     default
     executor-contracts
+    hermes-endpoints
     mdformat-plugins
+    opencode-endpoints
     pi-extension
     pi-paths
     root-surface
