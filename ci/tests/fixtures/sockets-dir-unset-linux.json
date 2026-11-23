@@ -1,0 +1,279 @@
+{
+  "agyHooks": {
+    "xmsg-register": {
+      "PreInvocation": [
+        {
+          "command": "@xmsg@/bin/xmsg register agy --hook --event pre-invocation",
+          "type": "command"
+        }
+      ],
+      "PreToolUse": [
+        {
+          "hooks": [
+            {
+              "command": "@xmsg@/bin/xmsg register agy --hook --event pre-tool-use",
+              "timeout": 5,
+              "type": "command"
+            }
+          ],
+          "matcher": "call_mcp_tool|mcp_xmsg_.*"
+        }
+      ],
+      "Stop": [
+        {
+          "command": "@xmsg@/bin/xmsg register agy --hook --event stop",
+          "timeout": 5,
+          "type": "command"
+        }
+      ]
+    }
+  },
+  "claudeHooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg activity hook claude",
+            "timeout": 1,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg activity hook claude",
+            "timeout": 1,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg register claude --hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "^(Agent|SendMessage)$"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg register claude --hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "^mcp__plugin_hm_xmsg__(send|reply|inbox|list|replies)$"
+      },
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg register claude --hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "^mcp__xmsg__(send|reply|inbox|list|replies)$"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg activity hook claude",
+            "timeout": 1,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg activity hook claude",
+            "timeout": 1,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg activity hook claude",
+            "timeout": 1,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg activity hook claude",
+            "timeout": 1,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg register claude --hook",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg register claude --hook",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "@xmsg@/bin/xmsg activity hook claude",
+            "timeout": 1,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "codexHooks": {
+    "PreModelRequest": [
+      {
+        "hooks": [
+          {
+            "command": "/home/alice/.local/share/xmsg/bin/xmsg register codex --hook --event PreModelRequest",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "/home/alice/.local/share/xmsg/bin/xmsg register codex --hook --event SessionEnd",
+            "timeout": 1,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "/home/alice/.local/share/xmsg/bin/xmsg register codex --hook --event SessionStart",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "/home/alice/.local/share/xmsg/bin/xmsg register codex --hook --event Stop",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "/home/alice/.local/share/xmsg/bin/xmsg register codex --hook --event SubagentStart",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "/home/alice/.local/share/xmsg/bin/xmsg register codex --hook --event SubagentStop",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "/home/alice/.local/share/xmsg/bin/xmsg register codex --hook --event UserPromptSubmit",
+            "timeout": 5,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "exec": [],
+  "hermes": {},
+  "mcp": {
+    "agy": {
+      "args": [
+        "mcp"
+      ],
+      "command": "@xmsg@/bin/xmsg"
+    },
+    "claude": {
+      "args": [
+        "mcp"
+      ],
+      "command": "@xmsg@/bin/xmsg",
+      "env": {},
+      "type": "stdio"
+    },
+    "codex": {
+      "args": [
+        "mcp"
+      ],
+      "command": "@xmsg@/bin/xmsg",
+      "default_tools_approval_mode": "approve",
+      "env_vars": [
+        "XDG_RUNTIME_DIR"
+      ]
+    }
+  },
+  "opencode": "static",
+  "pi": "static",
+  "serve": [
+    "@xmsg@/bin/xmsg serve --http-sock /run/user/1000/xmsg/http.sock --activity --agy-exe @store@-antigravity-cli-fixture/bin/agy --codex-exe @store@-codex-fixture/bin/codex --codex-home /home/alice/.codex --svc-exe 'my-bot=/opt/my-bot/bin/my-bot' --svc-exe 'quota=@xmsg@/bin/xmsg' --fed-listen 0.0.0.0:7790 --fed-cert /run/secrets/xmsg.crt --fed-key /run/secrets/xmsg.key --peers-file @store@-xmsg-peers.json --fed-reload-interval-secs 60"
+  ],
+  "session": {
+    "LOCALE_ARCHIVE_2_27": "@store@-glibc-locales-2.44-25/lib/locale/locale-archive"
+  },
+  "userManager": {
+    "LOCALE_ARCHIVE_2_27": "@store@-glibc-locales-2.44-25/lib/locale/locale-archive"
+  }
+}
