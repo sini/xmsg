@@ -90,7 +90,6 @@ The response deadline is bounded, but the system DNS resolver may finish an in-f
 | --- | --- | --- |
 | `LegacyConflict`: `legacy state conflict: ...` | A new default would bypass an old DB, enrollment identity or peers file. Creating another empty new DB does not remove the conflict. | Pin the compatible existing DB and other named components for daemon and clients, or stop all writers, back up and move the state before unpinning. Do not delete the old data to suppress the guard. |
 | `UnsafeOwner`: `directory ... is owned by UID ..., expected UID ...` | The selected state/runtime/manual socket parent belongs to a different UID. An explicit DB uses its parent as the state root; fully pinned leaf startup still checks it. A root-owned `fsGroup` volume is a common case. | Put the DB inside a same-UID private subdirectory; endpoint pins do not repair state ownership. Use private socket parents too. A leaf needs both agent and leaf registration pins. Do not chmod/chown the shared volume root as a workaround. |
-
 | `UnprovenExistingSocket` | A selected socket file has no matching durable ownership proof, including a dead socket left by a pre-contract daemon. | Stop daemon and activation, verify only the selected sockets are dead, then follow the [one-time cleanup](/operations/runtime-and-systemd/#remove-unproven-dead-sockets-during-a-pinned-upgrade). Never delete arbitrary runtime files or treat permission errors as dead listeners. |
 
 A permission-bit refusal is distinct from `UnsafeOwner`: private directories need
