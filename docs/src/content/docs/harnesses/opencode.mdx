@@ -42,6 +42,12 @@ malformed output, or takes longer than 3 seconds, the plugin refuses to connect 
 never falls back to the legacy directory in that case. Run `xmsg doctor` to see the failing check,
 or pin the sockets with the environment variables above in the harness's environment.
 
+A harness started by a service manager (a systemd unit, a launchd agent, a container entrypoint)
+sees only that service's environment. If `xmsg` is not on the service's `PATH`, the plugin skips
+the doctor step and falls back to the legacy directory, which an unpinned daemon no longer uses.
+Put `xmsg` on the service's `PATH`, or set `XMSG_REGISTER_SOCK` and `XMSG_AGENT_SOCK` in
+its environment.
+
 ## Session lifecycle
 
 - **Registration on first prompt:** A session registers at its first user prompt (1.x
