@@ -25,7 +25,10 @@ const jiti = createJiti(extensionTsPath, {
   },
 });
 
-const { default: extensionDefault, XmsgPiBridge } = jiti(extensionTsPath);
+const { default: extensionDefault, XmsgPiBridge, createEndpointResolver } = jiti(extensionTsPath);
+// No xmsg CLI, so a default bridge uses the legacy $XDG_RUNTIME_DIR/xmsg/ (test-paths.mjs covers doctor).
+const legacyEndpoints = () =>
+  createEndpointResolver(async () => ({ stdout: "", stderr: "", error: { code: "ENOENT" } }), () => {});
 
 class MockExtensionAPI {
   constructor() {
@@ -365,7 +368,7 @@ async function runTest4_oracle1() {
 
   try {
     const mockPi = new MockExtensionAPI();
-    const bridge = new XmsgPiBridge(mockPi);
+    const bridge = new XmsgPiBridge(mockPi, { endpoints: legacyEndpoints() });
     bridge.registerListTool();
 
     const listTool = mockPi.tools.find((t) => t.name === "list");
@@ -410,7 +413,7 @@ async function runTest5_oracle2() {
 
   try {
     const mockPi = new MockExtensionAPI();
-    const bridge = new XmsgPiBridge(mockPi);
+    const bridge = new XmsgPiBridge(mockPi, { endpoints: legacyEndpoints() });
     bridge.registerListTool();
 
     const listTool = mockPi.tools.find((t) => t.name === "list");
@@ -459,7 +462,7 @@ async function runTest6_oracle3() {
 
   try {
     const mockPi = new MockExtensionAPI();
-    const bridge = new XmsgPiBridge(mockPi);
+    const bridge = new XmsgPiBridge(mockPi, { endpoints: legacyEndpoints() });
     bridge.registerListTool();
 
     const listTool = mockPi.tools.find((t) => t.name === "list");
