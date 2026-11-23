@@ -1260,6 +1260,39 @@ in
           hasPeersFile = true;
         };
       };
+    # An omitted address renders no `address` key; the loader decides whether omission is valid.
+    test-peer-address-optional =
+      let
+        c = hmEval "x86_64-linux" {
+          programs.xmsg.server.federation.peers.laptop = {
+            pin = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+            allow = [ "send" ];
+          };
+        };
+        expectedPeers = nixpkgs.legacyPackages.x86_64-linux.writeText "xmsg-peers.json" (
+          builtins.toJSON {
+            cortex = {
+              address = "cortex.example.org:7790";
+              allow = [ "send" ];
+              pin = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+            };
+            laptop = {
+              allow = [ "send" ];
+              pin = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+            };
+          }
+        );
+      in
+      {
+        expr = {
+          failed = failedAssertions c;
+          peersFile = "${c.programs.xmsg.server.federation.peersFile}";
+        };
+        expected = {
+          failed = [ ];
+          peersFile = "${expectedPeers}";
+        };
+      };
     test-observe-collector =
       let
         ocCfg = {

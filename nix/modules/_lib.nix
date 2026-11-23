@@ -6,8 +6,9 @@ let
   peerType = types.submodule {
     options = {
       address = mkOption {
-        type = types.str;
-        description = "The peer's federation endpoint, `host:port`.";
+        type = types.nullOr types.str;
+        default = null;
+        description = "The peer's federation endpoint, `host:port`. Omit it for a leaf, a peer reached through the default route, or an exact-identity peer (a pin, or a CA entry with one identity) that an enabled discovery source finds; the loader refuses any other omission.";
       };
       pin = mkOption {
         type = types.nullOr types.str;
