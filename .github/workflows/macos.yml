@@ -314,10 +314,17 @@ jobs:
               ),
               (
                   "src/agy.rs",
-                  "crate::client::caller_attribution::with_fd_inheritance_gate(|| cmd.spawn())",
-                  "cmd.spawn()",
+                  "crate::client::caller_attribution::with_fd_inheritance_gate(|| {\n        crate::spawn::darwin::spawn(&command)\n    })",
+                  "crate::spawn::darwin::spawn(&command)",
                   "agy::attribution_spawn_tests::actual_delivery_spawn_holds_the_receive_inheritance_gate_at_fork",
-                  "actual delivery spawn forked outside the shared receive-to-fcntl gate",
+                  "actual Darwin delivery spawned outside the shared receive-to-fcntl gate",
+              ),
+              (
+                  "src/spawn/darwin.rs",
+                  "libc::POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGDEF",
+                  "libc::POSIX_SPAWN_SETSIGDEF",
+                  "agy::attribution_spawn_tests::darwin_delivery_exec_excludes_the_high_fd_canary",
+                  "unlisted high FD survived exec",
               ),
               (
                   "src/client/caller_attribution.rs",

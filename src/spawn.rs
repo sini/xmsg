@@ -28,3 +28,6 @@ pub fn cloexec_inherited_fds(cmd: &mut tokio::process::Command) {
         });
     }
 }
+
+#[cfg(all(target_os = "macos", feature = "daemon"))]
+pub(crate) mod darwin;
