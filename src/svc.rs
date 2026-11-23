@@ -980,6 +980,10 @@ pub async fn run_leaf_register_server_with_listener(
     }
 }
 
+/// How long a pulled reply defers to an outbound reply poller that has recorded it but
+/// not pushed it. That window is a local insert; a record older than this is an orphan.
+const LEAF_REPLY_IN_FLIGHT_SECS: i64 = 60;
+
 pub async fn run_leaf_inbox_task(
     fed_state: Arc<crate::fed::FedState>,
     peer_name: String,
@@ -1195,27 +1199,37 @@ pub async fn run_leaf_inbox_task(
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     let existed_before = storage::has_svc_message(&tx, &msg.id)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
-                    if storage::get_message(&tx, &msg.id)
+                    let mut stale_poller_record = false;
+                    if let Some(existing) = storage::get_message(&tx, &msg.id)
                         .map_err(|e| AppError::Internal(e.to_string()))?
-                        .is_some()
                     {
                         // A reply the outbound poller has recorded but not yet pushed is
                         // still undecided: retry, so it is not taken for an acked replay.
+                        // Past the bound the poller is gone (killed between record and
+                        // push): replace its record and queue the reply here.
                         if !existed_before && msg.in_reply_to.is_some() {
                             let pushed = storage::get_reply_by_pushed_id(&tx, &msg.id)
                                 .map_err(|e| AppError::Internal(e.to_string()))?
                                 .is_some_and(|r| r.push_outcome.as_deref() == Some("pushed"));
                             if !pushed {
-                                return Err(AppError::ServiceUnavailable(
-                                    "reply is in flight on the outbound reply poller".to_string(),
-                                ));
+                                if storage::now_epoch_secs() - existing.created_at
+                                    < LEAF_REPLY_IN_FLIGHT_SECS
+                                {
+                                    return Err(AppError::ServiceUnavailable(
+                                        "reply is in flight on the outbound reply poller"
+                                            .to_string(),
+                                    ));
+                                }
+                                stale_poller_record = true;
                             }
                         }
-                        // A replay can outlive its service row when the hub misses our ACK.
-                        let already_acked = !existed_before
-                            || storage::is_svc_message_acked(&tx, &msg.id)
-                                .map_err(|e| AppError::Internal(e.to_string()))?;
-                        return Ok((already_acked, false));
+                        if !stale_poller_record {
+                            // A replay can outlive its service row when the hub misses our ACK.
+                            let already_acked = !existed_before
+                                || storage::is_svc_message_acked(&tx, &msg.id)
+                                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                            return Ok((already_acked, false));
+                        }
                     }
                     crate::fed::received_refs(
                         &fed_state,
@@ -1226,8 +1240,12 @@ pub async fn run_leaf_inbox_task(
                         "",
                         msg_record.created_at,
                     )?;
-                    storage::insert_message(&tx, &msg_record)
-                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    if stale_poller_record {
+                        storage::upsert_message(&tx, &msg_record)
+                    } else {
+                        storage::insert_message(&tx, &msg_record)
+                    }
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
                     let queued = storage::insert_svc_message_with_cap(&tx, &svc_msg, cap)
                         .map_err(|e| AppError::Internal(e.to_string()))?;
                     if !queued {
@@ -1248,6 +1266,10 @@ pub async fn run_leaf_inbox_task(
                                 Some("pushed"),
                                 Some(&msg.id),
                             );
+                        } else if stale_poller_record {
+                            // The orphan's row would read as in flight on a later replay.
+                            storage::update_reply_push_outcome(&tx, &msg.id, "pushed")
+                                .map_err(|e| AppError::Internal(e.to_string()))?;
                         }
                     }
                     let is_acked = storage::is_svc_message_acked(&tx, &msg.id)

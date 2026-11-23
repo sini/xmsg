@@ -781,6 +781,146 @@ async fn leaf_with_outbound_hub_receives_reply_to_own_send() {
     );
 }
 
+/// A leaf (holds on its pull and its reply poller) that has sent Bob a message, and Bob's
+/// reply, queued in the hub's mailbox and recorded by the leaf's held poller.
+struct HeldLeafReply {
+    _b: Node,
+    hub: Node,
+    leaf: Node,
+    holds: TempDir,
+    sent: String,
+    pushed: String,
+}
+
+impl HeldLeafReply {
+    async fn new() -> Self {
+        let ia = Identity::new("leaf");
+        let ih = Identity::new("hub");
+        let ib = Identity::new("node-b");
+        let mut b = Node::new(
+            ib,
+            BOB,
+            "Bob",
+            json!({"peers":{"hub":ih.entry(9,&["send","reply","relayed"])}}),
+            &[],
+        )
+        .await;
+        let mut leaf_entry = ia.entry(9, &["send", "reply", "forward"]);
+        leaf_entry["leaf"] = true.into();
+        let hub = Node::new(
+            ih,
+            QUINN,
+            "Hub",
+            json!({"peers":{"leaf":leaf_entry,"node-b":b.identity.entry(b.fed_port,&["send","reply"])}}),
+            &[],
+        )
+        .await;
+        b.reload(
+            json!({"peers":{"hub":hub.identity.entry(hub.fed_port,&["send","reply","relayed"])}}),
+        );
+        let mut route = hub.identity.entry(hub.fed_port, &["send", "reply"]);
+        route["dial"] = "outbound".into();
+        route["default_route"] = true.into();
+        let holds = TempDir::new().unwrap();
+        fs::write(holds.path().join("leaf-pull"), b"").unwrap();
+        fs::write(holds.path().join("reply-poller-recorded"), b"").unwrap();
+        let leaf = Node::spawn(
+            ia,
+            ALICE,
+            "Leaf",
+            json!({"peers":{"hub":route}}),
+            &["--leaf", "--leaf-principal", "demo"],
+            Some(holds.path()),
+        )
+        .await;
+        let sent = leaf
+            .agent(json!({"action":"send","to":"Bob@node-b","text":"held leaf ping"}))
+            .await;
+        assert_eq!(sent["status"], "ok", "leaf send: {sent}");
+        let id = sent["message_id"].as_str().unwrap();
+        b.wait_delivery(id).await;
+        let answer = b
+            .agent(json!({"action":"reply","message_id":id,"text":"held leaf pong"}))
+            .await;
+        assert_eq!(answer["status"], "ok", "reply via hub to leaf: {answer}");
+        let held = Self {
+            pushed: answer["reply"]["pushedMessageId"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            sent: id.to_string(),
+            _b: b,
+            hub,
+            leaf,
+            holds,
+        };
+        assert!(
+            held.in_mailbox(),
+            "hub must queue the reply in the leaf's mailbox"
+        );
+        // The reply poller records the reply and holds there.
+        tokio::time::timeout(WAIT, async {
+            while held.count("messages") == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the leaf's outbound reply poller must record the reply");
+        assert!(
+            !held.queued(),
+            "no path may queue the reply while both are held"
+        );
+        held
+    }
+
+    fn count(&self, table: &str) -> i64 {
+        rusqlite::Connection::open(&self.leaf.db)
+            .unwrap()
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE id=?1"),
+                [&self.pushed],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn queued(&self) -> bool {
+        self.count("svc_pending_messages") > 0
+    }
+
+    fn in_mailbox(&self) -> bool {
+        rusqlite::Connection::open(&self.hub.db)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM peer_mailbox WHERE id=?1",
+                [&self.pushed],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    }
+
+    fn release(&self, hold: &str) {
+        fs::remove_file(self.holds.path().join(hold)).unwrap();
+    }
+
+    async fn wait_queued(&self, why: &str) {
+        tokio::time::timeout(WAIT, async {
+            while !self.queued() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{why} (hub mailbox row present: {})\nleaf:\n{}",
+                self.in_mailbox(),
+                self.leaf.output.snapshot()
+            )
+        });
+    }
+}
+
 /// A leaf whose hub is `dial: outbound` gets a reply by two paths: its mailbox pull and an
 /// outbound reply poller. The poller records the reply before it pushes, and removes the
 /// record again when no service takes the push. A pull inside that window must not take
@@ -788,112 +928,64 @@ async fn leaf_with_outbound_hub_receives_reply_to_own_send() {
 /// is held after recording, then the pull is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leaf_reply_reaches_service_queue_when_pull_follows_hub_enqueue() {
-    let ia = Identity::new("leaf");
-    let ih = Identity::new("hub");
-    let ib = Identity::new("node-b");
-    let mut b = Node::new(
-        ib,
-        BOB,
-        "Bob",
-        json!({"peers":{"hub":ih.entry(9,&["send","reply","relayed"])}}),
-        &[],
-    )
-    .await;
-    let mut leaf_entry = ia.entry(9, &["send", "reply", "forward"]);
-    leaf_entry["leaf"] = true.into();
-    let hub = Node::new(
-        ih,
-        QUINN,
-        "Hub",
-        json!({"peers":{"leaf":leaf_entry,"node-b":b.identity.entry(b.fed_port,&["send","reply"])}}),
-        &[],
-    )
-    .await;
-    b.reload(json!({"peers":{"hub":hub.identity.entry(hub.fed_port,&["send","reply","relayed"])}}));
-    let mut route = hub.identity.entry(hub.fed_port, &["send", "reply"]);
-    route["dial"] = "outbound".into();
-    route["default_route"] = true.into();
-    let holds = TempDir::new().unwrap();
-    let pull_hold = holds.path().join("leaf-pull");
-    let poller_hold = holds.path().join("reply-poller-recorded");
-    fs::write(&pull_hold, b"").unwrap();
-    fs::write(&poller_hold, b"").unwrap();
-    let leaf = Node::spawn(
-        ia,
-        ALICE,
-        "Leaf",
-        json!({"peers":{"hub":route}}),
-        &["--leaf", "--leaf-principal", "demo"],
-        Some(holds.path()),
-    )
-    .await;
-    let sent = leaf
-        .agent(json!({"action":"send","to":"Bob@node-b","text":"held leaf ping"}))
-        .await;
-    assert_eq!(sent["status"], "ok", "leaf send: {sent}");
-    let id = sent["message_id"].as_str().unwrap();
-    b.wait_delivery(id).await;
-    let answer = b
-        .agent(json!({"action":"reply","message_id":id,"text":"held leaf pong"}))
-        .await;
-    assert_eq!(answer["status"], "ok", "reply via hub to leaf: {answer}");
-    let pushed = answer["reply"]["pushedMessageId"].as_str().unwrap();
-    let hub_db = rusqlite::Connection::open(&hub.db).unwrap();
-    let in_mailbox = || -> bool {
-        hub_db
-            .query_row(
-                "SELECT count(*) FROM peer_mailbox WHERE id=?1",
-                [pushed],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-            == 1
-    };
-    assert!(
-        in_mailbox(),
-        "hub must queue the reply in the leaf's mailbox"
-    );
-    let db = rusqlite::Connection::open(&leaf.db).unwrap();
-    let recorded = || -> bool {
-        db.query_row("SELECT count(*) FROM messages WHERE id=?1", [pushed], |r| {
-            r.get::<_, i64>(0)
-        })
-        .unwrap()
-            == 1
-    };
-    let queued = || xmsg::storage::has_svc_message(&db, pushed).unwrap();
-    // The reply poller records the reply and holds there.
-    tokio::time::timeout(WAIT, async {
-        while !recorded() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the leaf's outbound reply poller must record the reply");
-    assert!(!queued(), "no path may queue the reply while both are held");
-    fs::remove_file(&pull_hold).unwrap();
+    let held = HeldLeafReply::new().await;
+    held.release("leaf-pull");
     // A pull that takes the record for a replay acks the reply away at once; one that
     // defers leaves it in the mailbox.
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
-        while !queued() && in_mailbox() {
+        while !held.queued() && held.in_mailbox() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
-    fs::remove_file(&poller_hold).unwrap();
-    tokio::time::timeout(WAIT, async {
-        while !queued() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "leaf must queue the reply for its service (hub mailbox row present: {})\nleaf:\n{}",
-            in_mailbox(),
-            leaf.output.snapshot()
+    held.release("reply-poller-recorded");
+    held.wait_queued("leaf must queue the reply for its service")
+        .await;
+}
+
+/// A poller that never finishes (killed between recording a reply and pushing it) leaves
+/// an orphan record. Past the in-flight bound the pull replaces it and queues the reply
+/// once, and the poller, if it resumes, finds the reply pushed and does not push again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leaf_pull_takes_over_reply_from_orphaned_poller_record() {
+    let held = HeldLeafReply::new().await;
+    // Age the poller's record past the bound and add the `accepted` reply row it writes
+    // before pushing, as a poller killed there and a restart would leave them.
+    let leaf_db = rusqlite::Connection::open(&held.leaf.db).unwrap();
+    let aged = leaf_db
+        .execute(
+            "UPDATE messages SET created_at = created_at - 3600 WHERE id=?1",
+            [&held.pushed],
         )
-    });
+        .unwrap();
+    assert_eq!(aged, 1, "the poller's record must exist to be aged");
+    leaf_db
+        .execute(
+            "INSERT INTO replies (message_id, created_at, replier_session_id, text, push_outcome, pushed_message_id) VALUES (?1, 0, 'demo', 'held leaf pong', 'accepted', ?2)",
+            [&held.sent, &held.pushed],
+        )
+        .unwrap();
+    drop(leaf_db);
+    held.release("leaf-pull");
+    held.wait_queued("pull must take over a reply whose poller record is orphaned")
+        .await;
+    let outcome: String = rusqlite::Connection::open(&held.leaf.db)
+        .unwrap()
+        .query_row(
+            "SELECT push_outcome FROM replies WHERE pushed_message_id=?1",
+            [&held.pushed],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "pushed", "a takeover must leave its reply pushed");
+    held.release("reply-poller-recorded");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(held.count("svc_pending_messages"), 1, "one delivery only");
+    assert_eq!(
+        held.count("messages"),
+        1,
+        "a resumed poller must keep the takeover's record"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
