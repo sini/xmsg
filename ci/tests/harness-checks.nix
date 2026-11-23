@@ -532,6 +532,40 @@
         opencode-plugin = opencodeCheck "opencode-plugin" pkgs.opencode;
         opencode2-plugin = opencodeCheck "opencode2-plugin" llm-agents.packages.${system}.opencode2;
 
+        # P1: the pi and opencode files the module renders with sockets.dir set resolve the pins
+        # with XMSG_*_SOCK unset, before any of the plugin's own code (check-pinned-plugins.mjs).
+        pinned-plugins =
+          let
+            dir = "/run/user/1000/xmsg-sockets";
+            hm =
+              (home-manager.lib.homeManagerConfiguration {
+                inherit pkgs;
+                modules = [
+                  xmsg.homeManagerModules.xmsg
+                  {
+                    home = {
+                      username = "alice";
+                      homeDirectory = "/home/alice";
+                      stateVersion = "25.11";
+                      enableNixpkgsReleaseCheck = false;
+                    };
+                    programs.xmsg = {
+                      enable = true;
+                      server.sockets.dir = dir;
+                      harnesses.pi.enable = true;
+                      harnesses.opencode.enable = true;
+                    };
+                  }
+                ];
+              }).config;
+          in
+          pkgs.runCommand "xmsg-pinned-plugins" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+            node --experimental-transform-types --no-warnings ${./check-pinned-plugins.mjs} ${dir} \
+              ${hm.home.file.".pi/agent/extensions/xmsg-pi.ts".source} \
+              ${hm.xdg.configFile."opencode/plugin/xmsg.ts".source} \
+              ${../../extensions/pi/index.ts} ${../../extensions/opencode/xmsg.ts}
+            touch $out
+          '';
         hermes-endpoints =
           pkgs.runCommand "xmsg-hermes-endpoints" { nativeBuildInputs = [ pkgs.python3 ]; }
             ''
