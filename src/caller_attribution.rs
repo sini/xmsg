@@ -5,7 +5,7 @@ mod lineage_tests;
 #[cfg(test)]
 mod noninterference_tests;
 pub(crate) mod resolve;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) mod tests;
 
 use crate::{client::caller_attribution as wire, http::AppState};
@@ -58,7 +58,7 @@ struct EligibilityFacts {
 trait QualificationProvider: Send + Sync {
     fn current(&self, key: &RuntimeKey) -> Option<EligibilityFacts>;
 }
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 struct FixtureFacts {
     expires: Instant,
     revision: std::sync::atomic::AtomicU64,
@@ -66,7 +66,7 @@ struct FixtureFacts {
     reaper_complete: bool,
     match_complete: bool,
 }
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 impl QualificationProvider for FixtureFacts {
     fn current(&self, key: &RuntimeKey) -> Option<EligibilityFacts> {
         Some(EligibilityFacts {

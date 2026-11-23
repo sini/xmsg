@@ -298,6 +298,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install toolchain
         run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
+      - name: Record native Darwin attribution tuple
+        run: |
+          sw_vers
+          uname -a
       - name: Darwin attribution source controls
         run: |
           python3 - <<'PYTHON'
@@ -305,6 +309,28 @@ jobs:
           import subprocess
 
           controls = [
+              (
+                  "src/caller_attribution.rs",
+                  '    #[cfg(target_os = "macos")]\n    eligibility(provider, &key)?;\n',
+                  '    #[cfg(target_os = "macos")]\n    return Err(FailureReason::Unsupported);\n',
+                  "caller_attribution::tests::real_daemon_fixture_resolves_original_registered_process",
+                  "real daemon failed original attribution:",
+              ),
+              (
+                  "src/client/caller_attribution.rs",
+                  "let length = darwin_peek(stream, &mut bytes, expect_fd && data.is_empty())?;",
+                  "let length = if data.is_empty() { bytes.len() } else { darwin_peek(stream, &mut bytes, false)? };",
+                  "client::caller_attribution::tests::darwin_marker_multi_fd_refuses_before_consuming",
+                  "Darwin consuming read reached an unapproved ancillary record",
+              ),
+              (
+                  "src/client/caller_attribution.rs",
+                  "let length = darwin_peek(stream, &mut bytes, expect_fd && data.is_empty())?;",
+                  "let length = if data.is_empty() { darwin_peek(stream, &mut bytes, expect_fd)? } else { bytes.len() };",
+                  "client::caller_attribution::tests::darwin_later_rights_refuse_without_consuming",
+                  "Darwin consuming read reached an unapproved ancillary record",
+              ),
+
               (
                   "src/caller_attribution.rs",
                   '    #[cfg(target_os = "macos")]\n    eligibility(provider, &key)?;\n',
@@ -368,6 +394,11 @@ jobs:
               result = run(witness)
               assert result.returncode == 0
               assert f"test {witness} ... ok" in result.stdout
+
+          witness = "client::caller_attribution::tests::darwin_record_boundary_and_fd_counter_sensitivity"
+          result = run(witness)
+          assert result.returncode == 0
+          assert f"test {witness} ... ok" in result.stdout
           PYTHON
       - name: cargo test
         run: cargo test --locked --no-fail-fast
