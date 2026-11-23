@@ -7719,10 +7719,14 @@ impl CredentialReloader {
                     let current_pm = self.peers.lock().unwrap().clone();
                     pm.admitted_clients = current_pm.admitted_clients.clone();
                     if let Some(fs) = &self.fed_state {
-                        let applied = {
-                            let conn = fs.db.lock().unwrap_or_else(|e| e.into_inner());
-                            pm.apply_pairing_authority(&conn, &fs.cert_der)
-                        };
+                        // The credential being loaded is the issuer, not the startup one.
+                        let applied =
+                            self.read_certs()
+                                .map_err(|e| e.to_string())
+                                .and_then(|certs| {
+                                    let conn = fs.db.lock().unwrap_or_else(|e| e.into_inner());
+                                    pm.apply_pairing_authority(&conn, &certs[0])
+                                });
                         if let Err(e) = applied {
                             if initialized {
                                 crate::systemd::notify_reload_failed(
@@ -7812,20 +7816,13 @@ impl CredentialReloader {
         }
     }
 
-    fn build_tls_config(&self, peers: &PeersMap) -> Result<DynamicTls, AppError> {
+    fn read_certs(&self) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, AppError> {
         let cert_pem = std::fs::read(&self.cert_path).map_err(|e| {
             AppError::Internal(format!(
                 "failed to read cert file {}: {e}",
                 self.cert_path.display()
             ))
         })?;
-        let key_pem = std::fs::read(&self.key_path).map_err(|e| {
-            AppError::Internal(format!(
-                "failed to read key file {}: {e}",
-                self.key_path.display()
-            ))
-        })?;
-
         use rustls::pki_types::pem::PemObject;
         let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
             rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
@@ -7836,7 +7833,19 @@ impl CredentialReloader {
                 "cert file contains 0 certificates".to_string(),
             ));
         }
+        Ok(certs)
+    }
 
+    fn build_tls_config(&self, peers: &PeersMap) -> Result<DynamicTls, AppError> {
+        let certs = self.read_certs()?;
+        let key_pem = std::fs::read(&self.key_path).map_err(|e| {
+            AppError::Internal(format!(
+                "failed to read key file {}: {e}",
+                self.key_path.display()
+            ))
+        })?;
+
+        use rustls::pki_types::pem::PemObject;
         let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
             .map_err(|e| AppError::Internal(format!("failed to parse key pem: {e}")))?;
 
