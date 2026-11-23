@@ -14,7 +14,7 @@
 //
 // The default export serves both plugin APIs: opencode 1.x calls `server`, opencode 2.x
 // calls `setup`. Each adapts its API to `Xmsg`, which holds the behaviour.
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -37,18 +37,90 @@ function ownEnvironment(): { kind: string; ref?: string } {
 }
 
 
-// The runtime dir holding xmsg/, resolved as the xmsg binary does: $XDG_RUNTIME_DIR, else
-// on macOS the Darwin user temp dir.
-function registerSockPath(): string | undefined {
-  if (process.env.XMSG_REGISTER_SOCK) return process.env.XMSG_REGISTER_SOCK;
+// The legacy runtime dir holding xmsg/, as the xmsg binary resolves it: $XDG_RUNTIME_DIR,
+// else on macOS the Darwin user temp dir.
+function legacyRuntimeDir(): string | undefined {
   let dir = process.env.XDG_RUNTIME_DIR?.trim();
   if (!dir && process.platform === "darwin") {
     try {
       dir = execFileSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" }).trim();
     } catch {}
   }
-  return dir ? path.join(dir, "xmsg", "register.sock") : undefined;
+  return dir || undefined;
 }
+
+type Endpoint = "register" | "agent";
+type DoctorResult = { stdout: string; stderr: string; error: any };
+type DoctorProbe = () => Promise<DoctorResult>;
+interface EndpointResolver {
+  resolve(name: Endpoint): Promise<string | undefined>;
+  invalidate(): void;
+}
+class XmsgEndpointError extends Error {}
+
+const ENDPOINT_ENV = { register: "XMSG_REGISTER_SOCK", agent: "XMSG_AGENT_SOCK" } as const;
+// Only the exact clap parse error of a CLI that predates `doctor` falls through to the legacy path.
+const UNSUPPORTED_DOCTOR = "error: unrecognized subcommand 'doctor'\n\nUsage: xmsg <COMMAND>\n\nFor more information, try '--help'.\n";
+
+const runDoctor: DoctorProbe = () =>
+  new Promise((resolve) =>
+    execFile("xmsg", ["doctor", "--json"], { timeout: 3000, maxBuffer: 64 * 1024, killSignal: "SIGKILL", encoding: "utf8" },
+      (error, stdout, stderr) => resolve({ error, stdout, stderr })),
+  );
+
+// The daemon's sockets: XMSG_*_SOCK, else what `xmsg doctor --json` resolves (run once and
+// cached until invalidate(), which the connection makes after a disconnect), else the legacy
+// <runtime dir>/xmsg/ when no CLI with doctor is installed. A doctor that answers with
+// unusable endpoints, malformed output or a timeout is refused, never rerouted.
+function createEndpointResolver(probe: DoctorProbe = runDoctor, log = (line: string) => console.warn(line)): EndpointResolver {
+  let found: Promise<Partial<Record<Endpoint, string>> | string> | undefined;
+  let loggedFallback = false;
+  const refuse = (why: string): never => {
+    throw new XmsgEndpointError(`xmsg doctor ${why}`);
+  };
+  const discover = async () => {
+    const { stdout, stderr, error } = await probe();
+    if (error?.killed || error?.signal || error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") refuse("exceeded its time or output bound");
+    if (error?.code === "ENOENT") return "xmsg CLI not found";
+    if (error?.code === 2 && stdout === "" && stderr === UNSUPPORTED_DOCTOR) return "xmsg CLI has no doctor";
+    let report: any;
+    try {
+      report = JSON.parse(stdout);
+    } catch {
+      refuse("returned invalid JSON");
+    }
+    if (report?.endpoints_usable === false) refuse("reports the endpoints unusable; run `xmsg doctor`");
+    if (report?.endpoints_usable !== true) refuse("returned an invalid endpoint report");
+    const fields = { register: report.register_socket ?? report.leaf_register_socket, agent: report.agent_socket };
+    const paths: Partial<Record<Endpoint, string>> = {};
+    for (const [name, value] of Object.entries(fields) as [Endpoint, unknown][]) {
+      if (value === null || value === undefined) continue;
+      if (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")) refuse(`returned a non-absolute ${name} socket`);
+      paths[name] = value as string;
+    }
+    return paths;
+  };
+  return {
+    async resolve(name) {
+      const pinned = process.env[ENDPOINT_ENV[name]];
+      if (pinned) return pinned;
+      const result = await (found ??= discover());
+      if (typeof result !== "string") return result[name] ?? refuse(`reported no ${name} socket`);
+      if (!loggedFallback) {
+        loggedFallback = true;
+        log(`[xmsg] ${result}; using the legacy socket directory`);
+      }
+      const runtimeDir = legacyRuntimeDir();
+      return runtimeDir ? path.join(runtimeDir, "xmsg", `${name}.sock`) : undefined;
+    },
+    invalidate() {
+      found = undefined;
+    },
+  };
+}
+
+// One doctor probe per process. The plugin keeps its default export as its only export.
+const endpoints = createEndpointResolver();
 
 function reclaimStorePath(): string {
   const stateHome = process.env.XDG_STATE_HOME?.trim() || path.join(os.homedir(), ".local", "state");
@@ -101,16 +173,29 @@ class Connection {
   private storePath = reclaimStorePath();
 
   constructor(
-    private sock: string,
+    private endpoints: EndpointResolver,
     private deliver: (a: Answer) => Promise<boolean>,
   ) {}
 
   private connect(): Promise<void> {
     if (this.closed) return Promise.reject(new Error("xmsg plugin stopped"));
-    this.ready ??= new Promise((resolve, reject) => {
-      const s = net.createConnection(this.sock);
+    if (this.ready) return this.ready;
+    const ready = this.endpoints.resolve("register").then((sock) => {
+      if (!sock) throw new Error("xmsg socket directory not found");
+      return this.open(sock);
+    });
+    ready.catch(() => {
+      if (this.ready === ready) this.ready = undefined;
+    });
+    return (this.ready = ready);
+  }
+
+  private open(sock: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const s = net.createConnection(sock);
       s.once("error", (e) => {
-        this.ready = undefined;
+        // Re-resolve at the next connect, so a restarted daemon is found.
+        this.endpoints.invalidate();
         reject(e);
       });
       const lines = readline.createInterface({ input: s });
@@ -149,11 +234,11 @@ class Connection {
         this.bound.clear();
         for (const [, resolve] of this.waiting) resolve({ status: "error", error: "closed", detail: "xmsg connection closed" });
         this.waiting.clear();
+        this.endpoints.invalidate();
         if (this.roots.size && !this.closed) setTimeout(() => void this.connect().catch(() => {}), 1500);
       });
       s.write(JSON.stringify({ harness: "opencode" }) + "\n");
     });
-    return this.ready;
   }
 
   async call(frame: Answer): Promise<Answer> {
@@ -317,10 +402,10 @@ class Xmsg {
   private conn: Connection;
 
   constructor(
-    sock: string,
+    endpoints: EndpointResolver,
     private host: Host,
   ) {
-    this.conn = new Connection(sock, (a) => host.prompt(a.session, a.envelope));
+    this.conn = new Connection(endpoints, (a) => host.prompt(a.session, a.envelope));
   }
 
   // HA7: a child session acts as its root conversation.
@@ -420,19 +505,23 @@ const TOOLS: { name: string; description: string; args: Answer; required?: strin
   },
 ];
 
-const noSock = () => console.warn("[xmsg] socket directory not found (XDG_RUNTIME_DIR is unset and the macOS fallback is unavailable); the xmsg plugin is off");
+// The register endpoint at load: none (no runtime dir) or a refusal turns the plugin off.
+const registerEndpoint = () =>
+  endpoints.resolve("register").then(
+    (sock) => sock ?? (console.warn("[xmsg] socket directory not found (XDG_RUNTIME_DIR is unset and the macOS fallback is unavailable); the xmsg plugin is off"), undefined),
+    (e) => (console.warn(`[xmsg] ${e.message || e}; the xmsg plugin is off`), undefined),
+  );
 
 // opencode 1.x: hooks returned from `server`, the SDK client for sessions.
 const server = async ({ client }: any) => {
-  const sock = registerSockPath();
-  if (!sock) return noSock(), {};
+  if (!(await registerEndpoint())) return {};
 
   const parentOf = async (id: string): Promise<string | undefined> => {
     const res = await client.session.get({ path: { id } });
     if (res.error) throw new Error(`session ${id}: ${JSON.stringify(res.error)}`);
     return res.data?.parentID;
   };
-  const xmsg = new Xmsg(sock, {
+  const xmsg = new Xmsg(endpoints, {
     parentOf,
     prompt: async (id, text) => {
       const res = await client.session
@@ -464,10 +553,9 @@ const server = async ({ client }: any) => {
 // opencode 2.x: `setup(ctx)` registers hooks, tools and an event subscription, and returns
 // their cleanup, which a plugin reload runs before the next `setup`.
 const setup = async (ctx: any) => {
-  const sock = registerSockPath();
-  if (!sock) return noSock();
+  if (!(await registerEndpoint())) return;
 
-  const xmsg = new Xmsg(sock, {
+  const xmsg = new Xmsg(endpoints, {
     parentOf: async (sessionID) => (await ctx.session.get({ sessionID }))?.parentID,
     prompt: (sessionID, text) =>
       ctx.session.prompt({ sessionID, text }).then(
@@ -543,9 +631,6 @@ function emitOpenCodeActivity(event: any): void {
   if (!mapped) return;
   const seq = (activitySeqs.get(sid) ?? 0) + 1;
   activitySeqs.set(sid, seq);
-  const dir = process.env.XDG_RUNTIME_DIR;
-  if (!dir) return;
-  const sock = `${dir}/xmsg/agent.sock`;
   const frame = JSON.stringify({
     action: "activity",
     schema_version: 1,
@@ -559,12 +644,12 @@ function emitOpenCodeActivity(event: any): void {
     wake: "absent",
   });
   if (frame.length >= 1024) return;
-  try {
-    const net = require("node:net");
+  endpoints.resolve("agent").then((sock) => {
+    if (!sock) return;
     const c = net.createConnection(sock, () => c.end(`${frame}\n`));
     c.setTimeout(50, () => c.destroy());
     c.on("error", () => {});
-  } catch {}
+  }, () => {});
 }
 
 export default { id: "xmsg", server, setup };
