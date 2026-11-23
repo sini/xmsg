@@ -582,46 +582,35 @@ fn command_targets_install(
     {
         return false;
     }
-    let value = |name: &str| -> Option<&str> {
+    let value = |name: &str| -> Result<Option<&str>, ()> {
         let mut found = None;
         let mut args = argv[2..].iter();
         while let Some(arg) = args.next() {
-            if arg == name {
-                found = args.next().map(String::as_str);
-            } else if let Some(v) = arg.strip_prefix(&format!("{name}=")) {
-                found = Some(v);
+            let selected = if arg == name {
+                Some(args.next().ok_or(())?.as_str())
+            } else {
+                arg.strip_prefix(&format!("{name}="))
+            };
+            if let Some(raw) = selected {
+                if found.is_some() || raw.is_empty() || raw.starts_with('-') {
+                    return Err(());
+                }
+                found = Some(raw);
             }
         }
-        found
+        Ok(found)
     };
-    let same = |raw: &str, selected: &Path| {
+    let Ok(db) = value("--db-path") else {
+        return false;
+    };
+    if let Some(raw) = db.or(env_db) {
         let candidate = Path::new(raw);
-        candidate.is_absolute()
-            && matches!((canonicalize_best_effort(candidate), canonicalize_best_effort(selected)),
-                (Ok(a), Ok(b)) if a == b)
-    };
-    if let Some(db) = value("--db-path").or(env_db) {
-        return same(db, &resolved.db_path);
+        return candidate.is_absolute()
+            && matches!((canonicalize_best_effort(candidate), canonicalize_best_effort(&resolved.db_path)),
+                (Ok(a), Ok(b)) if a == b);
     }
-    let mut explicit_socket = false;
-    for (flag, name) in [
-        ("--http-sock", "http"),
-        ("--agent-sock", "agent"),
-        ("--register-sock", "register"),
-        ("--leaf-register-sock", "leaf_register"),
-    ] {
-        if let Some(raw) = value(flag) {
-            explicit_socket = true;
-            if resolved
-                .enabled_endpoints()
-                .iter()
-                .any(|ep| ep.name == name && same(raw, &ep.path))
-            {
-                return true;
-            }
-        }
-    }
-    !explicit_socket
+    // Socket pins do not move the default database to another installation.
+    true
 }
 
 // Parse literal service argv, without interpreting shells, substitutions or specifiers.

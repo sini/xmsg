@@ -610,3 +610,40 @@ fn mnau_launchd_argv_distinguishes_collector_and_decodes_paths() {
         .iter()
         .any(|c| c.id == "install.service_owner" && c.status == "pass"));
 }
+
+#[test]
+fn mnau_default_db_serve_counts_despite_different_socket_pins() {
+    let collector = "[Service]\nExecStart=/usr/bin/xmsg observe-collector --state-dir @STATE@/observe-collector\n";
+    let serve = "[Service]\nExecStart=/usr/bin/xmsg serve --http-sock /other/http.sock\n";
+    let report = inspect_manager_fixture(&[serve, collector], &[]);
+    assert_eq!(report.competing_managers.len(), 1);
+    assert!(report
+        .checks
+        .iter()
+        .any(|c| c.id == "install.service_owner" && c.status == "pass"));
+    let report = inspect_manager_fixture(
+        &[
+            serve,
+            "[Service]\nExecStart=/usr/bin/xmsg serve --agent-sock /other/agent.sock\n",
+            collector,
+        ],
+        &[],
+    );
+    assert_eq!(report.competing_managers.len(), 2);
+    assert_eq!(report.service_owner, ServiceOwner::Ambiguous);
+}
+
+#[test]
+fn mnau_missing_or_empty_db_option_never_falls_back_to_default() {
+    let report = inspect_manager_fixture(
+        &[
+            "[Service]\nExecStart=/usr/bin/xmsg serve --db-path @DB@\n",
+            "[Service]\nExecStart=/usr/bin/xmsg serve --db-path\n",
+            "[Service]\nExecStart=/usr/bin/xmsg serve --db-path=\n",
+            "[Service]\nExecStart=/usr/bin/xmsg serve --db-path --http-sock @HTTP@\n",
+        ],
+        &[],
+    );
+    assert_eq!(report.competing_managers.len(), 1);
+    assert_eq!(report.service_owner, ServiceOwner::SystemdUser);
+}

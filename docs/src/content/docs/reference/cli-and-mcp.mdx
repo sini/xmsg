@@ -135,7 +135,9 @@ Service-manager ownership detection reads literal systemd `ExecStart` or launchd
 `ProgramArguments`: only an executable named `xmsg` with subcommand `serve`
 counts. A separate `observe-collector`, including one storing data below the
 daemon state directory, is not another daemon owner. Explicit DB paths match
-canonical files exactly; an explicit different DB is excluded. Shell wrappers,
+canonical files exactly; an explicit different DB is excluded even if a socket
+overlaps. A real `serve` command without a DB override retains the default-install
+assumption, including when it pins different sockets. Shell wrappers,
 service substitutions and unsupported command syntax are not resolved by this
 read-only check.
 
