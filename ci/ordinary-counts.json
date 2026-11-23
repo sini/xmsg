@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Inherited expected platform reference from dafe5c8b6f20118768ac0b7499e72fb18b67c395; r6 candidate values await fresh native CI measurement, not arithmetic or a green-gate claim",
-    "darwin": "Inherited expected platform reference from dafe5c8b6f20118768ac0b7499e72fb18b67c395; r6 candidate values await fresh native CI measurement, not arithmetic or a green-gate claim"
+    "linux": "Measured f31c2119cc76064a102c2a1c9e2c19ca2c807925: run 45091718058, job 137427496545, Nix ordinary; 119 executed integration targets; event checkout tree matches candidate",
+    "darwin": "Measured f31c2119cc76064a102c2a1c9e2c19ca2c807925: run 45091718109, job 137422535817, native cargo-test step; 119 executed integration targets; event checkout tree matches candidate"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -126,16 +126,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1746,
+      "passed": 1786,
       "failed": 0,
-      "ignored": 10,
-      "summaries": 121
+      "ignored": 12,
+      "summaries": 122
     },
     "darwin": {
-      "passed": 1721,
+      "passed": 1761,
       "failed": 0,
-      "ignored": 9,
-      "summaries": 121
+      "ignored": 11,
+      "summaries": 122
     }
   }
 }
