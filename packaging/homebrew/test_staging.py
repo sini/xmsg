@@ -603,6 +603,98 @@ def run_s9d_umask_check(tmp: pathlib.Path, installed_bin: pathlib.Path) -> None:
     print("  [ok] installed opt binary logged effective_umask=077 and kept umask-only files private")
 
 
+def classify_brew_outdated(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    *,
+    expected_formula: str,
+    expected_installed_version: str | None = None,
+    expected_latest_version: str | None = None,
+) -> str:
+    """Parse `brew outdated --formula --verbose <formula>` status and output together.
+
+    Homebrew exits 1 whenever named formulae produce a non-empty outdated list
+    (Homebrew.failed = args.named.present? && outdated.present?). We therefore:
+      - return "up_to_date" iff returncode == 0, stdout is empty, and stderr is empty;
+      - return "outdated" iff returncode == 1, stderr is empty, and stdout has exactly
+        one line matching `<expected_formula> (<installed>) < <latest>` (or
+        `<expected_formula>` when expected versions are omitted);
+      - raise AssertionError for any stderr output, unexpected exit code, missing or
+        extra lines, unexpected formula name, or version mismatch.
+    """
+    if stderr.strip():
+        raise AssertionError(
+            f"brew outdated emitted stderr (rc={returncode}):\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+        )
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if returncode == 0:
+        if lines:
+            raise AssertionError(
+                f"brew outdated exited 0 with unexpected stdout lines: {lines!r}"
+            )
+        return "up_to_date"
+    if returncode == 1:
+        if len(lines) != 1:
+            raise AssertionError(
+                f"brew outdated exited 1 with {len(lines)} stdout lines (expected exactly 1): {lines!r}"
+            )
+        expected_line = (
+            f"{expected_formula} ({expected_installed_version}) < {expected_latest_version}"
+            if expected_installed_version is not None and expected_latest_version is not None
+            else expected_formula
+        )
+        if lines[0] != expected_line:
+            raise AssertionError(
+                f"brew outdated line mismatch: got {lines[0]!r}, expected {expected_line!r}"
+            )
+        return "outdated"
+    raise AssertionError(
+        f"brew outdated returned unexpected exit code {returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+    )
+
+
+def run_brew_outdated_parser_self_checks() -> None:
+    formula = "xmsgstage1/local/xmsg"
+    assert classify_brew_outdated(0, "", "", expected_formula=formula) == "up_to_date"
+    assert (
+        classify_brew_outdated(
+            1,
+            f"{formula} (0.1.0.10) < 0.1.0.11\n",
+            "",
+            expected_formula=formula,
+            expected_installed_version="0.1.0.10",
+            expected_latest_version="0.1.0.11",
+        )
+        == "outdated"
+    )
+    bad_cases = [
+        ("rc0_nonempty_stdout", 0, f"{formula} (0.1.0.10) < 0.1.0.11\n", ""),
+        ("rc0_stderr", 0, "", "Warning: something\n"),
+        ("rc1_empty_stdout", 1, "", ""),
+        ("rc1_stderr_unknown", 1, "", "Error: No available formula with the name \"nope\"\n"),
+        ("rc1_unexpected_formula", 1, "other/tap/foo (1.0) < 2.0\n", ""),
+        ("rc1_wrong_version", 1, f"{formula} (0.1.0.10) < 0.1.0.12\n", ""),
+        ("rc1_multiple_lines", 1, f"{formula} (0.1.0.10) < 0.1.0.11\nother (1) < 2\n", ""),
+        ("rc2_unexpected", 2, f"{formula} (0.1.0.10) < 0.1.0.11\n", ""),
+    ]
+    for label, rc, out, err in bad_cases:
+        failed = False
+        try:
+            classify_brew_outdated(
+                rc,
+                out,
+                err,
+                expected_formula=formula,
+                expected_installed_version="0.1.0.10",
+                expected_latest_version="0.1.0.11",
+            )
+        except AssertionError:
+            failed = True
+        assert failed, f"classify_brew_outdated unexpectedly accepted invalid case {label!r}"
+    print("  [ok] brew outdated status+output parser self-checks passed (rejects stderr, wrong rc, wrong formula/version)")
+
+
 def run_s5_and_s9_real_homebrew(
     tmp: pathlib.Path,
     *,
@@ -612,6 +704,8 @@ def run_s5_and_s9_real_homebrew(
 ) -> None:
     print("== S9 positive + S5 real Homebrew disposable tap install, upgrade, data preservation, cached rollback ==")
     benv = brew_env()
+    brew_ver_out = run_cmd(["brew", "--version"], env=benv).stdout.strip()
+    print(f"  [info] brew --version:\n{brew_ver_out}")
 
     # Guard against colliding with a pre-installed Homebrew `xmsg` formula on a developer machine.
     existing = run_cmd(["brew", "list", "--formula", "xmsg"], env=benv, check=False)
@@ -851,17 +945,91 @@ def run_s5_and_s9_real_homebrew(
         cached_v1_formula = pathlib.Path(upg_check["rollback_formula"])
         assert cached_v1_formula.is_file()
 
+        # 4b. Current-version control & genuine-error control for `brew outdated --formula --verbose`:
+        #     (a) installed formula at current tap version MUST exit 0 with empty stdout/stderr;
+        #     (b) unknown formula name MUST still fail classify_brew_outdated (never masked).
+        up_to_date_v1 = run_cmd(
+            ["brew", "outdated", "--formula", "--verbose", formula_ref],
+            env=benv,
+            check=False,
+        )
+        assert (
+            classify_brew_outdated(
+                up_to_date_v1.returncode,
+                up_to_date_v1.stdout,
+                up_to_date_v1.stderr,
+                expected_formula=formula_ref,
+            )
+            == "up_to_date"
+        ), f"current-version control failed: rc={up_to_date_v1.returncode} out={up_to_date_v1.stdout!r} err={up_to_date_v1.stderr!r}"
+        print(f"  [ok] current-version control: brew outdated on up-to-date {formula_ref} ({v1_ver}) returned rc=0 with empty stdout/stderr")
+
+        unknown_ref = f"{tap_name}/nonexistent-xmsg-control"
+        unknown_proc = run_cmd(
+            ["brew", "outdated", "--formula", "--verbose", unknown_ref],
+            env=benv,
+            check=False,
+        )
+        assert unknown_proc.returncode != 0, f"genuine-error control: unknown formula unexpectedly exited 0"
+        unknown_rejected = False
+        try:
+            classify_brew_outdated(
+                unknown_proc.returncode,
+                unknown_proc.stdout,
+                unknown_proc.stderr,
+                expected_formula=unknown_ref,
+            )
+        except AssertionError:
+            unknown_rejected = True
+        assert unknown_rejected, (
+            f"genuine-error control: classify_brew_outdated failed to reject unknown formula {unknown_ref!r}"
+        )
+        print(
+            f"  [ok] genuine-error control: unknown formula {unknown_ref} returned rc={unknown_proc.returncode} "
+            "with stderr error and failed verifier"
+        )
+
         # 5. Update disposable tap formula to v2, verify real Homebrew sees v2 > v1, and run `brew upgrade`.
         commit_tap_formula(v2_scratch / "xmsg.rb", f"stage {v2_ver}")
         run_cmd(["git", "-C", str(tap_repo_dir), "pull", "--ff-only"])
-        outdated = run_cmd(["brew", "outdated", "--formula", formula_ref], env=benv).stdout
-        assert "xmsg" in outdated, f"S5: Homebrew did not order {v2_ver} > {v1_ver}; brew outdated={outdated!r}"
+        outdated_proc = run_cmd(
+            ["brew", "outdated", "--formula", "--verbose", formula_ref],
+            env=benv,
+            check=False,
+        )
+        status = classify_brew_outdated(
+            outdated_proc.returncode,
+            outdated_proc.stdout,
+            outdated_proc.stderr,
+            expected_formula=formula_ref,
+            expected_installed_version=v1_ver,
+            expected_latest_version=v2_ver,
+        )
+        assert status == "outdated", (
+            f"S5: Homebrew did not report {formula_ref} ({v1_ver}) < {v2_ver} as outdated "
+            f"(rc={outdated_proc.returncode}, out={outdated_proc.stdout!r}, err={outdated_proc.stderr!r})"
+        )
+        print(f"  [ok] brew outdated --formula --verbose reported `{outdated_proc.stdout.strip()}` (rc=1, stderr empty)")
         run_cmd(["brew", "upgrade", formula_ref], env=benv)
         ver_v2_out = run_cmd(["brew", "list", "--versions", formula_ref], env=benv).stdout.strip()
         assert v2_ver in ver_v2_out, f"S5: expected upgraded version {v2_ver}, got: {ver_v2_out}"
+        up_to_date_v2 = run_cmd(
+            ["brew", "outdated", "--formula", "--verbose", formula_ref],
+            env=benv,
+            check=False,
+        )
+        assert (
+            classify_brew_outdated(
+                up_to_date_v2.returncode,
+                up_to_date_v2.stdout,
+                up_to_date_v2.stderr,
+                expected_formula=formula_ref,
+            )
+            == "up_to_date"
+        ), f"post-upgrade current-version control failed: rc={up_to_date_v2.returncode} out={up_to_date_v2.stdout!r}"
         verify_staging.verify_embedded_revision(opt_bin, source_sha)
         assert db_path.read_bytes() == db_bytes_before, "S5: durable DB bytes changed during brew upgrade!"
-        print(f"  [ok] real Homebrew ordered {v2_ver} > {v1_ver}, upgraded cleanly, preserved durable DB")
+        print(f"  [ok] real Homebrew ordered {v2_ver} > {v1_ver}, upgraded cleanly, up-to-date rc=0, preserved durable DB")
 
         # 6. Cached rollback test: delete v1 scratch dir so rollback MUST come from durable staging-cache!
         shutil.rmtree(v1_scratch)
@@ -906,6 +1074,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="xmsg-s5-s9-") as td:
         tmp = pathlib.Path(td)
+        run_brew_outdated_parser_self_checks()
         run_s9_negative_controls(tmp, binary=binary, skill=skill, source_sha=args.source_sha)
         if not args.skip_brew:
             run_s5_and_s9_real_homebrew(tmp, binary=binary, skill=skill, source_sha=args.source_sha)

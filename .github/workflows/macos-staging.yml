@@ -143,6 +143,11 @@ jobs:
           name: xmsg-macos-arm64-staging
           path: staged-download
 
+      - name: Record runner Homebrew version
+        run: |
+          set -euo pipefail
+          brew --version
+
       - name: Extract binary from staged artifact and run S5, S9, and S9d gates with real Homebrew
         env:
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
