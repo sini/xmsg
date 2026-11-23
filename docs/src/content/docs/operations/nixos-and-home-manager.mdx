@@ -10,8 +10,9 @@ The `github:sini/xmsg` flake provides two declarative modules:
 - **`homeManagerModules.xmsg`** (also `homeManagerModules.default`): Installs `xmsg`. Runs
   `xmsg serve` as a user service (`systemd.user.services.xmsg` on Linux, `launchd.agents.xmsg` on
   macOS). Configures the MCP servers, plugins, extensions, skills and hooks for each harness.
-- **`nixosModules.xmsg`** (also `nixosModules.default`): When federation is enabled, opens the
-  federation TCP port in the system firewall.
+- **`nixosModules.xmsg`** (also `nixosModules.default`): Opens the federation firewall port
+  (`programs.xmsg.federation`) and manages isolated system-user `xmsg serve` daemons
+  (`services.xmsg.instances.<name>`).
 
 ## Minimal Home Manager import
 
@@ -167,10 +168,52 @@ The rendered peers file is exposed read-only as `programs.xmsg.server.federation
 path `--peers-file` names, for checks that read it. The module has no option for a hand-written peers file. To use `default_route` or `hub`, write
 the peers file yourself and run `xmsg serve --peers-file <path>` outside this module's service.
 
-On NixOS, open the federation port in the firewall with `nixosModules.xmsg`:
+On NixOS, open the federation port in the firewall with `programs.xmsg.federation`:
 
-```nix file=<rootDir>/nix/modules/nixos.nix#L1-L20
+```nix
+programs.xmsg.federation = {
+  enable = true;
+  port = 7788;
+};
 ```
+
+## NixOS system services
+
+`nixosModules.xmsg` provides `services.xmsg.instances.<name>` for running isolated system-user
+`xmsg serve` daemons (`xmsg-<name>.service`). Each instance gets its own `0700` `RuntimeDirectory`
+and `StateDirectory`, pinned sockets by default, `ProtectProc = "invisible"`, and an evaluation
+assertion against TCP listeners unless `allowTcpListen = true` is set. See
+[NixOS system-service instances](/operations/runtime-and-systemd/#nixos-system-service-instances) for
+a usage example.
+
+### `services.xmsg.instances.<name>` options
+
+| Option | Type | Default | Purpose |
+|---|---|---|---|
+| `enable` | `bool` | `true` | Enable `xmsg-<name>.service`. |
+| `package` | `package` | `packages.<system>.default` | `xmsg` package for this instance. |
+| `user` | `str` | `"xmsg-<name>"` | System user owning runtime dir, state dir, and sockets. |
+| `group` | `str` | `config.user` | Primary group for `xmsg-<name>.service`. |
+| `home` | `nullOr str` | `"/var/lib/xmsg-<name>"` | `HOME` environment variable; `null` omits `HOME`. |
+| `runtimeDir` | `str` (`/run/*`) | `"/run/xmsg-<name>"` | `RuntimeDirectory` (`0700`) and `XDG_RUNTIME_DIR`. |
+| `stateDir` | `str` (`/var/lib/*`) | `"/var/lib/xmsg-<name>"` | `StateDirectory` (`0700`); holds `xmsg.db` (`XMSG_DB_PATH`). |
+| `sessionsDirs` | `listOf (path \| str)` | `[ ]` | Directories for `XMSG_SESSIONS_DIR` (colon-joined). |
+| `svcExe` | `attrsOf str` | `{ }` | `--svc-exe NAME=PATH` service admissions. |
+| `sockets.http` | `nullOr str` | `"<runtimeDir>/xmsg/http.sock"` | `XMSG_HTTP_SOCK` pinned HTTP socket path. |
+| `sockets.agent` | `nullOr str` | `"<runtimeDir>/xmsg/agent.sock"` | `XMSG_AGENT_SOCK` pinned agent socket path. |
+| `sockets.register` | `nullOr str` | `"<runtimeDir>/xmsg/register.sock"` | `XMSG_REGISTER_SOCK` pinned registration socket path. |
+| `allowTcpListen` | `bool` | `false` | Permit `--listen` / `XMSG_LISTEN` / `listen`. |
+| `listen` | `nullOr str` | `null` | `XMSG_LISTEN` TCP address; requires `allowTcpListen = true`. |
+| `extraArgs` | `listOf str` | `[ ]` | Extra CLI arguments appended to `xmsg serve`. |
+| `extraEnvironment` | `attrsOf str` | `{ }` | Extra environment variables for `xmsg-<name>.service`. |
+| `federation.enable` | `bool` | `false` | Enable `--fed-listen`, `--fed-cert`, `--fed-key`, `--peers-file`. |
+| `federation.listenAddress` | `str` | `"0.0.0.0"` | Address the federation listener binds. |
+| `federation.port` | `port` | `7788` | Federation listener port. |
+| `federation.cert` | `path \| str` | *(required if enabled)* | `--fed-cert` PEM certificate path. |
+| `federation.key` | `str` (runtime path) | *(required if enabled)* | `--fed-key` PEM private key path (never a store path). |
+| `federation.reloadInterval` | `nullOr uint` | `null` | `--fed-reload-interval-secs` (null uses xmsg default `30`). |
+| `federation.peers` | `attrsOf peer` | `{ }` | `--peers-file` entries (same schema as Home Manager `federation.peers`). |
+| `federation.openFirewall` | `bool` | `false` | Open `federation.port` in `networking.firewall.allowedTCPPorts`. |
 
 ## Fleet observation collector
 

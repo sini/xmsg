@@ -320,6 +320,49 @@ than repaired. For a same-UID init-container example, see
 See [the socket reference](/reference/http-and-sockets/) and
 [upgrade errors](/operations/troubleshooting/#upgrade-path-refusals).
 
+## NixOS system-service instances
+
+For dedicated system-user daemons on NixOS (such as isolated worker or service tiers),
+`nixosModules.xmsg` provides `services.xmsg.instances.<name>`:
+
+```nix
+{ inputs, ... }:
+{
+  imports = [ inputs.xmsg.nixosModules.xmsg ];
+
+  users.groups.xmsg-worker = { };
+  users.users.xmsg-worker = {
+    isSystemUser = true;
+    group = "xmsg-worker";
+  };
+
+  services.xmsg.instances.worker = {
+    user = "xmsg-worker";
+    group = "xmsg-worker";
+  };
+}
+```
+
+Each enabled instance runs `xmsg-<name>.service` (`Type = "notify"`) with:
+
+- **Owner-private runtime & state directories:** `RuntimeDirectory` and `StateDirectory` are
+  configured with mode `0700` owned by `user:group`, with `RuntimeDirectoryPreserve = "yes"` and
+  `XMSG_DB_PATH` inside `stateDir`.
+- **Pinned sockets by default:** `sockets.{http,agent,register}` default to
+  `<runtimeDir>/xmsg/{http,agent,register}.sock` (`XMSG_HTTP_SOCK`, `XMSG_AGENT_SOCK`,
+  `XMSG_REGISTER_SOCK`). Pinning all three endpoints under the instance's private runtime directory
+  keeps clients on deterministic paths and avoids `UnprovenExistingSocket` on fresh installs and
+  service restarts.
+- **No TCP listener by default:** `allowTcpListen` defaults to `false`, and evaluation asserts
+  against `listen`, `--listen` in `extraArgs`, and `XMSG_LISTEN` in `extraEnvironment` unless
+  `allowTcpListen = true` is explicitly set.
+- **System-unit hardening:** Runs with `ProtectSystem = "strict"`, `ProtectHome = true`,
+  `NoNewPrivileges = true`, `ProtectProc = "invisible"`, `ProcSubset = "pid"`, and `UMask = "0077"`
+  so callers sharing the instance UID can still be attested via `/proc/<pid>`.
+
+See [NixOS & Home Manager](/operations/nixos-and-home-manager/#nixos-system-services) for the full
+option reference.
+
 ## Persisted state & SQLite schema version
 
 The SQLite database (`--db-path`) records its schema version in `PRAGMA user_version`. The current
@@ -356,6 +399,7 @@ python3 scripts/client-mutants.py
 nix build .#default --no-link
 nix build .#image --no-link
 nix build -L .#checks.x86_64-linux.image --no-link
+nix build -L .#checks.x86_64-linux.nixos-instances --no-link
 
 # Run full Nix CI suite (module eval, agy/codex hooks, pi/opencode/hermes plugins, shared-client-compat)
 nix flake check ./ci

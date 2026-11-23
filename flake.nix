@@ -110,7 +110,7 @@
       };
 
       nixosModules = rec {
-        xmsg = ./nix/modules/nixos.nix;
+        xmsg = import ./nix/modules/nixos.nix { inherit packages; };
         default = xmsg;
       };
 
@@ -126,6 +126,11 @@
                 python3 ${./nix/check_image.py} ${self.packages.${pkgs.system}.image}
                 touch $out
               '';
+          nixos-instances = import ./nix/test-instances.nix {
+            inherit pkgs;
+            nixosModule = self.nixosModules.xmsg;
+            package = packages.${pkgs.stdenv.hostPlatform.system}.default;
+          };
         }
       );
 
