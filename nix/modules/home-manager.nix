@@ -25,6 +25,37 @@ let
   exe = lib.getExe cfg.package;
   skill = ../../assets/claude/xmsg;
 
+  # `server.sockets.dir`: the daemon's three sockets pinned in one directory, and the same paths
+  # handed to every consumer this module generates.
+  sockDir = srv.sockets.dir;
+  socketsPinned = sockDir != null;
+  pin = {
+    http = "${sockDir}/http.sock";
+    agent = "${sockDir}/agent.sock";
+    register = "${sockDir}/register.sock";
+  };
+  pinEnv = lib.optionalAttrs socketsPinned {
+    XMSG_HTTP_SOCK = pin.http;
+    XMSG_AGENT_SOCK = pin.agent;
+    XMSG_REGISTER_SOCK = pin.register;
+  };
+  # A command-line suffix: `flag path` pairs, shell-quoted.
+  pinArgs = pairs: lib.optionalString socketsPinned (" " + lib.escapeShellArgs pairs);
+  # The pi and opencode plugins take their sockets from XMSG_*_SOCK, which a harness started
+  # outside a login shell lacks; the installed copy sets them first unless already set.
+  pinnedPlugin =
+    name: src:
+    if socketsPinned then
+      pkgs.writeText name (
+        "// programs.xmsg.server.sockets.dir\n"
+        + lib.concatStrings (
+          lib.mapAttrsToList (k: v: "process.env.${k} ??= ${builtins.toJSON v};\n") pinEnv
+        )
+        + builtins.readFile src
+      )
+    else
+      src;
+
   # The hermes plugin directory (plugin.yaml and __init__.py). `extraPlugins` links it as
   # `plugins/nix-managed-<name>`; hermes keys a plugin by its manifest name, `xmsg`.
   hermesPlugin = pkgs.runCommand "xmsg" { } ''
@@ -36,7 +67,15 @@ let
   # The MCP server every MCP harness runs: `xmsg mcp`, a stdio server.
   mcpEntry = {
     command = exe;
-    args = [ "mcp" ];
+    args = [
+      "mcp"
+    ]
+    ++ lib.optionals socketsPinned [
+      "--agent-sock"
+      pin.agent
+      "--http-sock"
+      pin.http
+    ];
   };
 
   codexMcpServer = mcpEntry // {
@@ -45,7 +84,13 @@ let
   };
 
   codexStableBin = "${config.xdg.dataHome}/xmsg/bin/xmsg";
-  codexHookCmd = event: "${lib.escapeShellArg codexStableBin} register codex --hook --event ${event}";
+  codexHookCmd =
+    event:
+    "${lib.escapeShellArg codexStableBin} register codex --hook --event ${event}"
+    + pinArgs [
+      "--sock"
+      pin.agent
+    ];
 
   codexHooks = {
     SessionStart = [
@@ -310,7 +355,12 @@ let
   claudeHook = [
     {
       type = "command";
-      command = "${exe} register claude --hook";
+      command =
+        "${exe} register claude --hook"
+        + pinArgs [
+          "--sock"
+          pin.agent
+        ];
     }
   ];
 
@@ -520,6 +570,14 @@ let
       "--http-sock"
       srv.httpSocket
     ]
+    ++ lib.optionals socketsPinned [
+      "--http-sock"
+      pin.http
+      "--agent-sock"
+      pin.agent
+      "--register-sock"
+      pin.register
+    ]
     ++ lib.optionals cfg.activity.enable [ "--activity" ]
     ++ lib.optionals (cfg.activity.enable && cfg.activity.correlated) [ "--activity-correlated" ]
     ++ lib.concatMap (p: [
@@ -621,7 +679,24 @@ in
       httpSocket = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "`--http-sock`. Null takes xmsg's default, `$XDG_RUNTIME_DIR/xmsg/http.sock` (on macOS, under the Darwin user temp directory, `getconf DARWIN_USER_TEMP_DIR`).";
+        description = "`--http-sock`. Null takes xmsg's default, `http.sock` in the managed runtime directory `xmsg-<uid>-<12hex>/` (under `$XDG_RUNTIME_DIR`; on macOS, the Darwin user temp directory, `getconf DARWIN_USER_TEMP_DIR`). Conflicts with `sockets.dir`.";
+      };
+      sockets.dir = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "/run/user/1000/xmsg-sockets";
+        description = ''
+          An absolute, owner-private directory that holds the daemon's `http.sock`, `agent.sock`
+          and `register.sock`. Null keeps xmsg's managed directory, `xmsg-<uid>-<12hex>/`, derived
+          from the state root. Set it only where a consumer needs the socket paths when its unit
+          is generated, such as a sandboxed service that bind-mounts the directory.
+
+          The module passes the three paths to `xmsg serve`, to every MCP entry and hook it
+          renders (as socket flags), to `execServices` (as `XMSG_*_SOCK`), to the pi, opencode and
+          hermes plugins, and to login shells through `home.sessionVariables`. A shell client
+          therefore reaches this daemon even with `--db-path` or `XMSG_DB_PATH` naming another
+          state root, unless it passes its own socket flags.
+        '';
       };
       agyExe = mkOption {
         type = types.listOf types.str;
@@ -844,6 +919,9 @@ in
   config = mkIf cfg.enable (mkMerge [
     {
       home.packages = [ cfg.package ];
+      # Login shells only: no user-manager process needs the pins ambiently (serve and the MCP
+      # entries and hooks take flags, execServices their own environment).
+      home.sessionVariables = pinEnv;
 
       warnings =
         lib.optional (srv.enable && pkgs.stdenv.hostPlatform.isLinux && !config.systemd.user.startServices)
@@ -863,6 +941,28 @@ in
             message = "programs.xmsg.server.stableExecutable: ${srv.stableExecutable} is in the Nix store; it must be a mutable path.";
           }
         ]
+        ++ lib.optionals socketsPinned (
+          let
+            registerSock = pin.register;
+            # sun_path less its terminating NUL (xmsg's validate_socket_path).
+            budget = if pkgs.stdenv.hostPlatform.isDarwin then 103 else 107;
+            bytes = lib.stringLength registerSock;
+          in
+          [
+            {
+              assertion = lib.hasPrefix "/" sockDir;
+              message = "programs.xmsg.server.sockets.dir: ${sockDir} is not an absolute path.";
+            }
+            {
+              assertion = bytes <= budget;
+              message = "programs.xmsg.server.sockets.dir: ${registerSock} is ${toString bytes} bytes; a socket path on this platform holds at most ${toString budget}.";
+            }
+            {
+              assertion = srv.httpSocket == null;
+              message = "programs.xmsg.server.sockets.dir pins http.sock; unset programs.xmsg.server.httpSocket.";
+            }
+          ]
+        )
         ++ lib.optional cfg.harnesses.claude.enable (
           requireHarness "claude" "programs.claude-code.enable" config.programs.claude-code.enable
         )
@@ -998,8 +1098,8 @@ in
           NoNewPrivileges = true;
           UMask = "0077";
         }
-        // lib.optionalAttrs (s.environment != { }) {
-          Environment = lib.mapAttrsToList (k: v: "${k}=${v}") s.environment;
+        // lib.optionalAttrs (pinEnv // s.environment != { }) {
+          Environment = lib.mapAttrsToList (k: v: "${k}=${v}") (pinEnv // s.environment);
         }
         // s.extraServiceConfig;
         Install.WantedBy = [ "default.target" ];
@@ -1019,7 +1119,9 @@ in
           # 0077, the Linux unit's UMask.
           Umask = 63;
         }
-        // lib.optionalAttrs (s.environment != { }) { EnvironmentVariables = s.environment; };
+        // lib.optionalAttrs (pinEnv // s.environment != { }) {
+          EnvironmentVariables = pinEnv // s.environment;
+        };
       }) execServices;
     })
 
@@ -1171,7 +1273,12 @@ in
               actHook = [
                 {
                   type = "command";
-                  command = "${cfg.package}/bin/xmsg activity hook claude${lib.optionalString cfg.activity.correlated " --correlated"}";
+                  command =
+                    "${cfg.package}/bin/xmsg activity hook claude${lib.optionalString cfg.activity.correlated " --correlated"}"
+                    + pinArgs [
+                      "--sock"
+                      pin.agent
+                    ];
                   timeout = 1;
                 }
               ];
@@ -1218,6 +1325,14 @@ in
       # from the hook's stdin JSON. programs.antigravity-cli has no hook option, so this
       # module owns the whole file.
       home.file.".gemini/config/hooks.json".source = pkgs.writeText "hooks.json" (
+        let
+          agyPinArgs = pinArgs [
+            "--sock"
+            pin.register
+            "--agent-sock"
+            pin.agent
+          ];
+        in
         builtins.toJSON {
           xmsg-register = {
             PreInvocation = [
@@ -1225,6 +1340,7 @@ in
                 type = "command";
                 command =
                   "${exe} register agy --hook --event pre-invocation"
+                  + agyPinArgs
                   + lib.optionalString (
                     cfg.harnesses.agy.label != "agy"
                   ) " --label ${lib.escapeShellArg cfg.harnesses.agy.label}";
@@ -1236,7 +1352,7 @@ in
                 hooks = [
                   {
                     type = "command";
-                    command = "${exe} register agy --hook --event pre-tool-use";
+                    command = "${exe} register agy --hook --event pre-tool-use" + agyPinArgs;
                     timeout = 5;
                   }
                 ];
@@ -1245,7 +1361,7 @@ in
             Stop = [
               {
                 type = "command";
-                command = "${exe} register agy --hook --event stop";
+                command = "${exe} register agy --hook --event stop" + agyPinArgs;
                 timeout = 5;
               }
             ];
@@ -1256,7 +1372,8 @@ in
 
     # pi auto-discovers extensions under ~/.pi/agent/extensions.
     (mkIf cfg.harnesses.pi.enable {
-      home.file.".pi/agent/extensions/xmsg-pi.ts".source = ../../extensions/pi/index.ts;
+      home.file.".pi/agent/extensions/xmsg-pi.ts".source =
+        pinnedPlugin "xmsg-pi.ts" ../../extensions/pi/index.ts;
       home.file.".pi/agent/skills/xmsg/SKILL.md".source = skill + "/SKILL.md";
     })
 
@@ -1264,7 +1381,8 @@ in
     # `programs.opencode`: that module applies only when enabled and has no plugin option, so
     # these compose with any opencode configuration and need no harness module (harness C9).
     (mkIf cfg.harnesses.opencode.enable {
-      xdg.configFile."opencode/plugin/xmsg.ts".source = ../../extensions/opencode/xmsg.ts;
+      xdg.configFile."opencode/plugin/xmsg.ts".source =
+        pinnedPlugin "xmsg.ts" ../../extensions/opencode/xmsg.ts;
       xdg.configFile."opencode/skills/xmsg/SKILL.md".source = skill + "/SKILL.md";
       home.activation.xmsgCleanupLegacyOpencodeSkill = lib.hm.dag.entryBefore [
         "linkGeneration"
@@ -1278,6 +1396,8 @@ in
       mkIf cfg.harnesses.hermes.enable {
         services.hermes-agent = {
           extraPlugins = [ hermesPlugin ];
+          # hermes loads these from $HERMES_HOME/.env at each start, gateway service included.
+          environment = pinEnv;
           settings = mkMerge [
             # Without it the TUI and desktop host refuses every injection (hermes_cli/plugins_injection.py).
             { plugins.entries.xmsg.allow_gateway_injection = true; }
