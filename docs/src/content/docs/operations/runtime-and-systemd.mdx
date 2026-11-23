@@ -229,6 +229,11 @@ legacy-component conflict.
    is unchanged (the usual Linux default), leave it in place. Preserve ownership and private
    permissions; the destination must not already contain another install.
    Do not merge two databases. Keep enrollment state, keys and peer policy.
+   Keep the standalone Claude adapter's account-wide
+   `~/.local/state/xmsg/claude-coordinator` at that fixed location: it does not
+   follow the daemon state root. If present inside the old tree, retain that
+   directory there while moving the remaining daemon state. See
+   [adapter ownership](/reference/claude-install/).
 3. Review path references in the moved configuration. Enrollment-generated
    `peers.json` can contain an absolute `hub-ca.pem` path: update it and any
    service `--enroll-state`, `--peers-file` or certificate paths that moved.
