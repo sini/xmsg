@@ -180,6 +180,7 @@ fn directory() -> tempfile::TempDir {
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     directory
 }
+#[cfg(target_os = "linux")]
 fn roundtrip(role: &str) -> Reply {
     roundtrip_with_peer(role).0
 }
@@ -272,6 +273,7 @@ fn roundtrip_with_peer(role: &str) -> (Reply, u32) {
     drop(daemon);
     (reply, original_pid)
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn default_unqualified_receiver_never_returns_principal() {
     assert!(matches!(
@@ -309,6 +311,7 @@ fn real_daemon_fixture_resolves_original_registered_process() {
         other => panic!("real daemon failed original attribution: {other:?}"),
     }
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn changed_ongoing_eligibility_never_publishes_principal() {
     assert!(
@@ -322,6 +325,7 @@ fn changed_ongoing_eligibility_never_publishes_principal() {
         "changed eligibility published principal"
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn expired_eligibility_never_publishes_principal() {
     assert!(
@@ -335,6 +339,7 @@ fn expired_eligibility_never_publishes_principal() {
         "expired eligibility published principal"
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn incomplete_reaper_domain_never_publishes_principal() {
     assert!(
@@ -348,6 +353,7 @@ fn incomplete_reaper_domain_never_publishes_principal() {
         "incomplete reaper domain published principal"
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn incomplete_match_domain_never_publishes_principal() {
     assert!(
@@ -361,6 +367,7 @@ fn incomplete_match_domain_never_publishes_principal() {
         "incomplete matched domain published principal"
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn original_from_another_owner_endpoint_never_publishes_principal() {
     assert!(
@@ -375,6 +382,7 @@ fn original_from_another_owner_endpoint_never_publishes_principal() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn stalled_clients_have_fixed_workers_and_bounded_shutdown() {
     let directory = directory();
