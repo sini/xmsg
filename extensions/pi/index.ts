@@ -311,9 +311,9 @@ export class XmsgPiBridge {
         } catch (_err) {
           // connection closed or failed
         }
+        // Re-resolve after a disconnect, so a restarted daemon is found through the backoff.
+        this.endpoints.invalidate();
       }
-      // Re-resolve after a disconnect, so a restarted daemon is found through the backoff.
-      this.endpoints.invalidate();
 
       if (this.running) {
         await new Promise((r) => setTimeout(r, this.reconnectDelayMs));
