@@ -111,6 +111,8 @@ files as the hand-written plist in [macOS](/getting-started/macos/). Activation 
 
 ## Services run by `xmsg service exec`
 
+<Status id="xmsg.exec-services" />
+
 `programs.xmsg.server.execServices.<name>` serves a command on the bus under `<name>`, through
 [`xmsg service exec`](/reference/cli-and-mcp/#xmsg-service-exec). Each entry adds
 `svcExe.<name>` (xmsg's own executable, since `xmsg service exec` is the registering process) and
@@ -123,11 +125,14 @@ a user service running `xmsg service exec --name <name> -- <command> <args...>`:
 programs.xmsg.server.execServices.my-report = {
   command = lib.getExe pkgs.my-report;
   args = [ "--json" ];
+  # description = "Weekly report";   # unit Description; default "<name> over xmsg (xmsg service exec)"
   # environment.KEY = "value";       # Environment / EnvironmentVariables
   # restartSec = 10;                 # RestartSec (Linux), ThrottleInterval (macOS)
   # extraServiceConfig = { ... };    # Linux only: merged over the unit's Service section
 };
 ```
+
+Typical use: serve a read-only helper such as [`agent-quota`](/extensions/agent-quota/) on the bus declaratively, so every node you enable it on registers `<name>@<node>` after activation without a hand-written unit.
 
 Set `enable = false` on an entry to drop its service and its `svcExe` name. On macOS, extra
 launchd keys go in `launchd.agents.<name>.config` directly.

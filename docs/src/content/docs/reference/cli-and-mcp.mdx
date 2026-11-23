@@ -10,7 +10,7 @@ import Status from '../../../components/Status.astro';
 The `xmsg` binary exposes `list`, `locate`, `watch`, `doctor`, `install`, `uninstall` (<Status id="xmsg.claude-install" />), `send`, `replies`, `show`, `service`, `serve`, `mcp`,
 `register`, `unregister`, `check-peers`, `enroll` (<Status id="xmsg.enroll-ca" />), `enroll-ca`, `harness` (<Status id="xmsg.harness-descriptors" />), and `observe-collector` (<Status id="fleet-observer.collector" />).
 
-```rust file=<rootDir>/src/main.rs#L53-L112
+```rust file=<rootDir>/src/main.rs#L53-L123
 ```
 
 ### Operator commands
@@ -143,7 +143,7 @@ read-only check.
 
 Doctor displays the client and daemon crate versions and build revisions.
 The daemon metadata comes from the bounded Unix-socket health response, not a process
-or image-name guess. Nix builds embed the source revision; a plain Cargo build without
+or image-name guess. Nix builds and macOS Homebrew staging builds (which embed it in the Mach-O `__DATA,__xmsg_rev` section) embed the source revision; a plain Cargo build without
 `XMSG_BUILD_REVISION` reports `unknown`. Missing metadata from an older daemon or an
 unknown client or daemon revision produces a warning. Different known client and daemon revisions also
 warn, rather than fail: check the intended deployment pin before deciding whether to
@@ -214,7 +214,7 @@ loaded configuration, without another network probe or full URI witnesses in the
 On a leaf, doctor also reports a WARN <Status id="xmsg.leaf-stalled-ack" /> for any hub whose current inbox head
 has waited at least 60 seconds for a service ACK. JSON includes
 `stalled_leaf_ack_seconds`, a map from hub names to ages in whole seconds, only
-when a head is stalled. The age measures the running leaf worker's current wait.
+when a head is stalled. The age measures the running leaf worker's current wait. The check id is `federation.stalled_leaf_ack.<hub>`.
 
 The invocation probes at most 32 configured peers in sorted order, with at most four
 concurrent attempts, two seconds per peer and an eight-second total deadline. Doctor's
@@ -396,7 +396,7 @@ Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/an
 `xmsg register claude --hook --db-path PATH` also accepts `XMSG_DB_PATH` and uses
 the shared endpoint resolver. An explicit `--sock` / `XMSG_AGENT_SOCK` remains the
 agent endpoint override. The standalone [Claude adapter](/reference/claude-install/)
-pins these commands to the selected installation without invoking Claude.
+pins these commands to the selected installation without invoking Claude. If the endpoint cannot be resolved from the selected database path, it prints `xmsg register claude error: endpoint_resolution` and exits with status 2.
 
 ```rust file=<rootDir>/src/main.rs#L189-L247
 ```

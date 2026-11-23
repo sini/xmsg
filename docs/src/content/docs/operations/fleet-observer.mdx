@@ -299,6 +299,8 @@ Command:
 xmsg observe-collector --config collector.json --state-dir ./observer-state --listen 127.0.0.1:9428
 ```
 
+The public certificates `client_cert` and `web_tls.cert` may be Nix store paths when set through the Nix module; inline certificate material is refused with `must be a file path, never inline certificate material`. Private keys must be runtime paths.
+
 The default listen address is `127.0.0.1:9428`. Non-loopback listeners require
 `web_tls: { "cert": "server.pem", "key": "server.key" }`; loopback may use it too.
 The state directory must be owned by the running UID and mode 0700, with a regular

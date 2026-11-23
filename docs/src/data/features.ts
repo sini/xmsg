@@ -196,8 +196,18 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		id: 'xmsg.leaf-stalled-ack',
 		title: 'Leaf inbox stalled service ACK diagnostics',
 		owner: 'sini',
-		evidence: [],
+		evidence: [
+			{ path: 'src/svc.rs', anchor: 'async fn wait_for_leaf_service_ack' },
+			{ path: 'src/doctor.rs', anchor: 'fn add_stalled_leaf_ack_checks' },
+		],
 		plannedSince: '2026-11-22',
+	},
+	'xmsg.exec-services': {
+		id: 'xmsg.exec-services',
+		title: 'Declarative service exec services in the Nix module',
+		owner: 'sini',
+		evidence: [{ path: 'nix/modules/home-manager.nix', anchor: 'execServices = mkOption' }],
+		plannedSince: '2026-11-23',
 	},
 	'xmsg.recipient-snapshot': {
 		id: 'xmsg.recipient-snapshot',

@@ -22,6 +22,7 @@ xmsg install claude --apply
 
 Preview is the default. It creates no directories, lock files, backups or metadata.
 `--dry-run` follows the same read-only path and cannot be combined with `--apply`.
+Plain-text output starts with `claude: <status>`; a refusal prints `claude: refused <reason>`. A refusal or conflict exits with status 2. A command-line parse error under `install` or `uninstall` prints `claude: refused invalid_arguments` and exits 2, as plain text even with `--json`.
 Plans, diffs and refusals contain managed field names and operation names, not paths,
 configuration values or neighboring entries.
 
@@ -29,7 +30,7 @@ configuration values or neighboring entries.
 | --- | --- |
 | `--apply` | Explicitly write the planned changes or perform pending recovery. |
 | `--dry-run` | Preview only. |
-| `--json` | Print an allowlisted JSON plan or result. Parsed-command refusals also use JSON. |
+| `--json` | Print an allowlisted JSON plan or result. Refusals of a parsed command also use JSON (`{"status":"refused","reason":...}`). |
 | `--db-path` / `XMSG_DB_PATH` | Select the same state root as the daemon. |
 | `--agent-sock`, `--http-sock`, `--register-sock` | Preserve corresponding explicit endpoint pins and their documented `XMSG_*` settings. |
 | `--enroll-state`, `--peers-file` | Preserve compatible selections while checking the shared installation contract. |

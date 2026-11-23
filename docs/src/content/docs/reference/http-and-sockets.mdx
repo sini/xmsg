@@ -207,6 +207,8 @@ A successful handshake proves mTLS reachability, not application permissions or 
 readiness. Certificate metadata is limited to subject, issuer and `notAfter`; no DER,
 SANs, pins or keys are returned.
 
+The response is a JSON report with `available`, `ambiguous_aliases`, `own_leaf`, `own_expiry`, `peers`, `partial`, `truncated` and `budget_exhausted`. On a leaf it also carries `stalled_leaf_ack_seconds`, a map from hub name to whole seconds that the hub's current inbox head has waited for a service ACK. The field is omitted when no head is stalled, and lists at most 32 hubs. Doctor turns each entry into a `federation.stalled_leaf_ack.<hub>` warning.
+
 These probes run only when invoked. They add no federation route, protocol or peer right
 and do not list recipients, read observation data or reconcile registrations. Normal
 connection counters or admission caches may update during a handshake, but diagnostics
