@@ -74,6 +74,10 @@ In Home Manager, set `programs.xmsg.harnesses.opencode.enable = true`. This inst
 `$XDG_CONFIG_HOME/opencode/plugin/xmsg.ts` and `opencode/skills/xmsg/SKILL.md`. See
 [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).
 
+With [`programs.xmsg.server.sockets.dir`](/operations/nixos-and-home-manager/#a-stable-socket-directory)
+set, the installed plugin begins by setting `XMSG_REGISTER_SOCK`, `XMSG_AGENT_SOCK` and
+`XMSG_HTTP_SOCK` to the directory's sockets, unless opencode's environment already sets them.
+
 ## Session locator
 
 The [session locator](/reference/cli-and-mcp/#locating-a-session) captures the

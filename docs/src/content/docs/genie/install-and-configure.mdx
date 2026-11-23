@@ -57,7 +57,7 @@ in
 
   services.genie-agent = {
     enable = true;
-    xmsgSocket = "/run/user/1000/xmsg";   # the xmsg runtime directory of `user`
+    xmsgSocket = "/run/user/1000/xmsg-sockets";   # the user's programs.xmsg.server.sockets.dir
     user = "alice";                       # must own that xmsg socket
 
     model = {
@@ -75,6 +75,14 @@ in
   };
 }
 ```
+
+`xmsgSocket` is a directory known when the units are generated, so it is the user's pinned socket
+directory: set it to the same value as that user's
+[`programs.xmsg.server.sockets.dir`](/operations/nixos-and-home-manager/#a-stable-socket-directory),
+and the module derives `XMSG_*_SOCK` from it. Planned: the module creates that directory as the user
+before its units start, starts them with the user's runtime directory (and stops them with it), and
+has them wait, bounded, for `agent.sock`. Without linger, that runtime directory exists only while
+the user is logged in; with linger (`loginctl enable-linger`), it is created at boot.
 
 `genie-agent.service` runs root. With the default `guard.enable = true`, the module also runs
 `genie-guard.service` against `guard.ninferUrl` (by default the same endpoint as `model.baseUrl`).

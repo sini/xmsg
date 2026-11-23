@@ -143,6 +143,13 @@ client re-pins together):
   the effective UID with `mode & 0o777 == 0o700` (an inherited setgid bit such as `02700` is
   allowed). Missing explicit final directories are created one level deep with exclusive `mkdir` at
   `0700`; existing directories are validated without implicit repair.
+- **Pinned socket parents:** A pinned endpoint's parent needs no record in `owner.json`. `serve`
+  accepts an existing parent that is a directory (not a symlink) owned by its UID with permission
+  bits `0700`, or creates a missing one. A pinned client that starts first, such as `xmsg mcp`,
+  creates it the same way, and so may the owner's own setup step; the operator CLI (`xmsg send`,
+  `xmsg list`) only connects and creates nothing. The daemon never removes the directory, and on a
+  restart it publishes its sockets into the same directory, so a bind mount of it survives the
+  restart. A start with every endpoint pinned keeps no `runtime_dir` record.
 - **Legacy component guard:** Before creating new state or opening the database (`serve`,
   `enroll-ca`, `enroll`), xmsg checks both `$XDG_STATE_HOME/xmsg` and `~/.local/state/xmsg` for
   legacy `xmsg.db`, enrollment identity files (`enroll.json`, `fed.crt`, `fed.key`) and
@@ -280,6 +287,32 @@ Tools hard-coding `<runtime>/xmsg/http.sock`, `agent.sock` or `register.sock`
 must use compatible explicit pins or the resolver/discovered endpoint. Moving
 state can change the namespace hash; do not guess or persist its suffix.
 
+### Moving to a pinned socket directory
+
+A deployment that needs the socket paths when a unit is generated (for example a sandboxed service
+that bind-mounts them) pins all three endpoints in one directory. With Home Manager that is
+[`programs.xmsg.server.sockets.dir`](/operations/nixos-and-home-manager/#a-stable-socket-directory).
+Keep the directory apart from the legacy `<runtime>/xmsg/` path.
+
+1. Stop the consumers of the sockets, then stop the old daemon: its `serve.lock` refuses a second
+   daemon on the same state root.
+2. Switch the configuration, start `xmsg`, then start the consumers.
+3. Restart every agent session, so each one runs the new client with the new flags.
+
+**Old shells.** A shell opened before the switch lacks the exported `XMSG_*_SOCK` pins. Its bare CLI
+resolves the state root's managed name, where nothing answers, and it does not fall back. `xmsg
+doctor` reports this as `install.endpoint_pins`: the check fails when the endpoints the daemon
+recorded in `owner.json` differ from the ones the shell resolved and nothing answers at those, and
+its message names each recorded endpoint as the variable to export. Export them, or log in again.
+Doctor only reports; it never routes.
+
+**Rollback.** Restore the previous configuration, then reset the runtime directory: log out of every
+session, or reboot where the user lingers (with linger, `/run/user/<uid>` survives a logout). A
+pinned start clears the managed `runtime_dir` record, so until the reset an earlier binary refuses
+its leftover managed directory with `no durable runtime_dir proof in owner.json`, changing
+nothing. After the reset it creates the directory afresh. A later upgrade needs no reset. Never
+edit `owner.json` or remove runtime files by hand.
+
 ### Containers and pods
 
 An explicit `--db-path` (or `XMSG_DB_PATH`) selects its parent as the state
@@ -319,6 +352,14 @@ than repaired. For a same-UID init-container example, see
 [owned pod subdirectories](/operations/helm-and-kubernetes/#owned-subdirectories-for-custom-pods).
 See [the socket reference](/reference/http-and-sockets/) and
 [upgrade errors](/operations/troubleshooting/#upgrade-path-refusals).
+
+A pod pins its endpoints as above. On a host, a sandboxed system service that bind-mounts a user's
+pinned socket directory must not create that directory as root, because the daemon refuses a parent
+it does not own. Create it as the user (mode `0700`) before the service starts, start the service
+only while the user's runtime directory exists, stop it when that directory goes away, and have the
+service wait, bounded, until `agent.sock` accepts. With systemd, tie the service to
+`user-runtime-dir@<uid>.service` with `WantedBy=`, `Requisite=`, `After=` and `PartOf=`, rather than
+`BindsTo=` or `Requires=`, which would start the runtime directory without the user's daemon.
 
 ## Persisted state & SQLite schema version
 
