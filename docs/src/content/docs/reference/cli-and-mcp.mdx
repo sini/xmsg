@@ -825,6 +825,7 @@ HTTP and federation. It never reads or writes the passed caller stream.
 Qualification is unavailable by default and no runtime tuple is enabled by
 this release. Setting these flags does not enable control, start an executor
 or grant a caller authority. A configured integration still receives an
-unavailable result. For example, use `xmsg serve --help` to inspect the socket
+unavailable result. macOS requires qualification on the exact OS, kernel and
+runtime in use. For example, use `xmsg serve --help` to inspect the socket
 options; a real team pilot remains separate work. See the
 [executor boundary](/reference/executor-contracts/#daemon-caller-attribution-bridge).
