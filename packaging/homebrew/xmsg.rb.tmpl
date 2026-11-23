@@ -1,0 +1,25 @@
+# Generated from packaging/homebrew/xmsg.rb.tmpl for verified staging archive.
+# Source revision: @@SOURCE_SHA@@
+class Xmsg < Formula
+  desc "Fast, lightweight local HTTP bridge into live agent sessions"
+  homepage "https://github.com/sini/xmsg"
+  url "@@ARCHIVE_URL@@"
+  version "@@STAGE_VERSION@@"
+  sha256 "@@ARCHIVE_SHA256@@"
+  license "MIT"
+
+  def install
+    bin.install "bin/xmsg"
+    pkgshare.install "share/xmsg/claude"
+  end
+
+  service do
+    run [opt_bin/"xmsg", "serve"]
+    keep_alive crashed: true
+    process_type :background
+  end
+
+  test do
+    assert_match "xmsg", shell_output("#{bin}/xmsg --help")
+  end
+end

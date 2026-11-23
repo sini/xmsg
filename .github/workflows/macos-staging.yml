@@ -1,0 +1,157 @@
+name: macOS Staging
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'assets/**'
+      - 'packaging/homebrew/**'
+      - '.github/workflows/macos-staging.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**'
+      - 'assets/**'
+      - 'packaging/homebrew/**'
+      - '.github/workflows/macos-staging.yml'
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Optional 40-hex commit SHA required to match the checked-out HEAD and workflow head SHA
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-stage:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify checkout and workflow head SHA equality
+        id: sha
+        env:
+          INPUT_EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          checkout_sha=$(git rev-parse HEAD)
+          echo "checkout_sha=$checkout_sha"
+          echo "event_head_sha=$EVENT_HEAD_SHA"
+          if [ "$checkout_sha" != "$EVENT_HEAD_SHA" ]; then
+            echo "checkout SHA ($checkout_sha) != workflow head SHA ($EVENT_HEAD_SHA)" >&2
+            exit 1
+          fi
+          if [ -n "$INPUT_EXPECTED_SHA" ] && [ "$checkout_sha" != "$INPUT_EXPECTED_SHA" ]; then
+            echo "checkout SHA ($checkout_sha) != inputs.expected_sha ($INPUT_EXPECTED_SHA)" >&2
+            exit 1
+          fi
+          echo "checkout_sha=$checkout_sha" >> "$GITHUB_OUTPUT"
+          echo "workflow_head_sha=$EVENT_HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Record macOS, Homebrew, and CLT environment versions
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          brew --version
+          /usr/bin/python3 --version
+          otool --version | head -n 2
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0 && rustc --version
+
+      - name: Build locked native arm64 release binary with embedded revision
+        env:
+          XMSG_BUILD_REVISION: ${{ steps.sha.outputs.checkout_sha }}
+          CARGO_PROFILE_RELEASE_LTO: "true"
+          CARGO_PROFILE_RELEASE_STRIP: "symbols"
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --bin xmsg
+
+      - name: Package staging archive and manifest
+        env:
+          CHECKOUT_SHA: ${{ steps.sha.outputs.checkout_sha }}
+          WORKFLOW_HEAD_SHA: ${{ steps.sha.outputs.workflow_head_sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+          HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+          WORKFLOW_ID: ${{ github.workflow_ref }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p staging-out
+          chmod 0700 staging-out
+          # Numeric workflow_id is provided by the GitHub run API at verification time; record 0 placeholder
+          # only if unavailable locally (workflow metadata is bound independently via GitHub API on S10).
+          /usr/bin/python3 packaging/homebrew/package_staging.py \
+            --repo-root . \
+            --binary target/release/xmsg \
+            --output-dir staging-out \
+            --expected-sha "$CHECKOUT_SHA" \
+            --workflow-head-sha "$WORKFLOW_HEAD_SHA" \
+            --run-number "$RUN_NUMBER" \
+            --repository "$REPOSITORY" \
+            --repository-id "$REPOSITORY_ID" \
+            --head-repository-id "$HEAD_REPOSITORY_ID" \
+            --workflow-id 0 \
+            --workflow-path ".github/workflows/macos-staging.yml" \
+            --run-id "$RUN_ID" \
+            --run-attempt "$RUN_ATTEMPT" \
+            --artifact-name "xmsg-macos-arm64-staging"
+
+      - name: Upload Actions staging artifact only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: xmsg-macos-arm64-staging
+          path: staging-out/
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 30 }}
+          if-no-files-found: error
+
+  verify-s5-and-s9:
+    needs: [build-and-stage]
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download staged Actions artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: xmsg-macos-arm64-staging
+          path: staged-download
+
+      - name: Extract binary from staged artifact and run S5, S9, and S9d gates with real Homebrew
+        env:
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          checkout_sha=$(git rev-parse HEAD)
+          test "$checkout_sha" = "$EVENT_HEAD_SHA"
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          chmod 0700 "$work"
+          archive=$(find staged-download -maxdepth 1 -name 'xmsg-*-arm64-macos.tar.gz' | head -n 1)
+          test -n "$archive"
+          tar -xzf "$archive" -C "$work"
+          /usr/bin/python3 packaging/homebrew/test_staging.py \
+            --binary "$work/bin/xmsg" \
+            --source-sha "$checkout_sha"
