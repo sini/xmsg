@@ -781,11 +781,11 @@ async fn leaf_with_outbound_hub_receives_reply_to_own_send() {
     );
 }
 
-/// The hub's mailbox is a leaf's one reply path. A leaf whose hub is `dial: outbound` must
-/// not also fetch the reply with a reply poller, whose record of it (removed again when no
-/// service takes the push) would make the mailbox pull take the reply for an acked replay
-/// and drop it. The holds put the pull inside that window: the poller, if one runs, is
-/// held after recording, then the pull is released.
+/// A leaf whose hub is `dial: outbound` gets a reply by two paths: its mailbox pull and an
+/// outbound reply poller. The poller records the reply before it pushes, and removes the
+/// record again when no service takes the push. A pull inside that window must not take
+/// the record for an acked replay and drop the reply. The holds put it there: the poller
+/// is held after recording, then the pull is released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leaf_reply_reaches_service_queue_when_pull_follows_hub_enqueue() {
     let ia = Identity::new("leaf");
@@ -862,16 +862,19 @@ async fn leaf_reply_reaches_service_queue_when_pull_follows_hub_enqueue() {
             == 1
     };
     let queued = || xmsg::storage::has_svc_message(&db, pushed).unwrap();
-    // A reply poller, if the leaf runs one, records the reply and holds there.
-    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+    // The reply poller records the reply and holds there.
+    tokio::time::timeout(WAIT, async {
         while !recorded() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await;
+    .await
+    .expect("the leaf's outbound reply poller must record the reply");
+    assert!(!queued(), "no path may queue the reply while both are held");
     fs::remove_file(&pull_hold).unwrap();
-    // The pull either queues the reply for the service or acks it away at the hub.
-    let _ = tokio::time::timeout(WAIT, async {
+    // A pull that takes the record for a replay acks the reply away at once; one that
+    // defers leaves it in the mailbox.
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
         while !queued() && in_mailbox() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

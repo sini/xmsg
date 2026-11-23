@@ -6222,11 +6222,6 @@ pub fn spawn_outbound_reply_poller(
     peer_name: String,
     message_id: String,
 ) {
-    // A leaf's replies arrive in its hub mailbox (`run_leaf_inbox_task`); a second path
-    // would race the pull, whose replay check drops a reply the poller has recorded.
-    if fed_state.leaf_principal.is_some() {
-        return;
-    }
     tokio::spawn(async move {
         let mut after_seq = 0i64;
         let mut backoff_millis = 100u64;

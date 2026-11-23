@@ -1199,6 +1199,18 @@ pub async fn run_leaf_inbox_task(
                         .map_err(|e| AppError::Internal(e.to_string()))?
                         .is_some()
                     {
+                        // A reply the outbound poller has recorded but not yet pushed is
+                        // still undecided: retry, so it is not taken for an acked replay.
+                        if !existed_before && msg.in_reply_to.is_some() {
+                            let pushed = storage::get_reply_by_pushed_id(&tx, &msg.id)
+                                .map_err(|e| AppError::Internal(e.to_string()))?
+                                .is_some_and(|r| r.push_outcome.as_deref() == Some("pushed"));
+                            if !pushed {
+                                return Err(AppError::ServiceUnavailable(
+                                    "reply is in flight on the outbound reply poller".to_string(),
+                                ));
+                            }
+                        }
                         // A replay can outlive its service row when the hub misses our ACK.
                         let already_acked = !existed_before
                             || storage::is_svc_message_acked(&tx, &msg.id)
