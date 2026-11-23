@@ -6202,11 +6202,31 @@ pub async fn ack_federated_inbox(
         .map_err(|_| AppError::PeerUnreachable("ack request timed out".to_string()))?
 }
 
+/// Test seam: waits while `$XMSG_TEST_HOLD_DIR/<point>` exists, to order concurrent paths.
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) async fn test_hold(point: &str) {
+    if let Some(dir) = std::env::var_os("XMSG_TEST_HOLD_DIR") {
+        let hold = std::path::Path::new(&dir).join(point);
+        while hold.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+#[cfg(not(any(test, feature = "test-hooks")))]
+#[inline(always)]
+pub(crate) async fn test_hold(_point: &str) {}
+
 pub fn spawn_outbound_reply_poller(
     fed_state: Arc<FedState>,
     peer_name: String,
     message_id: String,
 ) {
+    // A leaf's replies arrive in its hub mailbox (`run_leaf_inbox_task`); a second path
+    // would race the pull, whose replay check drops a reply the poller has recorded.
+    if fed_state.leaf_principal.is_some() {
+        return;
+    }
     tokio::spawn(async move {
         let mut after_seq = 0i64;
         let mut backoff_millis = 100u64;
@@ -6289,6 +6309,7 @@ pub fn spawn_outbound_reply_poller(
                                         },
                                     );
                                 }
+                                test_hold("reply-poller-recorded").await;
                                 match deliver_federated_reply_locally(
                                     &fed_state,
                                     &peer_name,

@@ -993,6 +993,7 @@ pub async fn run_leaf_inbox_task(
     let control_worker = crate::fed::spawn_control_worker(fed_state.clone(), peer_name.clone());
 
     loop {
+        crate::fed::test_hold("leaf-pull").await;
         match crate::fed::get_federated_messages(
             &fed_state,
             &peer_name,
