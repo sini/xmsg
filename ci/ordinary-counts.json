@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Measured f31c2119cc76064a102c2a1c9e2c19ca2c807925: run 45091718058, job 137427496545, Nix ordinary; 119 executed integration targets; event checkout tree matches candidate",
-    "darwin": "Measured f31c2119cc76064a102c2a1c9e2c19ca2c807925: run 45091718109, job 137422535817, native cargo-test step; 119 executed integration targets; event checkout tree matches candidate"
+    "linux": "Measured 912350dda593135ad69acd3ee171004cedfea53e: MAIN push run 45217359068, job 137847518029, Nix ordinary; 119 executed integration targets; six doctor regression cases observed",
+    "darwin": "Measured 912350dda593135ad69acd3ee171004cedfea53e: MAIN push run 45217359243, job 137842002391, native cargo-test step; 119 executed integration targets; six doctor regression cases observed"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -126,13 +126,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1787,
+      "passed": 1793,
       "failed": 0,
       "ignored": 12,
       "summaries": 122
     },
     "darwin": {
-      "passed": 1762,
+      "passed": 1768,
       "failed": 0,
       "ignored": 11,
       "summaries": 122
