@@ -564,6 +564,53 @@ thread_local! {
     static NEXT_CONTROL_LEN: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(target_os = "macos")]
+fn darwin_peek(stream: &UnixStream, bytes: &mut [u8], expect_right: bool) -> io::Result<usize> {
+    let mut control = [0usize; 4];
+    let mut vector = libc::iovec {
+        iov_base: bytes.as_mut_ptr().cast(),
+        iov_len: bytes.len(),
+    };
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut vector;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    let capacity = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as _) };
+    message.msg_controllen = capacity;
+    // XNU peeks the head record without externalizing its rights.
+    let count = unsafe {
+        libc::recvmsg(
+            stream.as_raw_fd(),
+            &mut message,
+            libc::MSG_DONTWAIT | libc::MSG_PEEK,
+        )
+    };
+    if count < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let valid = unsafe {
+        let header = libc::CMSG_FIRSTHDR(&message);
+        if expect_right {
+            let length = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as _);
+            count > 0
+                && !header.is_null()
+                && message.msg_controllen == length
+                && (*header).cmsg_len == length
+                && (*header).cmsg_level == libc::SOL_SOCKET
+                && (*header).cmsg_type == libc::SCM_RIGHTS
+        } else {
+            message.msg_controllen == 0
+        }
+    };
+    if !valid || message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "attribution ancillary preflight",
+        ));
+    }
+    Ok(count as usize)
+}
+
 fn receive(
     stream: &UnixStream,
     marker: u8,
@@ -578,16 +625,30 @@ fn receive(
         let mut bytes = [0u8; MAX_BODY + 6];
         let result = receive_gate(deadline, || {
             let mut control = [0usize; 4];
+            #[cfg(target_os = "macos")]
+            let length = {
+                let length = darwin_peek(stream, &mut bytes, expect_fd && data.is_empty())?;
+                if length == 0 {
+                    return Ok((0, Vec::new(), false));
+                }
+                length
+            };
+            #[cfg(not(target_os = "macos"))]
+            let length = bytes.len();
             let mut vector = libc::iovec {
                 iov_base: bytes.as_mut_ptr().cast(),
-                iov_len: bytes.len(),
+                iov_len: length,
             };
             let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
             message.msg_iov = &mut vector;
             message.msg_iovlen = 1;
             message.msg_control = control.as_mut_ptr().cast();
+            #[cfg(target_os = "macos")]
+            let control_fds = 1;
+            #[cfg(not(target_os = "macos"))]
+            let control_fds = 2;
             message.msg_controllen =
-                unsafe { libc::CMSG_SPACE((2 * std::mem::size_of::<RawFd>()) as _) } as _;
+                unsafe { libc::CMSG_SPACE((control_fds * std::mem::size_of::<RawFd>()) as _) } as _;
             #[cfg(all(test, target_os = "linux"))]
             if let Some(length) = NEXT_CONTROL_LEN.get() {
                 message.msg_controllen = length;
@@ -655,8 +716,16 @@ fn receive(
             {
                 continue
             }
+            #[cfg(target_os = "macos")]
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                return Err(FailureReason::Ancillary)
+            }
             Err(error) => return Err(failure(error)),
         };
+        #[cfg(target_os = "macos")]
+        if count > 0 && received.len() != usize::from(expect_fd && data.is_empty()) {
+            return Err(FailureReason::Ancillary);
+        }
         if malformed || (!data.is_empty() && !received.is_empty()) {
             return Err(FailureReason::Ancillary);
         }
