@@ -310,6 +310,35 @@ jobs:
 
           controls = [
               (
+                  "src/client/caller_attribution.rs",
+                  "if !valid || flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {",
+                  "if !valid {",
+                  "client::caller_attribution::tests::darwin_peek_decision_checks_each_ancillary_field_independently",
+                  "Darwin peek verdict: control truncation",
+              ),
+              (
+                  "src/client/caller_attribution.rs",
+                  "header.len == length\n                    && header.level",
+                  "header.level",
+                  "client::caller_attribution::tests::darwin_peek_decision_checks_each_ancillary_field_independently",
+                  "Darwin peek verdict: wrong header length",
+              ),
+              (
+                  "src/client/caller_attribution.rs",
+                  "let control_fds = 1;",
+                  "let control_fds = 2;",
+                  "client::caller_attribution::tests::darwin_consume_uses_exactly_one_fd_control_capacity",
+                  "Darwin consuming control capacity must fit exactly one FD",
+              ),
+              (
+                  "src/client/caller_attribution.rs",
+                  "if count > 0 && received != usize::from(expect_right) {",
+                  "if false && count > 0 && received != usize::from(expect_right) {",
+                  "client::caller_attribution::tests::darwin_consume_decision_checks_owned_descriptor_count",
+                  "Darwin consume count: bytes=1 descriptors=0 expected=true",
+              ),
+
+              (
                   "src/caller_attribution.rs",
                   '    #[cfg(target_os = "macos")]\n    eligibility(provider, &key)?;\n',
                   '    #[cfg(target_os = "macos")]\n    return Err(FailureReason::Unsupported);\n',
