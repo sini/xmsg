@@ -237,10 +237,13 @@ a principal matched by the resolver. This includes trusted Codex owners,
 observed Antigravity entries, and foreign same-UID PID-namespace reapers. That
 exclusion must remain true throughout enablement, not only during one test.
 
-**macOS: unavailable (follow-up).** The daemon refuses before receiving
-descriptors on this path. Darwin can install descriptor rights before
-truncating the ancillary data returned to user space. Until the receive
-budget and cleanup can be proved, the bridge leaves Darwin unavailable.
+**macOS qualification** <Status id="teams.attribution-bridge" />
+
+The Darwin receiver checks ancillary framing with a bounded peek before
+consuming query or reply bytes. The daemon's delivery spawn allows only
+explicitly mapped descriptors at exec. Production attribution stays
+unavailable until the exact OS, kernel and runtime tuple qualifies. A passing
+CI fixture does not qualify an operator's Mac.
 
 A shared Codex owner can select among roots it actually holds, with a matching
 configured grant. Sibling roots under that owner are not isolated from one

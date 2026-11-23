@@ -161,6 +161,11 @@ planned, the presence lock's holder through the open file's lock flag and a `kqu
 watch, which also runs the command watcher on macOS. For [Codex](/harnesses/codex/), writer-lock
 watching uses `kqueue` and descriptor paths from `fcntl(F_GETPATH)`.
 
+Executor caller attribution on macOS requires native qualification of the
+specific OS, kernel and runtime. It remains unavailable for production on
+unqualified Macs, while ordinary messaging works. See the
+[executor attribution reference](/reference/executor-contracts/#daemon-caller-attribution-bridge).
+
 The macOS CI job builds the package (including Rust tests), shared service client checks, the
 real Codex hook check and compatibility checks. Pi, opencode, Hermes and Antigravity real-harness
 checks run on Linux; macOS has daemon-side Rust tests for those integrations.
