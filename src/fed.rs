@@ -1712,6 +1712,22 @@ impl PeersMap {
         Ok(map)
     }
 
+    /// Applies the node's durable pairing authority (legacy import and device blocks) to this
+    /// policy generation. A store that cannot be read refuses the generation.
+    pub fn apply_pairing_authority(
+        &mut self,
+        conn: &rusqlite::Connection,
+        own_cert_der: &[u8],
+    ) -> Result<(), String> {
+        crate::pairing::store::apply_to_policy(
+            conn,
+            own_cert_der,
+            self,
+            crate::storage::now_epoch_secs(),
+        )
+        .map_err(|e| e.to_string())
+    }
+
     pub fn load_from_file(path: &Path) -> Result<Self, String> {
         Self::load_from_file_for(path, None)
     }
@@ -7702,6 +7718,23 @@ impl CredentialReloader {
                     // Preserve admitted_clients Arc across reload swap!
                     let current_pm = self.peers.lock().unwrap().clone();
                     pm.admitted_clients = current_pm.admitted_clients.clone();
+                    if let Some(fs) = &self.fed_state {
+                        let applied = {
+                            let conn = fs.db.lock().unwrap_or_else(|e| e.into_inner());
+                            pm.apply_pairing_authority(&conn, &fs.cert_der)
+                        };
+                        if let Err(e) = applied {
+                            if initialized {
+                                crate::systemd::notify_reload_failed(
+                                    "pairing authority unreadable",
+                                );
+                            }
+                            tracing::error!(
+                                "pairing authority unreadable during reload; keeping previous configuration: {e}"
+                            );
+                            return Err(AppError::Internal(format!("pairing authority: {e}")));
+                        }
+                    }
                     pm
                 }
                 Err(e) => {

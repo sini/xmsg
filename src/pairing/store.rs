@@ -637,6 +637,31 @@ pub fn import_legacy(
     Ok(created)
 }
 
+/// Applies the durable authority to a freshly loaded policy generation: records its pins as
+/// legacy grants, then adds every durable device block to its `deny.spkis`, so each existing
+/// deny check (TLS verifiers, leaf authority rechecks, discovery publication) enforces it.
+pub fn apply_to_policy(
+    conn: &Connection,
+    own_cert_der: &[u8],
+    peers: &mut PeersMap,
+    now: i64,
+) -> Result<(), StoreError> {
+    let issuer = crate::fed::spki_sha256_from_der(own_cert_der)
+        .ok()
+        .as_deref()
+        .and_then(device_id_from_pin)
+        .ok_or(StoreError::Invalid("own certificate SPKI"))?;
+    import_legacy(conn, &issuer, peers, now)?;
+    let mut blocked: Vec<String> = blocked_devices(conn)?.iter().map(hex::encode).collect();
+    blocked.sort();
+    for pin in blocked {
+        if !peers.deny.spkis.contains(&pin) {
+            peers.deny.spkis.push(pin);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;

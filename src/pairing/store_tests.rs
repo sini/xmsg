@@ -531,3 +531,46 @@ fn independent_grants_survive_removing_one() {
     assert_eq!(left.len(), 1, "removing one grant erased another");
     assert_eq!(left[0].provenance(), PROVENANCE_LEGACY);
 }
+
+#[test]
+fn durable_block_reaches_every_deny_check_of_the_next_policy_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = file_db(&dir);
+    let (own_cert, _, _) = crate::fed::generate_self_signed_ed25519("own").unwrap();
+    let (peer_cert, _, peer_pin) = crate::fed::generate_self_signed_ed25519("peer").unwrap();
+    let peer_id = device_id_from_pin(&peer_pin).unwrap();
+    let load = || {
+        let mut map = legacy_config(&peer_id, &["send"]);
+        map.apply_pairing_authority(&conn, &own_cert).unwrap();
+        map
+    };
+    let leaf = crate::fed::LeafAuthority::from_certificate(
+        &rustls::pki_types::CertificateDer::from(peer_cert.clone()),
+        crate::fed::AdmissionMode::Pin,
+    )
+    .unwrap();
+    let open = load();
+    assert!(leaf.check(&open).is_ok());
+    let own = device_id_from_pin(&crate::fed::spki_sha256_from_der(&own_cert).unwrap()).unwrap();
+    assert_eq!(
+        grants_for(&conn, &own, &peer_id).unwrap().len(),
+        1,
+        "the policy load did not import the pin"
+    );
+
+    block_device(&conn, &peer_id, NOW).unwrap();
+    let blocked = load();
+    assert!(
+        leaf.check(&blocked).is_err(),
+        "a durable block did not reach the leaf authority check"
+    );
+    assert!(blocked
+        .check_certificate_deny(&rustls::pki_types::CertificateDer::from(peer_cert))
+        .is_err());
+    assert_eq!(
+        grants_for(&conn, &own, &peer_id).unwrap().len(),
+        1,
+        "a reload imported the pin twice"
+    );
+    assert!(open.deny.spkis.is_empty(), "an older generation changed");
+}

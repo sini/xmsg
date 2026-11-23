@@ -2018,8 +2018,11 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         .map(|(_, address)| address.to_string());
     let discovery_listen = fed_listener.as_ref().map(|(_, address)| *address);
     let fed_state = if let Some(peers_file) = args.peers_file {
-        let peers = xmsg::fed::PeersMap::load_from_file_for(&peers_file, own.as_ref())
+        let mut peers = xmsg::fed::PeersMap::load_from_file_for(&peers_file, own.as_ref())
             .map_err(|e| format!("failed to load peers file: {e}"))?;
+        peers
+            .apply_pairing_authority(&db.lock().unwrap_or_else(|e| e.into_inner()), &cert_der)
+            .map_err(|e| format!("failed to apply pairing authority: {e}"))?;
         let peers_arc = Arc::new(peers);
 
         if !args.leaf {
