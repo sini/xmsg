@@ -43,11 +43,9 @@ def _own_environment():
     return {"kind": "none"}
 
 
-def _register_sock():
-    """register.sock, resolved as the xmsg binary does: $XDG_RUNTIME_DIR, else on macOS the
-    Darwin user temp dir."""
-    if os.environ.get("XMSG_REGISTER_SOCK"):
-        return os.environ["XMSG_REGISTER_SOCK"]
+def _legacy_runtime_dir():
+    """The legacy runtime dir holding xmsg/, as the xmsg binary resolves it: $XDG_RUNTIME_DIR,
+    else on macOS the Darwin user temp dir."""
     d = os.environ.get("XDG_RUNTIME_DIR", "").strip()
     if not d and sys.platform == "darwin":
         try:
@@ -55,7 +53,93 @@ def _register_sock():
                                check=True).stdout.strip()
         except (OSError, subprocess.CalledProcessError):
             d = ""
-    return os.path.join(d, "xmsg", "register.sock") if d else None
+    return d or None
+
+
+class EndpointError(Exception):
+    pass
+
+
+_ENDPOINT_ENV = {"register": "XMSG_REGISTER_SOCK", "agent": "XMSG_AGENT_SOCK"}
+# Only the exact clap parse error of a CLI that predates `doctor` falls through to the legacy path.
+_UNSUPPORTED_DOCTOR = ("error: unrecognized subcommand 'doctor'\n\nUsage: xmsg <COMMAND>\n\n"
+                       "For more information, try '--help'.\n")
+_DOCTOR_TIMEOUT = 3
+_DOCTOR_MAX_OUTPUT = 64 * 1024
+
+
+class Endpoints:
+    """The daemon's sockets: XMSG_*_SOCK, else what `xmsg doctor --json` resolves (run once and
+    cached until `invalidate()`, which the connection calls after a disconnect), else the legacy
+    <runtime dir>/xmsg/ when no CLI with doctor is installed. A doctor that answers with unusable
+    endpoints, malformed output or a timeout is refused, never rerouted."""
+
+    def __init__(self, run=subprocess.run):
+        self._run = run
+        self._lock = threading.Lock()
+        self._found = None  # the discovered paths, a fallback reason, or the refusal
+        self._logged_fallback = False
+
+    def _discover(self):
+        try:
+            r = self._run(["xmsg", "doctor", "--json"], capture_output=True, text=True, timeout=_DOCTOR_TIMEOUT)
+        except FileNotFoundError:
+            return "xmsg CLI not found"
+        except subprocess.TimeoutExpired:
+            return EndpointError("xmsg doctor exceeded its time bound")
+        if r.returncode == 2 and r.stdout == "" and r.stderr == _UNSUPPORTED_DOCTOR:
+            return "xmsg CLI has no doctor"
+        # shortcut: the bound is checked after the output is read; a trusted local CLI is not expected to flood it.
+        if len(r.stdout) > _DOCTOR_MAX_OUTPUT:
+            return EndpointError("xmsg doctor exceeded its output bound")
+        try:
+            report = json.loads(r.stdout)
+        except ValueError:
+            return EndpointError("xmsg doctor returned invalid JSON")
+        if not isinstance(report, dict) or not isinstance(report.get("endpoints_usable"), bool):
+            return EndpointError("xmsg doctor returned an invalid endpoint report")
+        if report["endpoints_usable"] is False:
+            return EndpointError("xmsg doctor reports the endpoints unusable; run `xmsg doctor`")
+        register = report.get("register_socket")
+        fields = {"register": register if register is not None else report.get("leaf_register_socket"),
+                  "agent": report.get("agent_socket")}
+        paths = {}
+        for name, value in fields.items():
+            if value is None:
+                continue
+            if not isinstance(value, str) or not os.path.isabs(value) or "\0" in value:
+                return EndpointError(f"xmsg doctor returned a non-absolute {name} socket")
+            paths[name] = value
+        return paths
+
+    def resolve(self, name):
+        """The socket path for `name`, or None when no runtime dir is known; raises EndpointError."""
+        pinned = os.environ.get(_ENDPOINT_ENV[name])
+        if pinned:
+            return pinned
+        with self._lock:
+            if self._found is None:
+                self._found = self._discover()
+            found = self._found
+            if isinstance(found, str) and not self._logged_fallback:
+                self._logged_fallback = True
+                logger.warning("xmsg: %s; using the legacy socket directory", found)
+        if isinstance(found, EndpointError):
+            raise found
+        if isinstance(found, dict):
+            if name not in found:
+                raise EndpointError(f"xmsg doctor reported no {name} socket")
+            return found[name]
+        d = _legacy_runtime_dir()
+        return os.path.join(d, "xmsg", f"{name}.sock") if d else None
+
+    def invalidate(self):
+        with self._lock:
+            self._found = None
+
+
+# One doctor probe per process.
+_ENDPOINTS = Endpoints()
 
 
 def _reclaim_store_path():
@@ -98,8 +182,8 @@ class Connection:
     """The process's one connection. Frames carry a `request_id`; a reader thread hands each
     answer to its caller, so tool frames are answered while the poll is pending."""
 
-    def __init__(self, path, deliver, store_path=None):
-        self.path, self.deliver = path, deliver
+    def __init__(self, endpoints, deliver, store_path=None):
+        self.endpoints, self.deliver = endpoints, deliver
         self.store_path = store_path or _reclaim_store_path()
         self.lock = threading.Lock()
         self.sock = None
@@ -115,8 +199,17 @@ class Connection:
         with self.lock:
             if self.sock is not None:
                 return self.sock
+            path = self.endpoints.resolve("register")
+            if not path:
+                raise ConnectionError("xmsg socket directory not found")
             s = socket.socket(socket.AF_UNIX)
-            s.connect(self.path)
+            try:
+                s.connect(path)
+            except OSError:
+                s.close()
+                # Re-resolve at the next connect, so a restarted daemon is found.
+                self.endpoints.invalidate()
+                raise
             s.sendall(b'{"harness":"hermes"}\n')
             f = s.makefile("r", encoding="utf-8")
             hello = json.loads(f.readline() or "{}")
@@ -143,6 +236,7 @@ class Connection:
             if self.sock is s:
                 self.sock = None
                 self.held = set()
+                self.endpoints.invalidate()
             waiting, self.waiting = self.waiting, {}
         for w in waiting.values():
             w[1] = {"status": "error", "error": "closed", "detail": "xmsg connection closed"}
@@ -251,14 +345,14 @@ class Connection:
 
 
 class Xmsg:
-    def __init__(self, ctx, path):
+    def __init__(self, ctx, endpoints):
         self.ctx = ctx
         self.lock = threading.RLock()
         self.current = None  # the CLI's live session
         self.parents = {}  # delegate session -> its parent (HA7)
         self.moved = {}  # session -> the continuation its address moved to
         self.ended = set()  # finalized roots; only the root's own turn or the CLI brings one back
-        self.conn = Connection(path, self.deliver)
+        self.conn = Connection(endpoints, self.deliver)
 
     def _cli(self):
         return getattr(self.ctx._manager, "_cli_ref", None)
@@ -411,11 +505,15 @@ TOOLS = [
 
 
 def register(ctx):
-    path = _register_sock()
+    try:
+        path = _ENDPOINTS.resolve("register")
+    except EndpointError as e:
+        logger.warning("xmsg: %s; the xmsg plugin is off", e)
+        return
     if not path:
         logger.warning("xmsg: socket directory not found (XDG_RUNTIME_DIR is unset and the macOS fallback is unavailable); the xmsg plugin is off")
         return
-    x = Xmsg(ctx, path)
+    x = Xmsg(ctx, _ENDPOINTS)
     for name, action, fields, schema in TOOLS:
         ctx.register_tool(name=name, toolset="xmsg", schema=schema, handler=x.tool(action, fields), emoji="✉")
     ctx.register_hook("pre_llm_call", x.pre_llm_call)
@@ -431,8 +529,11 @@ _ACTIVITY_SEQS = {}
 def _emit_hermes_activity(ev, session_id, block=None, correlation=None):
     if not session_id:
         return
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if not runtime:
+    try:
+        agent_sock = _ENDPOINTS.resolve("agent")
+    except EndpointError:
+        return
+    if not agent_sock:
         return
     seq = _ACTIVITY_SEQS.get(session_id, 0) + 1
     _ACTIVITY_SEQS[session_id] = seq
@@ -456,7 +557,7 @@ def _emit_hermes_activity(ev, session_id, block=None, correlation=None):
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(0.05)
-        s.connect(os.path.join(runtime, "xmsg", "agent.sock"))
+        s.connect(agent_sock)
         s.sendall(raw)
         s.close()
     except Exception:
