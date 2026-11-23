@@ -11,6 +11,10 @@ unpinned endpoints live in a state-derived private namespace `xmsg-<uid>-<12hex>
 `/tmp` on macOS or `$XDG_RUNTIME_DIR` on Linux (falling back to `/tmp` when a valid `XDG_RUNTIME_DIR`
 would exceed `sockaddr_un.sun_path` measured in OS bytes: 103 bytes on macOS, 107 bytes on Linux).
 When every enabled endpoint is explicitly pinned, no managed runtime namespace is derived or created.
+The managed name stays the default on every platform, and it is specific to the state root. A
+stable socket directory is never a default: it is a deployment pin, with all three endpoints in one
+owner-private directory and the same paths given to the daemon and to every client (in Home Manager,
+[`programs.xmsg.server.sockets.dir`](/operations/nixos-and-home-manager/#a-stable-socket-directory)).
 Each socket is published atomically without replacement at mode `0600` in a `0700` directory. With
 federation, it also has an mTLS listener for `/fed/v2/*`. Each JSON request body and socket frame
 refuses unknown fields. The error is `bad_request`, and it names the unknown fields.

@@ -137,6 +137,10 @@ Set `programs.xmsg.harnesses.agy.enable = true`. This needs `programs.antigravit
 The switch configures the MCP server, the skill, the optional `--agy-exe` pin and `~/.gemini/config/hooks.json`.
 See [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).
 
+With [`programs.xmsg.server.sockets.dir`](/operations/nixos-and-home-manager/#a-stable-socket-directory)
+set, the MCP entry passes `--agent-sock` and `--http-sock` as arguments, not environment, and each of
+the three hook events passes `--sock <dir>/register.sock --agent-sock <dir>/agent.sock`.
+
 ## Session locator
 
 The [session locator](/reference/cli-and-mcp/#locating-a-session) captures the
