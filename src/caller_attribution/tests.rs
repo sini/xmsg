@@ -260,7 +260,8 @@ fn roundtrip_with_peer(role: &str) -> (Reply, u32) {
         context_digest: hex::encode(hash.finalize()),
     };
     wire::send_query(&stream, original.as_fd(), &query, deadline).unwrap();
-    let reply = wire::receive_reply(&stream, deadline).unwrap();
+    let reply = wire::receive_reply(&stream, deadline)
+        .unwrap_or_else(|error| panic!("real daemon failed original attribution: {error:?}"));
     assert_eq!(
         authority_snapshot(&directory.path().join("state.db")),
         before,

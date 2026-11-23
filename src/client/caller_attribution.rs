@@ -1199,7 +1199,7 @@ mod tests {
         };
         let entry = std::mem::size_of::<libc::proc_fdinfo>();
         assert!(
-            bytes > 0 && (bytes as usize) < capacity && bytes as usize % entry == 0,
+            bytes > 0 && (bytes as usize) < capacity && (bytes as usize).is_multiple_of(entry),
             "receiving FD counter not observable on this tuple"
         );
         bytes as usize / entry
