@@ -82,6 +82,21 @@ or admission caches during a handshake, but make no persistent or application-st
 writes. An older or unavailable daemon leaves the result unknown.
 The response deadline is bounded, but the system DNS resolver may finish an in-flight lookup after its request is cancelled.
 
+## Upgrade path refusals
+
+<Status id="xmsg.install-contract" />
+
+| Message / class | Cause | Fix |
+| --- | --- | --- |
+| `LegacyConflict`: `legacy state conflict: ...` | A new default would bypass an old DB, enrollment identity or peers file. Creating another empty new DB does not remove the conflict. | Pin the compatible existing DB and other named components for daemon and clients, or stop all writers, back up and move the state before unpinning. Do not delete the old data to suppress the guard. |
+| `UnsafeOwner`: `directory ... is owned by UID ..., expected UID ...` | The selected state/runtime/manual socket parent belongs to a different UID. A root-owned shared pod runtime volume is a common case when any endpoint remains unpinned. | Use an owner-private directory, or pin every enabled endpoint under private parents. A leaf needs both agent and leaf registration pins. Do not chmod/chown the shared volume root as a workaround. |
+
+A permission-bit refusal is distinct from `UnsafeOwner`: private directories need
+permission bits `0700` (setgid `02700` is accepted). Preserve the daemon's UID and
+existing data. Follow the [upgrade runbook](/operations/runtime-and-systemd/#upgrading-an-existing-install)
+for the complete pin or move procedure, and compare resolved paths with
+`xmsg doctor --json` after restart.
+
 ## CA application health
 
 <Status id="xmsg.ca-health" />

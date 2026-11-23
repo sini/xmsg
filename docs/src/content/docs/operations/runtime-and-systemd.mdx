@@ -168,6 +168,114 @@ client re-pins together):
   verified rollback bundles in `<state>/staging-cache`. See
   [macOS Staging](/getting-started/macos-staging/).
 
+## Upgrading an existing install
+
+<Status id="xmsg.install-contract" />
+
+Upgrade the daemon and its CLI, MCP, hooks and service clients together. The
+installation layout changes defaults; it does not migrate existing data.
+Without an explicit XDG state selection, macOS now uses
+`~/Library/Application Support/xmsg/state` instead of `~/.local/state/xmsg`.
+Unpinned sockets move from `<runtime>/xmsg/*.sock` into
+`<parent>/xmsg-<uid>-<12hex>/`. macOS uses canonical `/tmp`; Linux uses an
+owner-private `XDG_RUNTIME_DIR`, or `/tmp` when unset or when a valid parent
+exceeds the socket byte budget. An unsafe selected parent is refused.
+
+Two startup refusals are especially relevant:
+
+- `LegacyConflict`: an unpinned component would bypass an existing legacy
+  database, enrollment identity or peers file. For example, an old macOS
+  `~/.local/state/xmsg/xmsg.db` prevents `serve` from creating a new default DB.
+- `UnsafeOwner`: a selected state or socket directory belongs to another UID.
+  A shared pod volume such as `root:<group>` mode `2777` is not an owner-private
+  runtime directory. A wrong permission mode has its own refusal too.
+
+Choose one of these paths before restarting.
+
+### Keep the legacy layout with explicit pins
+
+Record the paths the existing service actually uses. Pin its database and every
+socket enabled in its mode, and give the **same settings to the daemon and all
+clients**, including service-manager configuration, MCP and hooks. For example,
+for an ordinary node (replace the socket directory with the existing absolute
+private directory):
+
+```sh
+export XMSG_DB_PATH="$HOME/.local/state/xmsg/xmsg.db"
+export XMSG_HTTP_SOCK="/absolute/private/legacy-runtime/http.sock"
+export XMSG_AGENT_SOCK="/absolute/private/legacy-runtime/agent.sock"
+export XMSG_REGISTER_SOCK="/absolute/private/legacy-runtime/register.sock"
+```
+
+Equivalent daemon flags are `--db-path`, `--http-sock`, `--agent-sock` and
+`--register-sock`; explicit flags win over environment variables. A leaf needs
+its agent and leaf registration endpoints, not HTTP: use `XMSG_AGENT_SOCK` and
+`XMSG_LEAF_REGISTER_SOCK` (`--agent-sock` and `--leaf-register-sock`).
+`XMSG_REGISTER_SOCK` is a leaf-registration alias when the dedicated leaf
+setting is absent; a service client using that generic setting must point it
+to the same registration socket. Keep intentional `--enroll-state` and
+`--peers-file` settings as well: a database pin alone does not resolve every
+legacy-component conflict.
+
+### Adopt the new defaults
+
+1. Stop the daemon and every other writer to its state, using the existing
+   service manager so it cannot restart during the move. Back up the complete
+   state directory, including SQLite sidecars; do not copy only a live DB or
+   delete `-wal`/`-shm` files.
+2. Move the stopped state directory to the new resolved state location. For a
+   default macOS install, that is from `~/.local/state/xmsg` to
+   `~/Library/Application Support/xmsg/state`. If the resolved state location
+   is unchanged (the usual Linux default), leave it in place. Preserve ownership and private
+   permissions; the destination must not already contain another install.
+   Do not merge two databases. Keep enrollment state, keys and peer policy.
+3. Review path references in the moved configuration. Enrollment-generated
+   `peers.json` can contain an absolute `hub-ca.pem` path: update it and any
+   service `--enroll-state`, `--peers-file` or certificate paths that moved.
+   Moving files does not rewrite those references.
+4. Remove the legacy DB/socket pins from the daemon **and its clients**, then
+   restart using the same selected roots. Keep any intentional XDG settings;
+   they still override platform defaults. Use `xmsg doctor --json` to discover
+   the resolved endpoints and check the service/client agreement. Reconfigure
+   direct socket consumers from that result. Never move old runtime sockets
+   into the new namespace; the daemon recreates them with ownership checks.
+
+Tools hard-coding `<runtime>/xmsg/http.sock`, `agent.sock` or `register.sock`
+must use compatible explicit pins or the resolver/discovered endpoint. Moving
+state can change the namespace hash; do not guess or persist its suffix.
+
+### Containers and pods
+
+Either give xmsg a private runtime directory owned by its service UID with
+permission bits `0700`, or pin **every enabled endpoint** under private manual
+socket parents. Pinning only some endpoints still derives a managed namespace
+and validates the runtime parent. Do not make a shared volume root private by
+changing its ownership or permissions out from under other containers.
+
+For an already configured leaf, this environment fragment pins its complete
+endpoint set. Assume shared volumes are mounted at `/run/bus` and
+`/var/lib/bus`; their private final child directories must be writable/creatable
+by the service UID. Retain the leaf's existing peer/TLS configuration and
+`--leaf` mode:
+
+```yaml
+env:
+  - name: XMSG_DB_PATH
+    value: /var/lib/bus/state/xmsg.db
+  - name: XMSG_AGENT_SOCK
+    value: /run/bus/private/agent.sock
+  - name: XMSG_LEAF_REGISTER_SOCK
+    value: /run/bus/private/register.sock
+```
+
+Give the adjacent service client that same agent/registration pair. For a
+non-leaf node, pin `XMSG_HTTP_SOCK`, `XMSG_AGENT_SOCK` and
+`XMSG_REGISTER_SOCK` instead. With every enabled endpoint pinned, no managed
+namespace is created; state and manual socket parents still require the correct
+UID and private permissions. Existing unsafe directories are refused rather
+than repaired. See [the socket reference](/reference/http-and-sockets/) and
+[upgrade errors](/operations/troubleshooting/#upgrade-path-refusals).
+
 ## Persisted state & SQLite schema version
 
 The SQLite database (`--db-path`) records its schema version in `PRAGMA user_version`. The current

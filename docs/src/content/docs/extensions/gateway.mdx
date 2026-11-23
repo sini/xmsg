@@ -42,6 +42,15 @@ or deployment is connected. Follow the gateway's own
 [hosted setup guide](https://github.com/sini/xmsg-mcp-gateway/blob/main/docs/hosted-dots-setup.md)
 and provider requirements. Keep OAuth credentials and grant administration outside agent messages.
 
+## Upgrading the adjacent xmsg node
+
+The gateway's service client must use the same resolved agent/registration pair
+as its adjacent daemon. Do not keep hard-coded `<runtime>/xmsg/*.sock` defaults
+when adopting the new namespace. Either retain explicit matching pins or update
+the client paths after the stopped-state move. In a pod, pin every enabled
+endpoint (agent and leaf registration for a leaf), or give the daemon a private
+runtime directory. See the [upgrade and container examples](/operations/runtime-and-systemd/#upgrading-an-existing-install).
+
 ## Protocol bootstrap
 
 The gateway uses `initialize` with the supported transport revisions

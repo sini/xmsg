@@ -12,6 +12,11 @@ not run this installation procedure or load this plist. For the planned verified
 and preflight workflow, see [macOS Staging](/getting-started/macos-staging/).
 </Aside>
 
+Already have xmsg state or scripts using the old socket directory? Read
+[upgrading an existing install](/operations/runtime-and-systemd/#upgrading-an-existing-install)
+before replacing the binary: new defaults can refuse a legacy DB rather than
+open it, and daemon/client pins must agree.
+
 ## Install without Nix
 
 Install Apple's command-line developer tools with `xcode-select --install`, then install Rust

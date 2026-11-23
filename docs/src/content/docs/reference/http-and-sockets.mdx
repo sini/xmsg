@@ -15,6 +15,11 @@ Each socket is published atomically without replacement at mode `0600` in a `070
 federation, it also has an mTLS listener for `/fed/v2/*`. Each JSON request body and socket frame
 refuses unknown fields. The error is `bad_request`, and it names the unknown fields.
 
+Existing clients that hard-code `<runtime>/xmsg/*.sock` must be updated or use
+explicit endpoint pins shared with the daemon. See
+[upgrading an existing install](/operations/runtime-and-systemd/#upgrading-an-existing-install)
+for legacy-layout pins, stopped-state moves and complete container endpoint sets.
+
 ## `http.sock` & HTTP API routes
 
 By default, xmsg serves HTTP only on its resolved `http.sock` (discover the active path read-only
