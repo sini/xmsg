@@ -1526,7 +1526,8 @@ mod mdns_tests {
 
         // 2. Admission contract with mDNS compiled and configured:
         //    - exact-URI CA entry without `address` is accepted when `discovery.mdns` is on;
-        //    - pin-only and unconfigured-discovery address-less entries are refused.
+        //    - an exact-SPKI pin entry without `address` is accepted the same way;
+        //    - unconfigured-discovery address-less entries are refused.
         let peers_json = json!({
             "discovery": { "mdns": {}, "ttl_secs": 120 },
             "peers": {
@@ -1551,16 +1552,21 @@ mod mdns_tests {
                 .contains("missing required field 'address'"),
             "address-less CA peer must fail when discovery is not configured"
         );
-        let (_, _, rogue_pin) = xmsg::fed::generate_self_signed_ed25519("pin-only").unwrap();
+        let (_, _, pin) = xmsg::fed::generate_self_signed_ed25519("pin-only").unwrap();
         let pin_only = json!({
             "discovery": { "mdns": {} },
-            "peers": { "pinned": { "pin": rogue_pin, "allow": ["send"] } }
+            "peers": { "pinned": { "pin": pin, "allow": ["send"] } }
+        });
+        xmsg::fed::PeersMap::load_from_json(&pin_only.to_string())
+            .expect("exact-SPKI pin peer without address must load with mDNS enabled");
+        let pin_unconfigured = json!({
+            "peers": { "pinned": { "pin": pin, "allow": ["send"] } }
         });
         assert!(
-            xmsg::fed::PeersMap::load_from_json(&pin_only.to_string())
+            xmsg::fed::PeersMap::load_from_json(&pin_unconfigured.to_string())
                 .unwrap_err()
                 .contains("missing required field 'address'"),
-            "pin-only peer without address must remain refused even with mDNS enabled"
+            "address-less pin peer must fail when discovery is not configured"
         );
 
         let (client_cert, client_key, client_pin) =
