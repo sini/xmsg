@@ -46,6 +46,7 @@
     "tests/gate_http_unix_timeout.rs",
     "tests/gate_idem_atomic.rs",
     "tests/gate_label_attested_cap.rs",
+    "tests/gate_mqsh_sockets_dir.rs",
     "tests/gate_owh_federated_attachments.rs",
     "tests/gate_owh_transport_bounds.rs",
     "tests/gate_probe_http.rs",
@@ -126,16 +127,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1795,
+      "passed": 1800,
       "failed": 0,
       "ignored": 12,
-      "summaries": 122
+      "summaries": 123
     },
     "darwin": {
-      "passed": 1776,
+      "passed": 1781,
       "failed": 0,
       "ignored": 12,
-      "summaries": 122
+      "summaries": 123
     }
   }
 }
