@@ -98,6 +98,13 @@ existing data. Follow the [upgrade runbook](/operations/runtime-and-systemd/#upg
 for the complete pin or move procedure, and compare resolved paths with
 `xmsg doctor --json` after restart.
 
+A competing-manager failure means at least two recognized `xmsg serve` commands
+target the selected install. A collector is a separate command and may keep its
+state in a child directory without becoming a second daemon owner; do not move
+its history to resolve a service-owner report. Check each service
+`ExecStart`/`ProgramArguments` and DB pin before disabling a daemon. Doctor does
+not execute shell wrappers or expand service substitutions during discovery.
+
 ## CA application health
 
 <Status id="xmsg.ca-health" />

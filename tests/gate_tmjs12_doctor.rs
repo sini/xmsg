@@ -476,3 +476,137 @@ fn s7_doctor_never_touches_held_serve_lock_and_emits_unredacted_endpoints_withou
         "S7: unsafe 0755 state root must fail install.state_root: {unsafe_json}"
     );
 }
+
+fn inspect_manager_fixture(
+    systemd: &[&str],
+    plists: &[&str],
+) -> xmsg::doctor_install::InstallDoctorReport {
+    use std::os::unix::net::UnixListener;
+    use xmsg::install_paths::BindingKind;
+    use xmsg::runtime_lock::{BoundEndpointRecord, OwnerRecord};
+    let tmp = TempDir::new_in("/tmp").unwrap();
+    let home = tmp.path().join("home");
+    let state = tmp.path().join("state");
+    let run = tmp.path().join("run");
+    let units = tmp.path().join("units");
+    let agents = tmp.path().join("agents");
+    for dir in [&home, &state, &run, &units, &agents] {
+        make_private_dir(dir);
+    }
+    let db = state.join("xmsg.db");
+    let http = run.join("http.sock");
+    let replace = |s: &str| {
+        s.replace("@DB@", &db.to_string_lossy())
+            .replace("@STATE@", &state.to_string_lossy())
+            .replace("@HTTP@", &http.to_string_lossy())
+    };
+    for (i, text) in systemd.iter().enumerate() {
+        fs::write(units.join(format!("{i}.service")), replace(text)).unwrap();
+    }
+    for (i, text) in plists.iter().enumerate() {
+        fs::write(agents.join(format!("{i}.plist")), replace(text)).unwrap();
+    }
+    let _listener = UnixListener::bind(&http).unwrap();
+    let meta = fs::symlink_metadata(&http).unwrap();
+    let uid = unsafe { libc::geteuid() };
+    let mut owner = OwnerRecord::new(uid, Some("systemd_user".into()));
+    owner.endpoints.insert(
+        "http".into(),
+        BoundEndpointRecord {
+            path: http.clone(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+            uid,
+            kind: BindingKind::Manual,
+        },
+    );
+    owner.save(&state).unwrap();
+    let lookup = FixtureHomeLookup(Some(home));
+    let env = ResolveEnv {
+        home: None,
+        xdg_config_home: None,
+        xdg_state_home: None,
+        xdg_runtime_dir: None,
+        darwin_user_temp_dir: None,
+        system_tmp: PathBuf::from("/tmp"),
+        platform: Platform::Linux,
+        euid: uid,
+        home_lookup: &lookup,
+    };
+    let req = ResolveRequest {
+        db_path: Some(db),
+        http_sock: Some(http),
+        agent_sock: Some(run.join("agent.sock")),
+        register_sock: Some(run.join("register.sock")),
+        ..ResolveRequest::default()
+    };
+    let before = snapshot_excluding_atime(tmp.path());
+    let report = inspect_install(
+        &req,
+        &env,
+        &ManagerScanRoots {
+            launch_agents_dir: Some(agents),
+            systemd_user_dir: Some(units),
+        },
+    );
+    assert_eq!(
+        before,
+        snapshot_excluding_atime(tmp.path()),
+        "manager discovery must stay read-only"
+    );
+    report
+}
+
+#[test]
+fn mnau_collector_nested_in_daemon_state_is_not_a_competing_owner() {
+    let report = inspect_manager_fixture(&[
+        "[Service]\nExecStart=/usr/bin/xmsg serve --db-path @DB@\n",
+        "[Service]\nExecStart=/usr/bin/xmsg observe-collector --state-dir @STATE@/observe-collector\n",
+    ], &[]);
+    assert_eq!(report.competing_managers.len(), 1);
+    assert!(report
+        .checks
+        .iter()
+        .any(|c| c.id == "install.service_owner" && c.status == "pass"));
+}
+
+#[test]
+fn mnau_two_real_serve_commands_are_ambiguous() {
+    let report = inspect_manager_fixture(
+        &[
+            "[Service]\nExecStart=\"/usr/bin/xmsg\" serve \\\n --db-path=\"@DB@\"\n",
+            "[Service]\nEnvironment=\"XMSG_DB_PATH=@DB@\"\nExecStart=/usr/bin/xmsg serve\n",
+        ],
+        &[],
+    );
+    assert_eq!(report.competing_managers.len(), 2);
+    assert_eq!(report.service_owner, ServiceOwner::Ambiguous);
+}
+
+#[test]
+fn mnau_explicit_different_db_and_prefix_paths_are_excluded() {
+    let report = inspect_manager_fixture(&[
+        "[Service]\nExecStart=/usr/bin/xmsg serve --db-path @DB@\n",
+        "[Service]\nExecStart=/usr/bin/xmsg serve --db-path @STATE@/nested/xmsg.db --http-sock @HTTP@\n",
+        "[Service]\nEnvironment=XMSG_DB_PATH=@DB@\nExecStart=/usr/bin/xmsg serve --db-path=@DB@.other\n",
+        "[Service]\nExecStart=/usr/bin/not-xmsg serve --db-path @DB@\n",
+        "[Service]\nExecStart=/usr/bin/xmsg --label serve\n",
+        "[Service]\nExecStart=/usr/bin/xmsg serve --db-path @DB@\nExecStart=\nExecStart=/usr/bin/xmsg observe-collector\n",
+    ], &[]);
+    assert_eq!(report.competing_managers.len(), 1);
+    assert_eq!(report.service_owner, ServiceOwner::SystemdUser);
+}
+
+#[test]
+fn mnau_launchd_argv_distinguishes_collector_and_decodes_paths() {
+    let report = inspect_manager_fixture(&[], &[
+        "<plist><dict><key>ProgramArguments</key><array><string>/usr/bin/xmsg</string><string>ser&#118;e</string><string>--db-path</string><string>@DB@</string></array></dict></plist>",
+        "<plist><dict><key>ProgramArguments</key><array><string>/usr/bin/xmsg</string><string>observe-collector</string><string>--state-dir</string><string>@STATE@/observe-collector</string></array></dict></plist>",
+        "<plist><dict><key>ProgramArguments</key><array><string>/usr/bin/xmsg</string><string>serve</string><string>--db-path=@DB@.other</string></array></dict></plist>",
+    ]);
+    assert_eq!(report.competing_managers.len(), 1);
+    assert!(report
+        .checks
+        .iter()
+        .any(|c| c.id == "install.service_owner" && c.status == "pass"));
+}

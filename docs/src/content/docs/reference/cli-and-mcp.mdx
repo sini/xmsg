@@ -131,6 +131,14 @@ competing-manager conflict.
 
 The always-on `collector.sqlite_engine` line reports `linked SQLite <found>; the fleet collector requires <required>` for this CLI binary. Its status is `info`, even when the versions differ; it does not affect summary counts or the exit code. It performs no file or network I/O and does not validate a collector configuration or a running collector. The collector enforces its engine requirement at startup.
 
+Service-manager ownership detection reads literal systemd `ExecStart` or launchd
+`ProgramArguments`: only an executable named `xmsg` with subcommand `serve`
+counts. A separate `observe-collector`, including one storing data below the
+daemon state directory, is not another daemon owner. Explicit DB paths match
+canonical files exactly; an explicit different DB is excluded. Shell wrappers,
+service substitutions and unsupported command syntax are not resolved by this
+read-only check.
+
 Doctor displays the client and daemon crate versions and build revisions.
 The daemon metadata comes from the bounded Unix-socket health response, not a process
 or image-name guess. Nix builds embed the source revision; a plain Cargo build without

@@ -476,33 +476,6 @@ fn scan_service_managers(
     let mut managers = Vec::new();
     let mut inventory = LegacyInventory::default();
 
-    let state_canon = canonicalize_best_effort(&resolved.state_root)
-        .unwrap_or_else(|_| resolved.state_root.clone());
-    let db_canon =
-        canonicalize_best_effort(&resolved.db_path).unwrap_or_else(|_| resolved.db_path.clone());
-    let sock_canons: Vec<PathBuf> = resolved
-        .enabled_endpoints()
-        .into_iter()
-        .map(|ep| canonicalize_best_effort(&ep.path).unwrap_or_else(|_| ep.path.clone()))
-        .collect();
-
-    let targets_install = |text: &str| -> bool {
-        let mentions_xmsg = text.contains("xmsg") && text.contains("serve");
-        if !mentions_xmsg {
-            return false;
-        }
-        // Check explicit path overlap, or if no --db-path/--http-sock override is present, assume
-        // it targets the user's default install.
-        let mentions_db = text.contains(&db_canon.to_string_lossy().to_string())
-            || text.contains(&resolved.db_path.to_string_lossy().to_string())
-            || text.contains(&state_canon.to_string_lossy().to_string());
-        let mentions_sock = sock_canons
-            .iter()
-            .any(|s| text.contains(&s.to_string_lossy().to_string()));
-        let has_explicit_db = text.contains("--db-path") || text.contains("XMSG_DB_PATH");
-        mentions_db || mentions_sock || !has_explicit_db
-    };
-
     if let Some(dir) = &roots.launch_agents_dir {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -536,7 +509,9 @@ fn scan_service_managers(
                     kind: kind.into(),
                     id,
                     restarts,
-                    targets_same_install: targets_install(&text),
+                    targets_same_install: plist_command(&text).is_some_and(|(argv, db)| {
+                        command_targets_install(&argv, db.as_deref(), resolved)
+                    }),
                 });
             }
         }
@@ -580,7 +555,11 @@ fn scan_service_managers(
                     kind: "systemd_user".into(),
                     id,
                     restarts,
-                    targets_same_install: targets_install(&text),
+                    targets_same_install: systemd_commands(&text).is_some_and(|(commands, db)| {
+                        commands
+                            .iter()
+                            .any(|argv| command_targets_install(argv, db.as_deref(), resolved))
+                    }),
                 });
             }
         }
@@ -588,6 +567,188 @@ fn scan_service_managers(
 
     managers.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.id.cmp(&b.id)));
     (managers, inventory)
+}
+
+fn command_targets_install(
+    argv: &[String],
+    env_db: Option<&str>,
+    resolved: &ResolvedInstall,
+) -> bool {
+    // The CLI has no global value-taking options: an option value is never a subcommand.
+    if argv
+        .first()
+        .is_none_or(|exe| Path::new(exe).file_name().is_none_or(|n| n != "xmsg"))
+        || argv.get(1).is_none_or(|arg| arg != "serve")
+    {
+        return false;
+    }
+    let value = |name: &str| -> Option<&str> {
+        let mut found = None;
+        let mut args = argv[2..].iter();
+        while let Some(arg) = args.next() {
+            if arg == name {
+                found = args.next().map(String::as_str);
+            } else if let Some(v) = arg.strip_prefix(&format!("{name}=")) {
+                found = Some(v);
+            }
+        }
+        found
+    };
+    let same = |raw: &str, selected: &Path| {
+        let candidate = Path::new(raw);
+        candidate.is_absolute()
+            && matches!((canonicalize_best_effort(candidate), canonicalize_best_effort(selected)),
+                (Ok(a), Ok(b)) if a == b)
+    };
+    if let Some(db) = value("--db-path").or(env_db) {
+        return same(db, &resolved.db_path);
+    }
+    let mut explicit_socket = false;
+    for (flag, name) in [
+        ("--http-sock", "http"),
+        ("--agent-sock", "agent"),
+        ("--register-sock", "register"),
+        ("--leaf-register-sock", "leaf_register"),
+    ] {
+        if let Some(raw) = value(flag) {
+            explicit_socket = true;
+            if resolved
+                .enabled_endpoints()
+                .iter()
+                .any(|ep| ep.name == name && same(raw, &ep.path))
+            {
+                return true;
+            }
+        }
+    }
+    !explicit_socket
+}
+
+// Parse literal service argv, without interpreting shells, substitutions or specifiers.
+fn service_words(input: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' | '%' => return None,
+            '\\' => {
+                let next = chars.next()?;
+                word.push(match next {
+                    's' => ' ',
+                    'n' => '\n',
+                    't' => '\t',
+                    '\\' | '\'' | '"' | ' ' => next,
+                    _ => return None,
+                });
+                started = true;
+            }
+            '\'' | '"' if quote.is_none() => {
+                quote = Some(c);
+                started = true;
+            }
+            '\'' | '"' if quote == Some(c) => quote = None,
+            c if c.is_whitespace() && quote.is_none() => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            c => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        words.push(word);
+    }
+    Some(words)
+}
+
+fn systemd_commands(text: &str) -> Option<(Vec<Vec<String>>, Option<String>)> {
+    let logical = text.replace("\\\n", " ");
+    let mut service = false;
+    let mut commands = Vec::new();
+    let mut db = None;
+    for line in logical.lines().map(str::trim) {
+        if line.starts_with('[') {
+            service = line == "[Service]";
+            continue;
+        }
+        if !service || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("ExecStart=") {
+            if value.trim().is_empty() {
+                commands.clear();
+            } else {
+                commands.push(service_words(value)?);
+            }
+        }
+        if let Some(value) = line.strip_prefix("Environment=") {
+            if value.trim().is_empty() {
+                db = None;
+            }
+            for word in service_words(value)? {
+                if let Some(value) = word.strip_prefix("XMSG_DB_PATH=") {
+                    db = Some(value.into());
+                }
+            }
+        }
+    }
+    Some((commands, db))
+}
+
+fn xml_string(input: &str) -> Option<String> {
+    let mut result = String::new();
+    let mut rest = input;
+    while let Some(i) = rest.find('&') {
+        result.push_str(&rest[..i]);
+        let end = rest[i..].find(';')? + i;
+        let entity = &rest[i + 1..end];
+        result.push(match entity {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ => char::from_u32(if let Some(hex) = entity.strip_prefix("#x") {
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                entity.strip_prefix('#')?.parse().ok()?
+            })?,
+        });
+        rest = &rest[end + 1..];
+    }
+    result.push_str(rest);
+    Some(result)
+}
+
+fn plist_command(text: &str) -> Option<(Vec<String>, Option<String>)> {
+    let start = text.find("<key>ProgramArguments</key>")? + "<key>ProgramArguments</key>".len();
+    let mut array = text[start..].trim_start().strip_prefix("<array>")?;
+    let mut argv = Vec::new();
+    loop {
+        array = array.trim_start();
+        if array.starts_with("</array>") {
+            break;
+        }
+        array = array.strip_prefix("<string>")?;
+        let end = array.find("</string>")?;
+        argv.push(xml_string(&array[..end])?);
+        array = &array[end + "</string>".len()..];
+    }
+    if let Some(program) = extract_plist_string_key(text, "Program") {
+        *argv.first_mut()? = xml_string(&program)?;
+    }
+    let db = extract_plist_env_string(text, "XMSG_DB_PATH").and_then(|s| xml_string(&s));
+    Some((argv, db))
 }
 
 fn extract_plist_string_key(xml: &str, key: &str) -> Option<String> {
