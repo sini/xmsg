@@ -302,6 +302,8 @@ impl Context {
             .env_clear()
             .env("HOME", self.directory.path().join("home"))
             .env("XDG_RUNTIME_DIR", self.directory.path().join("runtime"))
+            .env("NOTIFY_SOCKET", self.directory.path().join("notify.sock"))
+            .env("XMSG_TEST_HOLD_DIR", self.directory.path().join("hold"))
             .env("SSL_CERT_FILE", &self.root)
             .env("RUST_LOG", "info")
             .env("NO_COLOR", "1")
@@ -402,6 +404,29 @@ async fn bound(process: &Process, message: &str) -> String {
         )
     })
 }
+/// Waits for serve's READY=1, which it sends only once every listener, http.sock included, is bound.
+async fn ready(process: &Process, notify: &tokio::net::UnixDatagram) {
+    let mut buffer = [0; 512];
+    tokio::time::timeout(WAIT, async {
+        loop {
+            tokio::select! {
+                received = notify.recv(&mut buffer) => {
+                    let received = received.unwrap();
+                    if String::from_utf8_lossy(&buffer[..received]).lines().any(|line| line == "READY=1") {
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(Duration::from_millis(100)) => assert!(
+                    process.status().await.is_none(),
+                    "serve exited before READY=1: {}",
+                    process.text(true)
+                ),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("serve never sent READY=1; stderr: {}", process.text(true)))
+}
 fn effects(db: &Path) -> Vec<i64> {
     let connection = rusqlite::Connection::open(db).unwrap();
     ["enroll_bindings", "enroll_rates", "enroll_certs"]
@@ -429,8 +454,17 @@ fn cert(directory: &Path) -> (String, String, Vec<String>) {
     )
 }
 
-async fn standalone_enrollment(context: Arc<Context>, idp: Arc<Mutex<IdpState>>) {
+async fn standalone_enrollment(
+    context: Arc<Context>,
+    idp: Arc<Mutex<IdpState>>,
+    notify: tokio::net::UnixDatagram,
+    hold: bool,
+) {
     let directory = context.directory.path();
+    let hold_file = directory.join("hold/http-sock-bind");
+    if hold {
+        std::fs::write(&hold_file, b"").unwrap();
+    }
     let init = context
         .run(&strings(&[
             "enroll-ca",
@@ -518,6 +552,19 @@ async fn standalone_enrollment(context: Arc<Context>, idp: Arc<Mutex<IdpState>>)
         "0",
     ]));
     let address = bound(&server, "bound enrollment https listener").await;
+    // The forced control holds the http.sock bind well past the enrollment listener's log line.
+    let release = hold.then(|| {
+        let socket = PathBuf::from(&socket);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            assert!(
+                !socket.exists(),
+                "the hold did not delay the http.sock bind"
+            );
+            std::fs::remove_file(hold_file).unwrap();
+        })
+    });
+    ready(&server, &notify).await;
     let url = format!("https://{address}");
     let client = context.spawn(&strings(&[
         "enroll",
@@ -598,19 +645,33 @@ async fn standalone_enrollment(context: Arc<Context>, idp: Arc<Mutex<IdpState>>)
     );
     assert_eq!(format!("sha256:{}", identity.0), spki);
     assert_eq!(effects(&directory.join("db.sqlite")), vec![1, 1, 1]);
+    if let Some(release) = release {
+        release.await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn standalone_ca_without_hub_patterns_issues_unclaimed_identity() {
+    standalone(false).await;
+}
+
+/// Forced control for a late http.sock bind: the operator commands must wait for READY=1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn standalone_operator_waits_for_ready_when_http_sock_binds_late() {
+    standalone(true).await;
+}
+
+async fn standalone(hold: bool) {
     eprintln!(
         "standalone-enrollment-binary={}",
         env!("CARGO_BIN_EXE_xmsg")
     );
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    for name in ["home", "runtime", "sessions", "codex"] {
+    for name in ["home", "runtime", "sessions", "codex", "hold"] {
         xmsg::enroll_client::private_directory(&directory.path().join(name)).unwrap();
     }
+    let notify = tokio::net::UnixDatagram::bind(directory.path().join("notify.sock")).unwrap();
     let idp = Idp::new(directory.path()).await;
     let context = Arc::new(Context {
         directory,
@@ -619,7 +680,8 @@ async fn standalone_ca_without_hub_patterns_issues_unclaimed_identity() {
     });
     let inner = context.clone();
     let shared = idp.shared.clone();
-    let mut task = tokio::spawn(async move { standalone_enrollment(inner, shared).await });
+    let mut task =
+        tokio::spawn(async move { standalone_enrollment(inner, shared, notify, hold).await });
     let result = tokio::time::timeout(Duration::from_secs(110), &mut task).await;
     if result.is_err() {
         task.abort();

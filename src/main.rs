@@ -2538,6 +2538,7 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
     let ucred_listener = match activated.http.take() {
         Some(listener) => xmsg::http::adopt_ucred_unix_listener(listener, my_uid, None),
         None => {
+            test_hold("http-sock-bind").await;
             let (listener, _) = xmsg::runtime_lock::bind_and_publish_socket(
                 &state_lock,
                 find_endpoint_lock(&http_ep.path),
@@ -2588,6 +2589,21 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
     drop(state_lock);
     Ok(())
 }
+
+/// Test seam: waits while `$XMSG_TEST_HOLD_DIR/<point>` exists, to widen a startup window.
+#[cfg(feature = "test-hooks")]
+async fn test_hold(point: &str) {
+    if let Some(dir) = std::env::var_os("XMSG_TEST_HOLD_DIR") {
+        let hold = std::path::Path::new(&dir).join(point);
+        while hold.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+#[cfg(not(feature = "test-hooks"))]
+#[inline(always)]
+async fn test_hold(_point: &str) {}
 
 fn detect_process_manager_hint() -> Option<String> {
     if std::env::var_os("INVOCATION_ID").is_some() {
