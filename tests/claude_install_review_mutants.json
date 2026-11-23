@@ -1,0 +1,46 @@
+[
+  {
+    "id": "review-t1-per-file-drift",
+    "oracle": "review T1",
+    "file": "src/install/transaction.rs",
+    "needle": "        if current.as_ref().map(|s| &s.fingerprint) != file.before.as_ref() {\n            return Err(Error::Drift);\n        }",
+    "replacement": "        let _ = &current;",
+    "test": "post_intent_user_edit_blocks_publication_and_preserves_valid_recovery",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "per-file publication overwrote a post-intent user change"
+  },
+  {
+    "id": "review-t2-backup-hash",
+    "oracle": "review T2",
+    "file": "src/install/transaction.rs",
+    "needle": ".is_none_or(|before| hash(&data.bytes) != before.hash)",
+    "replacement": ".is_none_or(|_| false)",
+    "test": "corrupted_backup_cannot_restore_or_publish_into_user_targets",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "recovery copied a corrupted backup into a user target"
+  },
+  {
+    "id": "review-t4-publication-hash",
+    "oracle": "review T4 publication",
+    "file": "src/install/transaction.rs",
+    "needle": "c.fingerprint.hash == e.hash\n                &&",
+    "replacement": "true\n                &&",
+    "test": "post_publish_hash_drift_cannot_commit_ownership",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "publication activated ownership for a changed target hash"
+  },
+  {
+    "id": "review-t4-recovery-hash",
+    "oracle": "review T4 recovery",
+    "file": "src/install/transaction.rs",
+    "needle": "c.fingerprint.hash == e.hash\n                &&",
+    "replacement": "true\n                &&",
+    "test": "recovery_hash_drift_preserves_equal_length_user_bytes",
+    "test_file": "src/install/mod.rs",
+    "test_module": "install::tests",
+    "assertion": "recovery overwrote equal-length user bytes after hash drift"
+  }
+]

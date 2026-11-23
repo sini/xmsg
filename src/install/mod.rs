@@ -745,6 +745,144 @@ mod tests {
         assert!(!request.account_home.join(".claude/settings.json").exists());
     }
     #[test]
+    fn post_intent_user_edit_blocks_publication_and_preserves_valid_recovery() {
+        use std::{cell::Cell, rc::Rc};
+        struct ResetHooks;
+        impl Drop for ResetHooks {
+            fn drop(&mut self) {
+                transaction::BEFORE_PUBLICATION.with(|hook| *hook.borrow_mut() = None);
+                transaction::AFTER_PUBLICATION.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let (_root, request) = fixture();
+        let policy = request.account_home.join("fixture-policy");
+        let request = request.with_fixture_policy_roots(vec![policy]);
+        let target = request.account_home.join(".claude.json");
+        let original = b"{\"neighbor\":\"BEFORE\"}";
+        let changed = b"{\"neighbor\":\"AFTER!\"}";
+        assert_eq!(original.len(), changed.len());
+        std::fs::write(&target, original).unwrap();
+        let planned = plan(&request, Action::Install).unwrap();
+        let key = planned.ownership.set_id.clone();
+        let expected_targets = planned.ownership.targets.clone();
+        let expected_ownership_hash = hash(&serde_json::to_vec(&planned.ownership).unwrap());
+        let area = transaction::area(&request, &key);
+        let reached = Rc::new(Cell::new(false));
+        let publications = Rc::new(Cell::new(0usize));
+        let hook_reached = reached.clone();
+        let hook_area = area.clone();
+        let hook_target = target.clone();
+        transaction::BEFORE_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                assert!(
+                    hook_area.join("intent.json").is_file(),
+                    "fixture missed durable intent barrier"
+                );
+                hook_reached.set(true);
+                std::fs::write(&hook_target, changed).unwrap();
+            }));
+        });
+        let published = publications.clone();
+        transaction::AFTER_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| published.set(published.get() + 1)));
+        });
+        let reset = ResetHooks;
+        let result = planned.apply();
+        drop(reset);
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            changed,
+            "per-file publication overwrote a post-intent user change"
+        );
+        assert!(
+            reached.get(),
+            "fixture did not reach durable pre-publication barrier"
+        );
+        assert_eq!(
+            publications.get(),
+            0,
+            "drift permitted an owned target publication"
+        );
+        assert!(!request.account_home.join(".claude/settings.json").exists());
+        assert!(!request
+            .account_home
+            .join(".claude/skills/xmsg/SKILL.md")
+            .exists());
+        assert_eq!(result.unwrap_err(), Error::Drift);
+        assert!(
+            !area.join("ownership.json").exists(),
+            "drift activated ownership"
+        );
+        let intent_bytes = std::fs::read(area.join("intent.json")).unwrap();
+        let intent: serde_json::Value = serde_json::from_slice(&intent_bytes).unwrap();
+        assert_eq!(intent["version"], 1);
+        assert_eq!(intent["set_id"], key);
+        assert_eq!(
+            intent["targets"],
+            serde_json::to_value(&expected_targets).unwrap()
+        );
+        assert_eq!(intent["before_ownership"], serde_json::Value::Null);
+        assert_eq!(intent["after_ownership"], expected_ownership_hash);
+        let manifest = area
+            .join("backups")
+            .join(intent["transaction_id"].as_str().unwrap())
+            .join("manifest.json");
+        assert_eq!(
+            std::fs::read(&manifest).unwrap(),
+            intent_bytes,
+            "retained manifest differs from durable intent"
+        );
+        let files = intent["files"].as_array().unwrap();
+        assert_eq!(files.len(), 3);
+        let mut retained_targets = files
+            .iter()
+            .map(|file| PathBuf::from(file["path"].as_str().unwrap()))
+            .collect::<Vec<_>>();
+        retained_targets.sort();
+        assert_eq!(retained_targets, expected_targets);
+        assert_eq!(files[0]["path"], serde_json::to_value(&target).unwrap());
+        assert_eq!(files[0]["before"]["hash"], hash(original));
+        assert!(files[0]["backup"].is_string());
+        for file in files {
+            let filename = PathBuf::from(file["path"].as_str().unwrap());
+            assert!(expected_targets.contains(&filename));
+            if let Some(backup) = file["backup"].as_str() {
+                let bytes = std::fs::read(backup).unwrap();
+                assert_eq!(bytes, original);
+                assert_eq!(hash(&bytes), file["before"]["hash"].as_str().unwrap());
+            }
+            let staged = PathBuf::from(file["staged"].as_str().unwrap());
+            let snapshot = transaction::read(&staged, request.uid).unwrap().unwrap();
+            assert_eq!(hash(&snapshot.bytes), file["after_hash"].as_str().unwrap());
+            assert_eq!(
+                serde_json::to_value(&snapshot.fingerprint).unwrap(),
+                file["after"]
+            );
+        }
+        let reference = request
+            .state_root
+            .join("install/claude")
+            .join(format!("{key}.json"));
+        let reference: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(reference).unwrap()).unwrap();
+        assert_eq!(reference, serde_json::json!({"version":1,"set_id":key}));
+        let retained = inventory(&request.account_home);
+        let recovery = plan(&request, Action::Install).unwrap();
+        assert_eq!(recovery.report.status, "recovery_pending");
+        let recovered = recovery.apply();
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            changed,
+            "recovery overwrote the post-intent user change"
+        );
+        assert_eq!(recovered.unwrap_err(), Error::Conflict);
+        assert_eq!(
+            inventory(&request.account_home),
+            retained,
+            "conflicting recovery changed valid intent, backups, stages or ownership"
+        );
+    }
+    #[test]
     fn edited_owned_entry_is_preserved_with_redacted_repeatable_conflict() {
         let (_root, request) = fixture();
         plan(&request, Action::Install).unwrap().apply().unwrap();
@@ -957,6 +1095,207 @@ mod tests {
             plan(&request, Action::Install).unwrap().report.status,
             "no_op"
         );
+    }
+    #[test]
+    fn corrupted_backup_cannot_restore_or_publish_into_user_targets() {
+        let (_root, request) = fixture();
+        let target = request.account_home.join(".claude.json");
+        let original = b"{\"neighbor\":\"ORIGINAL_BEFORE\"}";
+        let corrupt = b"{\"neighbor\":\"CORRUPTED_COPY!\"}";
+        assert_eq!(original.len(), corrupt.len());
+        std::fs::write(&target, original).unwrap();
+        let key = plan(&request, Action::Install).unwrap().ownership.set_id;
+        crash_after_first_publish(&request);
+        let area = transaction::area(&request, &key);
+        let intent_bytes = std::fs::read(area.join("intent.json")).unwrap();
+        let intent: serde_json::Value = serde_json::from_slice(&intent_bytes).unwrap();
+        let file = &intent["files"][0];
+        assert_eq!(file["path"], serde_json::to_value(&target).unwrap());
+        let published = transaction::read(&target, request.uid).unwrap().unwrap();
+        assert_eq!(
+            hash(&published.bytes),
+            file["after_hash"].as_str().unwrap(),
+            "fixture did not stop after actual first publication"
+        );
+        let backup = PathBuf::from(file["backup"].as_str().unwrap());
+        assert_eq!(std::fs::read(&backup).unwrap(), original);
+        assert_eq!(hash(original), file["before"]["hash"].as_str().unwrap());
+        std::fs::write(&backup, corrupt).unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&backup).unwrap()).is_ok(),
+            "corrupt backup must remain valid JSON, not a later parse-error control"
+        );
+        assert_ne!(hash(corrupt), file["before"]["hash"].as_str().unwrap());
+        let targets = [
+            target.clone(),
+            request.account_home.join(".claude/settings.json"),
+            request.account_home.join(".claude/skills/xmsg/SKILL.md"),
+        ];
+        let read_target = |path: &PathBuf| match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("cannot observe controlled target: {error}"),
+        };
+        let before = targets.iter().map(read_target).collect::<Vec<_>>();
+        let retained = inventory(&request.account_home);
+        let recovery = plan(&request, Action::Install).unwrap();
+        assert_eq!(recovery.report.status, "recovery_pending");
+        let result = recovery.apply();
+        let after = targets.iter().map(read_target).collect::<Vec<_>>();
+        assert!(
+            after.iter().flatten().all(|bytes| !bytes
+                .windows(b"CORRUPTED_COPY!".len())
+                .any(|part| part == b"CORRUPTED_COPY!")),
+            "recovery copied a corrupted backup into a user target"
+        );
+        assert_eq!(
+            after, before,
+            "recovery restored or published before validating backup hash"
+        );
+        assert_eq!(result.unwrap_err(), Error::Conflict);
+        assert_eq!(
+            inventory(&request.account_home),
+            retained,
+            "conflicting backup recovery changed target state, journal or retained backups"
+        );
+        assert_eq!(
+            std::fs::read(area.join("intent.json")).unwrap(),
+            intent_bytes
+        );
+        assert_eq!(std::fs::read(backup).unwrap(), corrupt);
+        assert!(!area.join("ownership.json").exists());
+    }
+    fn assert_match_state_nonhash_fields_equal(
+        expected: &serde_json::Value,
+        actual: &serde_json::Value,
+    ) {
+        for field in ["dev", "ino", "uid", "mode", "len"] {
+            assert_eq!(
+                actual[field], expected[field],
+                "fixture changed compared nonhash field {field}"
+            );
+        }
+    }
+    #[test]
+    fn post_publish_hash_drift_cannot_commit_ownership() {
+        use std::{cell::Cell, rc::Rc};
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                transaction::AFTER_PUBLICATION.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        let (_root, request) = fixture();
+        let policy = request.account_home.join("fixture-policy");
+        let request = request.with_fixture_policy_roots(vec![policy]);
+        let target = request.account_home.join(".claude.json");
+        std::fs::write(&target, b"{\"neighbor\":\"HASH_A1\"}").unwrap();
+        let planned = plan(&request, Action::Install).unwrap();
+        let area = transaction::area(&request, &planned.ownership.set_id);
+        let desired = planned.targets[0].after.clone().unwrap();
+        let text = String::from_utf8(desired.clone()).unwrap();
+        assert_eq!(text.matches("HASH_A1").count(), 1);
+        let edited = text.replace("HASH_A1", "HASH_B2").into_bytes();
+        assert_eq!(edited.len(), desired.len());
+        assert!(serde_json::from_slice::<serde_json::Value>(&edited).is_ok());
+        let changed = edited.clone();
+        let hook_target = target.clone();
+        let hook_area = area.clone();
+        let reached = Rc::new(Cell::new(false));
+        let reached_hook = reached.clone();
+        transaction::AFTER_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |index| {
+                if index != 0 {
+                    return;
+                }
+                let published = transaction::read(&hook_target, unsafe { libc::geteuid() })
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    published.bytes, desired,
+                    "fixture must follow the actual first rename"
+                );
+                let intent: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(hook_area.join("intent.json")).unwrap())
+                        .unwrap();
+                let expected = &intent["files"][0]["after"];
+                let before = serde_json::to_value(&published.fingerprint).unwrap();
+                assert_match_state_nonhash_fields_equal(expected, &before);
+                assert_eq!(before["hash"], expected["hash"]);
+                std::fs::write(&hook_target, &changed).unwrap();
+                let current = transaction::read(&hook_target, unsafe { libc::geteuid() })
+                    .unwrap()
+                    .unwrap();
+                let after = serde_json::to_value(&current.fingerprint).unwrap();
+                assert_match_state_nonhash_fields_equal(expected, &after);
+                assert_ne!(after["hash"], expected["hash"]);
+                reached_hook.set(true);
+            }));
+        });
+        let reset = ResetHook;
+        let result = planned.apply();
+        drop(reset);
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            edited,
+            "post-publication drift changed the user's equal-length bytes"
+        );
+        assert!(reached.get());
+        assert!(
+            !area.join("ownership.json").exists(),
+            "publication activated ownership for a changed target hash"
+        );
+        assert_eq!(result.unwrap_err(), Error::Drift);
+        assert!(
+            area.join("intent.json").is_file(),
+            "drift lost pending recovery evidence"
+        );
+    }
+    #[test]
+    fn recovery_hash_drift_preserves_equal_length_user_bytes() {
+        let (_root, request) = fixture();
+        let target = request.account_home.join(".claude.json");
+        std::fs::write(&target, b"{\"neighbor\":\"HASH_A1\"}").unwrap();
+        let key = plan(&request, Action::Install).unwrap().ownership.set_id;
+        crash_after_first_publish(&request);
+        let area = transaction::area(&request, &key);
+        let intent_bytes = std::fs::read(area.join("intent.json")).unwrap();
+        let intent: serde_json::Value = serde_json::from_slice(&intent_bytes).unwrap();
+        let expected = &intent["files"][0]["after"];
+        let published = transaction::read(&target, request.uid).unwrap().unwrap();
+        let before = serde_json::to_value(&published.fingerprint).unwrap();
+        assert_match_state_nonhash_fields_equal(expected, &before);
+        assert_eq!(before["hash"], expected["hash"]);
+        let text = String::from_utf8(published.bytes).unwrap();
+        assert_eq!(text.matches("HASH_A1").count(), 1);
+        let edited = text.replace("HASH_A1", "HASH_B2").into_bytes();
+        assert_eq!(edited.len() as u64, expected["len"].as_u64().unwrap());
+        assert!(serde_json::from_slice::<serde_json::Value>(&edited).is_ok());
+        std::fs::write(&target, &edited).unwrap();
+        let current = transaction::read(&target, request.uid).unwrap().unwrap();
+        let after = serde_json::to_value(&current.fingerprint).unwrap();
+        assert_match_state_nonhash_fields_equal(expected, &after);
+        assert_ne!(after["hash"], expected["hash"]);
+        let retained = inventory(&request.account_home);
+        let recovery = plan(&request, Action::Install).unwrap();
+        assert_eq!(recovery.report.status, "recovery_pending");
+        let result = recovery.apply();
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            edited,
+            "recovery overwrote equal-length user bytes after hash drift"
+        );
+        assert_eq!(result.unwrap_err(), Error::Conflict);
+        assert_eq!(
+            inventory(&request.account_home),
+            retained,
+            "hash-conflicting recovery changed targets, intent or backups"
+        );
+        assert_eq!(
+            std::fs::read(area.join("intent.json")).unwrap(),
+            intent_bytes
+        );
+        assert!(!area.join("ownership.json").exists());
     }
     #[test]
     fn interrupted_apply_preserves_changed_bytes_and_all_backups() {
