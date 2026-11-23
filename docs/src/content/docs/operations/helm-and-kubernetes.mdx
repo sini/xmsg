@@ -99,6 +99,40 @@ Mounted federation certificates, keys and CA bundles are checked for content
 changes every 30 seconds by default. TLS Secret rotation does not require an
 issuer controller in this chart or a forced pod restart.
 
+## Owned subdirectories for custom pods
+
+For custom pod manifests, place the database inside an owned private child of a
+shared volume. `--db-path /var/lib/bus/state/xmsg.db` makes
+`/var/lib/bus/state` the state root; pinning all sockets does not bypass its UID
+and permission checks. `fsGroup` alone can leave the volume root owned by root
+with mode `2777`, which is insufficient.
+
+For example, use an init container running as the **same UID** as xmsg to create
+the child directory. This fragment supplements a custom manifest; it does not
+change the chart's startup described above. Use an image containing `mkdir`:
+
+```yaml
+initContainers:
+  - name: prepare-state
+    image: busybox:1.37
+    securityContext:
+      runAsUser: 10001
+      runAsGroup: 10001
+      allowPrivilegeEscalation: false
+    command: ["mkdir", "-m", "0700", "/var/lib/bus/state"]
+    volumeMounts:
+      - name: state
+        mountPath: /var/lib/bus
+```
+
+This first-creation example assumes the shared mount permits UID `10001` to
+create children and `state` does not already exist. For persistent state,
+preprovision an owned private PVC subdirectory, or have initialization validate
+an existing child without taking it over. Never chmod/chown the whole shared
+mount. Preserve the existing UID and data across restarts. Select the DB inside
+that child and prepare private socket parents separately; see
+[containers and pods](/operations/runtime-and-systemd/#containers-and-pods).
+
 ## Optional federation ingress policy
 
 NetworkPolicy is **off by default**. Enable it with `networkPolicy.enabled` and

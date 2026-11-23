@@ -217,6 +217,33 @@ to the same registration socket. Keep intentional `--enroll-state` and
 `--peers-file` settings as well: a database pin alone does not resolve every
 legacy-component conflict.
 
+### Remove unproven dead sockets during a pinned upgrade
+
+A daemon from before the ownership-lock contract may leave socket files at the
+same explicitly pinned endpoints without the durable ownership proof the new
+daemon requires. Startup then refuses `UnprovenExistingSocket`, even when the old
+daemon has exited. This is a one-time migration step, not routine socket cleanup.
+
+1. Stop the old daemon **and** its socket-activation units or other supervisors.
+   Keep them stopped throughout inspection and cleanup.
+2. Inspect only the exact socket paths selected by the daemon's pins. Confirm
+   each is a Unix socket owned by the service UID; stop on a symlink, unexpected
+   file type or ownership mismatch. Do not scan or delete a runtime directory.
+3. Try a Unix-stream connection to each selected socket, for example with
+   Python's `socket.socket(socket.AF_UNIX, socket.SOCK_STREAM).connect(path)`.
+   A successful connection means something is still listening: stop and find it.
+   Only `ECONNREFUSED` establishes a dead listener for this procedure. `ENOENT`
+   means there is no file to remove; permission errors, timeouts and every other
+   error require investigation, not deletion.
+4. Remove only the selected socket files verified dead in step 3, while all
+   writers and activation remain stopped. Keep the DB, SQLite sidecars, lock
+   files and ownership records intact. Restart the upgraded daemon with the same
+   pins, then check `xmsg doctor --json` and reconnect clients.
+
+The daemon deliberately does not treat a failed connection as proof that an
+unrecognized socket belongs to it. Do not repeatedly unlink sockets to bypass a
+startup refusal.
+
 ### Adopt the new defaults
 
 1. Stop the daemon and every other writer to its state, using the existing
@@ -255,6 +282,12 @@ state can change the namespace hash; do not guess or persist its suffix.
 
 ### Containers and pods
 
+An explicit `--db-path` (or `XMSG_DB_PATH`) selects its parent as the state
+root. `serve` requires that directory to belong to the running UID with permission
+bits `0700`, **even when every endpoint is pinned and in leaf mode**. A shared
+`emptyDir` root owned by `root:<fsGroup>` with mode `2777` fails `UnsafeOwner`;
+group write access does not satisfy owner-private state requirements.
+
 Either give xmsg a private runtime directory owned by its service UID with
 permission bits `0700`, or pin **every enabled endpoint** under private manual
 socket parents. Pinning only some endpoints still derives a managed namespace
@@ -282,7 +315,9 @@ non-leaf node, pin `XMSG_HTTP_SOCK`, `XMSG_AGENT_SOCK` and
 `XMSG_REGISTER_SOCK` instead. With every enabled endpoint pinned, no managed
 namespace is created; state and manual socket parents still require the correct
 UID and private permissions. Existing unsafe directories are refused rather
-than repaired. See [the socket reference](/reference/http-and-sockets/) and
+than repaired. For a same-UID init-container example, see
+[owned pod subdirectories](/operations/helm-and-kubernetes/#owned-subdirectories-for-custom-pods).
+See [the socket reference](/reference/http-and-sockets/) and
 [upgrade errors](/operations/troubleshooting/#upgrade-path-refusals).
 
 ## Persisted state & SQLite schema version
