@@ -10,8 +10,8 @@ import Status from '../../../components/Status.astro';
 
 ## How the Pi extension works
 
-- **Registration & long-poll:** At startup, the extension connects to
-  `$XDG_RUNTIME_DIR/xmsg/register.sock`. `xmsg serve` checks the peer UID (`SO_PEERCRED` /
+- **Registration & long-poll:** At startup, the extension connects to the daemon's
+  `register.sock` (see [Finding the daemon](#finding-the-daemon)). `xmsg serve` checks the peer UID (`SO_PEERCRED` /
   `getpeereid`). It records the process start time and makes a new UUID v4 for the session. The
   session's display label is its Pi session name. If it has no name, the label is the basename of
   its working directory.
@@ -19,18 +19,38 @@ import Status from '../../../components/Status.astro';
   (`poll` $\rightarrow$ `ack`). xmsg delivers them into Pi with `expandPromptTemplates: false`.
   This prevents remote command expansion and prompt-template expansion.
 - **Tools (`list`, `send`, `reply`, `replies`):**
-  - `list`: Asks for active recipients over `$XDG_RUNTIME_DIR/xmsg/http.sock`, or over
-    `XMSG_URL` when you set it.
-  - `send`: Sends messages over `$XDG_RUNTIME_DIR/xmsg/agent.sock`, with kernel PID attestation.
-  - `reply`: Sends replies over `$XDG_RUNTIME_DIR/xmsg/agent.sock`.
+  - `list`: Asks for active recipients over `http.sock`, or over `XMSG_URL` when you set it.
+  - `send`: Sends messages over `agent.sock`, with kernel PID attestation.
+  - `reply`: Sends replies over `agent.sock`.
   - `replies`: Reads the stored replies to a sent message over `agent.sock`. It waits up to `wait`
     seconds (at most 60) for the first reply.
-- **Socket paths:** `XMSG_REGISTER_SOCK`, `XMSG_AGENT_SOCK` and `XMSG_HTTP_SOCK` override the
-  defaults. On macOS without `XDG_RUNTIME_DIR`, the runtime directory is the Darwin user temporary
-  directory, as for `xmsg serve`.
 - **Lifecycle:** A Pi session's UUID is bound to its process. Thus when Pi exits, xmsg releases
   the session. Later sends to its UUID return `410 gone`. A Pi session is never `parked`. Pi is a
   single-session process. It does not use subagent sub-addresses or `inbox`.
+
+## Finding the daemon
+
+<Status id="harness.plugin-endpoints" />
+
+The extension looks for the daemon's sockets in this order:
+
+1. **Explicit paths:** the `sockPath`, `agentSockPath` and `httpSockPath` options of `XmsgPiBridge`,
+   for code that embeds the extension.
+2. **Environment pins:** `XMSG_REGISTER_SOCK`, `XMSG_AGENT_SOCK` and `XMSG_HTTP_SOCK` name a
+   socket directly.
+3. **`xmsg doctor --json`:** without a pin, the extension runs `xmsg doctor --json` from `PATH`
+   once and uses the endpoints it reports (`register_socket`, else `leaf_register_socket`;
+   `agent_socket`; `http_socket`). These are the daemon's default sockets, in its managed
+   `xmsg-<uid>-<12hex>/` directory. The answer is cached; the extension asks again only after a
+   connection to the daemon drops, at its next reconnect.
+4. **Legacy directory:** when `xmsg` is not on `PATH`, or is too old to have `doctor`, the extension
+   logs one line and uses `$XDG_RUNTIME_DIR/xmsg/` (on macOS without `XDG_RUNTIME_DIR`, the Darwin
+   user temporary directory).
+
+If `doctor` answers but reports the endpoints unusable (`endpoints_usable: false`), prints
+malformed output, or takes longer than 3 seconds, the extension refuses to connect and logs why. It
+never falls back to the legacy directory in that case. Run `xmsg doctor` to see the failing check,
+or pin the sockets with the environment variables above in the harness's environment.
 
 ## Home Manager switch
 

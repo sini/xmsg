@@ -367,6 +367,17 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		plannedSince: '2026-11-21',
 		note: 'Breaking default path change with coordinated re-pin; Claude adapter and Homebrew staging follow in separate PRs.',
 	},
+	'harness.plugin-endpoints': {
+		id: 'harness.plugin-endpoints',
+		title: 'pi, opencode and Hermes plugins find the daemon through xmsg doctor',
+		owner: 'sini',
+		evidence: [
+			{ path: 'extensions/pi/index.ts', anchor: 'export function createEndpointResolver(' },
+			{ path: 'extensions/opencode/xmsg.ts', anchor: 'function createEndpointResolver(' },
+			{ path: 'extensions/hermes/__init__.py', anchor: 'class Endpoints:' },
+		],
+		plannedSince: '2026-11-23',
+	},
 	'xmsg.macos-staging': {
 		id: 'xmsg.macos-staging',
 		title: 'macOS arm64 Homebrew staging workflow, standalone preflight verifier, and LaunchAgent preparation',
