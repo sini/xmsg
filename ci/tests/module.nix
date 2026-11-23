@@ -229,10 +229,153 @@ let
         }
       ];
     }).config.networking.firewall.allowedTCPPorts;
+
+  # programs.xmsg.server.sockets.dir: the fixture with every consumer a socket pin reaches (the
+  # activity hook and one exec service on), and the same fixture pinned.
+  pinFixture = {
+    programs.xmsg = {
+      activity.enable = true;
+      server.execServices.quota.command = "/opt/quota/bin/quota";
+    };
+  };
+  pinDir = "/run/user/1000/xmsg-sockets";
+  pinnedEval =
+    system:
+    hmEval system {
+      imports = [ pinFixture ];
+      programs.xmsg.server = {
+        sockets.dir = pinDir;
+        httpSocket = lib.mkForce null;
+      };
+    };
+  pin = {
+    http = "${pinDir}/http.sock";
+    agent = "${pinDir}/agent.sock";
+    register = "${pinDir}/register.sock";
+  };
+  pinEnv = {
+    XMSG_HTTP_SOCK = pin.http;
+    XMSG_AGENT_SOCK = pin.agent;
+    XMSG_REGISTER_SOCK = pin.register;
+  };
+
+  # Every surface a socket pin can reach, store paths replaced by placeholders (`@xmsg@` for
+  # the xmsg package) so a render compares across source and lock revisions. A plugin installed as the shipped file reads "static".
+  pinSurface =
+    system: c:
+    let
+      pkg = "${xmsg.packages.${system}.default}";
+      darwin = lib.hasSuffix "darwin" system;
+      fileOr = shipped: src: if toString src == toString shipped then "static" else src.text; # writeText, no IFD
+      surface = {
+        serve =
+          if darwin then
+            c.launchd.agents.xmsg.config.ProgramArguments
+          else
+            c.systemd.user.services.xmsg.Service.ExecStart;
+        mcp = {
+          claude = c.programs.claude-code.mcpServers.xmsg;
+          agy = c.programs.antigravity-cli.mcpServers.xmsg;
+          codex = c.programs.codex.settings.mcp_servers.xmsg;
+        };
+        claudeHooks = c.programs.claude-code.settings.hooks;
+        agyHooks = builtins.fromJSON (
+          builtins.unsafeDiscardStringContext c.home.file.".gemini/config/hooks.json".source.text
+        );
+        codexHooks = c.programs.xmsg.harnesses.codex.hooks;
+        exec =
+          if darwin then
+            c.launchd.agents.quota.config.EnvironmentVariables or null
+          else
+            c.systemd.user.services.quota.Service.Environment or null;
+        session = c.home.sessionVariables;
+        userManager = c.systemd.user.sessionVariables;
+        pi = fileOr ../../extensions/pi/index.ts c.home.file.".pi/agent/extensions/xmsg-pi.ts".source;
+        opencode =
+          fileOr ../../extensions/opencode/xmsg.ts
+            c.xdg.configFile."opencode/plugin/xmsg.ts".source;
+        hermes = c.services.hermes-agent.environment;
+      };
+    in
+    builtins.fromJSON (
+      lib.concatMapStrings (part: if builtins.isList part then "@store@-" else part) (
+        builtins.split "${builtins.storeDir}/[0-9a-z]{32}-" (
+          builtins.unsafeDiscardStringContext (
+            builtins.replaceStrings [ pkg ] [ "@xmsg@" ] (builtins.toJSON surface)
+          )
+        )
+      )
+    );
+  # Every hook `command` string in a hooks attrset, in order.
+  commandsIn =
+    v:
+    if builtins.isAttrs v then
+      lib.optional (v ? command) v.command
+      ++ lib.concatMap commandsIn (lib.attrValues (removeAttrs v [ "command" ]))
+    else if builtins.isList v then
+      lib.concatMap commandsIn v
+    else
+      [ ];
+
+  # P1: per system, the unset surface (also checked against the pre-change render) and the
+  # pinned one; a pinned consumer must equal its unset render plus exactly its pins.
+  pinCells =
+    f:
+    lib.genAttrs [ "x86_64-linux" "aarch64-darwin" ] (
+      system:
+      f {
+        inherit system;
+        unset = pinSurface system (hmEval system pinFixture);
+        set = pinSurface system (pinnedEval system);
+      }
+    );
+  pinCell = f: {
+    expr = pinCells (x: (f x).expr);
+    expected = pinCells (x: (f x).expected);
+  };
+  # The suffix each pinned hook command gains.
+  hookCell =
+    infix: suffix:
+    pinCell (
+      { unset, set, ... }:
+      let
+        pick = field: lib.filter (lib.hasInfix infix) (commandsIn field);
+      in
+      {
+        expr = map pick [
+          set.claudeHooks
+          set.agyHooks
+          set.codexHooks
+        ];
+        expected = map (h: map (c: c + suffix) (pick h)) [
+          unset.claudeHooks
+          unset.agyHooks
+          unset.codexHooks
+        ];
+      }
+    );
+  prelude =
+    "// programs.xmsg.server.sockets.dir\n"
+    + "process.env.XMSG_AGENT_SOCK ??= \"${pin.agent}\";\n"
+    + "process.env.XMSG_HTTP_SOCK ??= \"${pin.http}\";\n"
+    + "process.env.XMSG_REGISTER_SOCK ??= \"${pin.register}\";\n";
+  # P2: the failed assertions of the pinned fixture with `dir`, on `system`.
+  pinFailures =
+    system: dir: extra:
+    failedAssertions (
+      hmEval system {
+        imports = [ extra ];
+        programs.xmsg.server = {
+          sockets.dir = dir;
+          httpSocket = lib.mkForce null;
+        };
+      }
+    );
+  # A directory whose `/register.sock` (14 bytes) totals `n` bytes.
+  dirOfLength = n: "/" + lib.concatStrings (lib.replicate (n - 15) "a");
 in
 {
   flake.tests.module = {
-    # Oracle 1: the Linux unit, restart triggers, startServices warning, and each harness's pieces.
     test-linux-unit = {
       expr = {
         exec = linux.systemd.user.services.xmsg.Service.ExecStart;
@@ -1419,6 +1562,152 @@ in
     # Oracle 3: darwin has the launchd agent and no systemd unit (evaluation only).
     # aarch64 only: nixpkgs 26.11 has dropped x86_64-darwin.
     test-darwin-aarch64 = darwinCells "aarch64-darwin";
+
+    # P1 (programs.xmsg.server.sockets.dir unset): every pin surface equals the render before the
+    # option existed, recorded from that revision in fixtures/sockets-dir-unset-*.json.
+    test-sockets-dir-unset = {
+      expr = pinCells ({ unset, ... }: unset);
+      expected = {
+        x86_64-linux = lib.importJSON ./fixtures/sockets-dir-unset-linux.json;
+        aarch64-darwin = lib.importJSON ./fixtures/sockets-dir-unset-darwin.json;
+      };
+    };
+    # P1, M-P1-serve: the daemon binds the three pins.
+    test-sockets-dir-serve = pinCell (
+      {
+        system,
+        unset,
+        set,
+      }:
+      {
+        expr = set.serve;
+        expected =
+          if system == "aarch64-darwin" then
+            lib.concatMap (
+              a:
+              if a == "/run/user/1000/xmsg/http.sock" then
+                [
+                  pin.http
+                  "--agent-sock"
+                  pin.agent
+                  "--register-sock"
+                  pin.register
+                ]
+              else
+                [ a ]
+            ) unset.serve
+          else
+            map (lib.replaceStrings
+              [ "--http-sock /run/user/1000/xmsg/http.sock " ]
+              [ "--http-sock ${pin.http} --agent-sock ${pin.agent} --register-sock ${pin.register} " ]
+            ) unset.serve;
+      }
+    );
+    # P1, M-P1-mcp: every MCP entry (claude, agy, codex) passes the agent and http pins.
+    test-sockets-dir-mcp = pinCell (
+      { unset, set, ... }:
+      {
+        expr = set.mcp;
+        expected = lib.mapAttrs (
+          _: e:
+          e
+          // {
+            args = e.args ++ [
+              "--agent-sock"
+              pin.agent
+              "--http-sock"
+              pin.http
+            ];
+          }
+        ) unset.mcp;
+      }
+    );
+    # P1, M-P1-claude-hook / M-P1-activity / M-P1-agy-hook / M-P1-codex-hook: each hook command
+    # is its unset command plus its socket flags (lists: claude, agy, codex hooks).
+    test-sockets-dir-claude-hook = hookCell "register claude" " --sock ${pin.agent}";
+    test-sockets-dir-activity = hookCell "activity hook" " --sock ${pin.agent}";
+    test-sockets-dir-agy-hook = hookCell "register agy" " --sock ${pin.register} --agent-sock ${pin.agent}";
+    test-sockets-dir-codex-hook = hookCell "register codex" " --sock ${pin.agent}";
+    # P1, M-P1-exec: an execServices unit (Linux) or agent (darwin) carries the three pins.
+    test-sockets-dir-exec = pinCell (
+      { system, set, ... }:
+      {
+        expr = set.exec;
+        expected =
+          if system == "aarch64-darwin" then pinEnv else lib.mapAttrsToList (k: v: "${k}=${v}") pinEnv;
+      }
+    );
+    # P1, M-P1-session / M-P1-user-manager: login shells get the pins; the user manager does not.
+    test-sockets-dir-session = pinCell (
+      { unset, set, ... }:
+      {
+        expr = set.session;
+        expected = unset.session // pinEnv;
+      }
+    );
+    test-sockets-dir-user-manager = pinCell (
+      { unset, set, ... }:
+      {
+        expr = set.userManager;
+        expected = unset.userManager;
+      }
+    );
+    # P1, M-P1-pi / M-P1-opencode / M-P1-hermes: each plugin's pin input. pi and opencode install
+    # the shipped file behind a prelude that sets XMSG_*_SOCK unless set; hermes's .env carries them.
+    test-sockets-dir-pi = pinCell (
+      { set, ... }:
+      {
+        expr = set.pi;
+        expected = prelude + builtins.readFile ../../extensions/pi/index.ts;
+      }
+    );
+    test-sockets-dir-opencode = pinCell (
+      { set, ... }:
+      {
+        expr = set.opencode;
+        expected = prelude + builtins.readFile ../../extensions/opencode/xmsg.ts;
+      }
+    );
+    test-sockets-dir-hermes = pinCell (
+      { set, ... }:
+      {
+        expr = set.hermes;
+        expected = pinEnv;
+      }
+    );
+    # P2: a relative path, an over-budget register.sock and the httpSocket combination each fail
+    # with their message; the largest path that fits evaluates (107 bytes Linux, 103 darwin).
+    test-sockets-dir-assertions =
+      let
+        over =
+          sys: n:
+          "programs.xmsg.server.sockets.dir: ${dirOfLength n}/register.sock is ${toString n} bytes; a socket path on this platform holds at most ${toString (n - 1)}.";
+      in
+      {
+        expr = {
+          relative = pinFailures "x86_64-linux" "run/xmsg-sockets" { };
+          linuxOver = pinFailures "x86_64-linux" (dirOfLength 108) { };
+          linuxFits = pinFailures "x86_64-linux" (dirOfLength 107) { };
+          darwinOver = pinFailures "aarch64-darwin" (dirOfLength 104) { };
+          darwinFits = pinFailures "aarch64-darwin" (dirOfLength 103) { };
+          withHttpSocket = pinFailures "x86_64-linux" pinDir {
+            programs.xmsg.server.httpSocket = lib.mkOverride 10 "/run/user/1000/xmsg/http.sock";
+          };
+          pinnedFixture =
+            failedAssertions (pinnedEval "x86_64-linux") ++ failedAssertions (pinnedEval "aarch64-darwin");
+        };
+        expected = {
+          relative = [ "programs.xmsg.server.sockets.dir: run/xmsg-sockets is not an absolute path." ];
+          linuxOver = [ (over "x86_64-linux" 108) ];
+          linuxFits = [ ];
+          darwinOver = [ (over "aarch64-darwin" 104) ];
+          darwinFits = [ ];
+          withHttpSocket = [
+            "programs.xmsg.server.sockets.dir pins http.sock; unset programs.xmsg.server.httpSocket."
+          ];
+          pinnedFixture = [ ];
+        };
+      };
 
     # Oracle 4: the NixOS module opens the port only with federation on.
     test-nixos-port = {
