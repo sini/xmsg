@@ -89,6 +89,23 @@
         meta.mainProgram = "xmsg";
       };
 
+      # The fleet's deployed xmsg before `programs.xmsg.server.sockets.dir`: the previous binary
+      # in the `mqsh-rollback` check (P4).
+      xmsgPrevSrc = pkgs.fetchFromGitHub {
+        owner = "sini";
+        repo = "xmsg";
+        rev = "912ca97a704bba7bf10cb62649e5d0e8b8865c30";
+        hash = "sha256-80Qrab1hH3aqLzUVTsb8SuZ8Oyq1/08di3usbbur90s=";
+      };
+      xmsgPrev = pkgs.rustPlatform.buildRustPackage {
+        pname = "xmsg-prev";
+        version = "0.1.0";
+        src = xmsgPrevSrc;
+        cargoLock.lockFile = "${xmsgPrevSrc}/Cargo.lock";
+        doCheck = false;
+        meta.mainProgram = "xmsg";
+      };
+
       mkCodexHmCfg =
         pkgOverride:
         (home-manager.lib.homeManagerConfiguration {
@@ -476,6 +493,29 @@
               "${xmsgPreDeploy}" "${xmsgPreDeploySrc}" "${xmsgPreDeploy.cargoDeps}" \
               "${xmsgPreCodex}" "${xmsgPreCodexSrc}" "${xmsgPreCodex.cargoDeps}" \
               > $out
+          '';
+        };
+
+        # P4: rollback from a pinned socket directory to the previous binary is a configuration
+        # change plus a runtime-dir reset (tests/gate_mqsh_sockets_dir.rs).
+        mqsh-rollback = xmsgPkg.overrideAttrs {
+          pname = "xmsg-mqsh-rollback";
+          doCheck = true;
+          dontBuild = true;
+          preCheck = "";
+          XMSG_PREV_BIN = lib.getExe xmsgPrev;
+          checkPhase = ''
+            runHook preCheck
+            set -o pipefail
+            cargoWithProfile test --locked --test gate_mqsh_sockets_dir -- p4_rollback_by_configuration_and_reset --exact --nocapture 2>&1 | tee test.log
+            if ! grep -Fq "P4: previous binary 912ca97a ran" test.log; then
+              echo "mqsh-rollback: the previous-binary cells did not run" >&2
+              exit 1
+            fi
+            runHook postCheck
+          '';
+          installPhase = ''
+            printf '%s\n' "${xmsgPrev}" "${xmsgPrevSrc}" "${xmsgPrev.cargoDeps}" > $out
           '';
         };
       }

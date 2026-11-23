@@ -656,6 +656,11 @@ path = "tests/gate_tmjs12_doctor.rs"
 required-features = ["daemon"]
 
 [[test]]
+name = "gate_mqsh_sockets_dir"
+path = "tests/gate_mqsh_sockets_dir.rs"
+required-features = ["daemon"]
+
+[[test]]
 name = "gate_tmjs12_socket_publish"
 path = "tests/gate_tmjs12_socket_publish.rs"
 required-features = ["daemon"]

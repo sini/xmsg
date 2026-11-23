@@ -319,6 +319,17 @@ pub fn inspect_install_with_http_probe(
     // Read owner.json read-only (NEVER touch or flock serve.lock!).
     let owner_rec = OwnerRecord::load(&resolved.state_root).ok().flatten();
 
+    // A daemon whose endpoints were pinned elsewhere (a shell opened before the pins were
+    // exported): name the recorded endpoints. Doctor reports; it never routes.
+    if let Some(rec) = &owner_rec {
+        if let Some(check) = endpoint_pins_check(&resolved, rec, any_live) {
+            if check.status == "fail" {
+                usable = false;
+            }
+            checks.push(check);
+        }
+    }
+
     // Classify service owner and detect competing managers (M-S7).
     let competing: Vec<ManagerEntry> = detected_managers
         .iter()
@@ -403,6 +414,68 @@ pub fn inspect_install_with_http_probe(
         claude_coordinator_status,
         checks,
     }
+}
+
+fn endpoint_env(name: &str) -> &'static str {
+    match name {
+        "http" => "XMSG_HTTP_SOCK",
+        "agent" => "XMSG_AGENT_SOCK",
+        "leaf_register" => "XMSG_LEAF_REGISTER_SOCK",
+        _ => "XMSG_REGISTER_SOCK",
+    }
+}
+
+/// `install.endpoint_pins`: the endpoints `owner.json` records against the ones this process
+/// resolved. None when the record names no endpoint this process resolves.
+fn endpoint_pins_check(
+    resolved: &ResolvedInstall,
+    rec: &OwnerRecord,
+    any_live: bool,
+) -> Option<InstallCheck> {
+    let mut compared = false;
+    let mut differ = Vec::new();
+    for ep in resolved.enabled_endpoints() {
+        let Some(bound) = rec.endpoints.get(ep.name) else {
+            continue;
+        };
+        compared = true;
+        let here = canonicalize_best_effort(&ep.path).unwrap_or_else(|_| ep.path.clone());
+        if bound.path != ep.path && bound.path != here {
+            differ.push(format!(
+                "{}={}",
+                endpoint_env(ep.name),
+                bound.path.display()
+            ));
+        }
+    }
+    if !compared {
+        return None;
+    }
+    if differ.is_empty() {
+        return Some(InstallCheck {
+            id: "install.endpoint_pins".into(),
+            status: "pass",
+            message: "the resolved endpoints are the ones the daemon recorded.".into(),
+            hint: None,
+        });
+    }
+    let (status, lead) = if any_live {
+        (
+            "info",
+            "the daemon recorded other endpoints, but one resolved here answers",
+        )
+    } else {
+        (
+            "fail",
+            "nothing answers at the resolved endpoints; the daemon recorded others",
+        )
+    };
+    Some(InstallCheck {
+        id: "install.endpoint_pins".into(),
+        status,
+        message: format!("{lead}: {}.", differ.join(" ")),
+        hint: Some("Export those variables in this shell, or log in again to pick up the deployment's socket pins."),
+    })
 }
 
 fn classify_service_owner(
