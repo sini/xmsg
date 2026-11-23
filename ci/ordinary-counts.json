@@ -132,9 +132,9 @@
       "summaries": 122
     },
     "darwin": {
-      "passed": 1768,
+      "passed": 1773,
       "failed": 0,
-      "ignored": 11,
+      "ignored": 12,
       "summaries": 122
     }
   }
