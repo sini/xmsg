@@ -33,6 +33,7 @@ env:
     opencode-endpoints
     pi-extension
     pi-paths
+    pinned-plugins
     root-surface
     ordinary-counts
     treefmt-tree-root
