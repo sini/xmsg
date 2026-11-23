@@ -36,6 +36,7 @@ To install the CLI and the harness integrations without a local `xmsg serve` dae
 | `programs.xmsg.server.codexExe` | `--codex-exe` (repeated) | `programs.codex.package`'s `bin/codex` when `harnesses.codex.enable = true` |
 | `programs.xmsg.server.codexHome` | `--codex-home` (repeated) | `[ "${config.home.homeDirectory}/.codex" ]` |
 | `programs.xmsg.server.svcExe` | `--svc-exe NAME=PATH` | `{ }` |
+| `programs.xmsg.server.execServices` | `--svc-exe NAME=<xmsg>` plus one `xmsg service exec` user service each | `{ }` |
 | `programs.xmsg.server.sessionsDirs` | `XMSG_SESSIONS_DIR` (colon-joined) | `[ "${config.home.homeDirectory}/.claude/sessions" ]` |
 | `programs.xmsg.server.extraSessionsDirs` | appended to `sessionsDirs` | `[ ]` |
 | `programs.xmsg.server.stableExecutable` | — (macOS only) | `"${config.xdg.dataHome}/xmsg/serve/xmsg"` |
@@ -61,6 +62,29 @@ The agent writes its standard output (xmsg's log) to `~/Library/Logs/xmsg/stdout
 standard error (panics and early startup errors) to `~/Library/Logs/xmsg/stderr.log`, the same
 files as the hand-written plist in [macOS](/getting-started/macos/). Activation creates
 `~/Library/Logs/xmsg` (mode `0700`) before the agent loads, since launchd does not. The agent runs with `Umask` 0077, as the Linux unit does.
+
+## Services run by `xmsg service exec`
+
+`programs.xmsg.server.execServices.<name>` serves a command on the bus under `<name>`, through
+[`xmsg service exec`](/reference/cli-and-mcp/#xmsg-service-exec). Each entry adds
+`svcExe.<name>` (xmsg's own executable, since `xmsg service exec` is the registering process) and
+a user service running `xmsg service exec --name <name> -- <command> <args...>`: the
+`<name>.service` systemd unit on Linux (after `xmsg.service`, `Restart = "on-failure"`,
+`NoNewPrivileges`, `UMask` 0077), the `<name>` launchd agent on macOS (logs under
+`~/Library/Logs/xmsg/<name>-std{out,err}.log`, `Umask` 0077).
+
+```nix
+programs.xmsg.server.execServices.my-report = {
+  command = lib.getExe pkgs.my-report;
+  args = [ "--json" ];
+  # environment.KEY = "value";       # Environment / EnvironmentVariables
+  # restartSec = 10;                 # RestartSec (Linux), ThrottleInterval (macOS)
+  # extraServiceConfig = { ... };    # Linux only: merged over the unit's Service section
+};
+```
+
+Set `enable = false` on an entry to drop its service and its `svcExe` name. On macOS, extra
+launchd keys go in `launchd.agents.<name>.config` directly.
 
 ## Per-harness switches
 
@@ -139,7 +163,8 @@ when enabled and requires `"observe"` in `allow`. These limits apply:
 - **No `hub` block.** The module writes the bare-map form of the peers file, which cannot hold
   [hub admission](/concepts/federation/#hub-admission-hub).
 
-The module has no option for a hand-written peers file. To use `default_route` or `hub`, write
+The rendered peers file is exposed read-only as `programs.xmsg.server.federation.peersFile`, the
+path `--peers-file` names, for checks that read it. The module has no option for a hand-written peers file. To use `default_route` or `hub`, write
 the peers file yourself and run `xmsg serve --peers-file <path>` outside this module's service.
 
 On NixOS, open the federation port in the firewall with `nixosModules.xmsg`:
@@ -181,8 +206,11 @@ programs.xmsg.observeCollector = {
 ```
 
 `config` is rendered to JSON in the Nix store and passed via `--config`; `stateDir` defaults to
-`${config.xdg.stateHome}/xmsg/observe-collector` and is passed via `--state-dir`. Keep private
-keys and OIDC client secrets as runtime file paths rather than embedding them in Nix-store JSON.
+`${config.xdg.stateHome}/xmsg/observe-collector` and is passed via `--state-dir`. The public
+certificates, `client_cert` and `web_tls.cert`, may be Nix store paths (for example
+`client_cert = ./collector.crt;`), as `federation.cert` and `peers.*.ca` may. Private keys
+(`client_key`, `web_tls.key`) and `auth.lookup_secret_file` must be runtime file paths: the module
+refuses a store path or inline material there, and refuses inline secret values in `auth`.
 See [Fleet Observer Operations](/operations/fleet-observer/) for the full collector schema.
 
 

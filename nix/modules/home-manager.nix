@@ -493,6 +493,20 @@ let
           cp peers.json $out
         '';
 
+  execServices = lib.filterAttrs (_: s: s.enable) srv.execServices;
+  execArgs =
+    name: s:
+    [
+      exe
+      "service"
+      "exec"
+      "--name"
+      name
+      "--"
+      s.command
+    ]
+    ++ s.args;
+
   collectorConfigFile = pkgs.writeText "xmsg-observe-collector.json" (builtins.toJSON oc.config);
   collectorArgs = [
     "--config"
@@ -637,6 +651,67 @@ in
         example = lib.literalExpression "{ my-bot = lib.getExe pkgs.my-bot; }";
         description = "`--svc-exe NAME=PATH`: the service names xmsg admits, each only from its executable.";
       };
+      execServices = mkOption {
+        type = types.attrsOf (
+          types.submodule (
+            { name, ... }:
+            {
+              options = {
+                enable = mkOption {
+                  type = types.bool;
+                  default = true;
+                  description = "Run this service.";
+                };
+                command = mkOption {
+                  type = types.str;
+                  example = lib.literalExpression "lib.getExe pkgs.my-report";
+                  description = "The command `xmsg service exec` runs for each delivered request.";
+                };
+                args = mkOption {
+                  type = types.listOf types.str;
+                  default = [ ];
+                  description = "Arguments passed to `command`.";
+                };
+                description = mkOption {
+                  type = types.str;
+                  default = "${name} over xmsg (xmsg service exec)";
+                  defaultText = lib.literalExpression ''"<name> over xmsg (xmsg service exec)"'';
+                  description = "The systemd unit's `Description` (Linux).";
+                };
+                restartSec = mkOption {
+                  type = types.ints.unsigned;
+                  default = 10;
+                  description = "Seconds before a restart: `RestartSec` on Linux, `ThrottleInterval` on darwin.";
+                };
+                environment = mkOption {
+                  type = types.attrsOf types.str;
+                  default = { };
+                  description = "Environment variables for the service.";
+                };
+                extraServiceConfig = mkOption {
+                  type = types.attrs;
+                  default = { };
+                  description = "Linux only: merged over the unit's `Service` section. On darwin, set `launchd.agents.<name>.config` directly.";
+                };
+              };
+            }
+          )
+        );
+        default = { };
+        example = lib.literalExpression ''
+          {
+            my-report = {
+              command = lib.getExe pkgs.my-report;
+              args = [ "--json" ];
+            };
+          }
+        '';
+        description = ''
+          Services served by `xmsg service exec --name <name> -- <command> <args...>`, one user
+          service each (systemd on Linux, launchd on darwin). Each entry adds
+          `svcExe.<name>`, xmsg's own executable, so `xmsg serve` admits the name.
+        '';
+      };
       sessionsDirs = mkOption {
         type = types.listOf (types.either types.path types.str);
         default = defaultSessionsDirs;
@@ -690,6 +765,13 @@ in
           type = types.attrsOf peerType;
           default = { };
           description = "The peers file (`--peers-file`), keyed by node name or nickname (README 7.3).";
+        };
+        peersFile = mkOption {
+          type = types.path;
+          readOnly = true;
+          default = peersFile;
+          defaultText = lib.literalExpression "the store file rendered from federation.peers";
+          description = "Read-only: the rendered peers file `--peers-file` names.";
         };
       };
     };
@@ -844,11 +926,22 @@ in
               assertion = isRuntimePath v;
               message = "programs.xmsg.observeCollector.config.${field}: must be a runtime file path, never a Nix store path or inline key/cert material.";
             };
+            # A public certificate may be a store path (as federation.cert and peers.*.ca), never
+            # inline material. Context discarded: hasInfix builds a regex, which refuses a store path.
+            certCheck =
+              field: v:
+              let
+                s = builtins.unsafeDiscardStringContext (toString v);
+              in
+              {
+                assertion = lib.isStringLike v && !lib.hasInfix "\n" s && !lib.hasInfix "-----BEGIN" s;
+                message = "programs.xmsg.observeCollector.config.${field}: must be a file path, never inline certificate material.";
+              };
           in
-          lib.optional (oc.config ? client_cert) (pathCheck "client_cert" oc.config.client_cert)
+          lib.optional (oc.config ? client_cert) (certCheck "client_cert" oc.config.client_cert)
           ++ lib.optional (oc.config ? client_key) (pathCheck "client_key" oc.config.client_key)
           ++ lib.optional (oc.config ? web_tls && oc.config.web_tls != null && oc.config.web_tls ? cert) (
-            pathCheck "web_tls.cert" oc.config.web_tls.cert
+            certCheck "web_tls.cert" oc.config.web_tls.cert
           )
           ++ lib.optional (oc.config ? web_tls && oc.config.web_tls != null && oc.config.web_tls ? key) (
             pathCheck "web_tls.key" oc.config.web_tls.key
@@ -886,6 +979,49 @@ in
           }
         );
     }
+
+    {
+      programs.xmsg.server.svcExe = lib.mapAttrs (_: _: exe) execServices;
+    }
+
+    (mkIf pkgs.stdenv.hostPlatform.isLinux {
+      systemd.user.services = lib.mapAttrs (name: s: {
+        Unit = {
+          Description = s.description;
+          After = [ "xmsg.service" ];
+          Wants = [ "xmsg.service" ];
+        };
+        Service = {
+          ExecStart = lib.escapeShellArgs (execArgs name s);
+          Restart = "on-failure";
+          RestartSec = s.restartSec;
+          NoNewPrivileges = true;
+          UMask = "0077";
+        }
+        // lib.optionalAttrs (s.environment != { }) {
+          Environment = lib.mapAttrsToList (k: v: "${k}=${v}") s.environment;
+        }
+        // s.extraServiceConfig;
+        Install.WantedBy = [ "default.target" ];
+      }) execServices;
+    })
+
+    (mkIf pkgs.stdenv.hostPlatform.isDarwin {
+      launchd.agents = lib.mapAttrs (name: s: {
+        enable = true;
+        config = {
+          ProgramArguments = execArgs name s;
+          KeepAlive.SuccessfulExit = false;
+          RunAtLoad = true;
+          ThrottleInterval = s.restartSec;
+          StandardOutPath = "${logDir}/${name}-stdout.log";
+          StandardErrorPath = "${logDir}/${name}-stderr.log";
+          # 0077, the Linux unit's UMask.
+          Umask = 63;
+        }
+        // lib.optionalAttrs (s.environment != { }) { EnvironmentVariables = s.environment; };
+      }) execServices;
+    })
 
     # Runs as the sessions' own user: the inbox sockets live in 0700 dirs. Its HTTP API is
     # a unix socket with the peer uid checked, and there is no TCP listener.
@@ -952,7 +1088,7 @@ in
       };
     })
 
-    (mkIf ((srv.enable || oc.enable) && pkgs.stdenv.hostPlatform.isDarwin) {
+    (mkIf ((srv.enable || oc.enable || execServices != { }) && pkgs.stdenv.hostPlatform.isDarwin) {
       home.activation.xmsgLogDir =
         lib.hm.dag.entryBetween
           [ "setupLaunchAgents" ]

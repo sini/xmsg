@@ -1238,12 +1238,12 @@ in
             };
           }
         );
-        storeCert = failedAssertions (
+        inlineCert = failedAssertions (
           hmEval "x86_64-linux" {
             programs.xmsg.observeCollector = {
               enable = true;
               config = {
-                client_cert = "${builtins.storeDir}/xxx-client.pem";
+                client_cert = "-----BEGIN CERTIFICATE-----\nCANARY_CERT";
                 client_key = "/run/xmsg-observer/client.key";
               };
             };
@@ -1266,14 +1266,137 @@ in
         inlineKey = [
           "programs.xmsg.observeCollector.config.client_key: must be a runtime file path, never a Nix store path or inline key/cert material."
         ];
-        storeCert = [
-          "programs.xmsg.observeCollector.config.client_cert: must be a runtime file path, never a Nix store path or inline key/cert material."
+        inlineCert = [
+          "programs.xmsg.observeCollector.config.client_cert: must be a file path, never inline certificate material."
         ];
         inlineSecret = [
           "programs.xmsg.observeCollector.config.auth: must reference secrets by runtime file path (lookup_secret_file), never inline secret values."
         ];
       };
     };
+
+    # Public certificates may be store paths (as federation.cert and peers.*.ca); private
+    # keys and secrets stay runtime paths.
+    test-observe-collector-public-certs =
+      let
+        storeCert = builtins.toFile "client.pem" "public";
+        collector =
+          config:
+          failedAssertions (
+            hmEval "x86_64-linux" {
+              programs.xmsg.observeCollector = {
+                enable = true;
+                config = {
+                  client_cert = "/run/xmsg-observer/client.pem";
+                  client_key = "/run/xmsg-observer/client.key";
+                }
+                // config;
+              };
+            }
+          );
+        refused = field: [
+          "programs.xmsg.observeCollector.config.${field}: must be a runtime file path, never a Nix store path or inline key/cert material."
+        ];
+      in
+      {
+        expr = {
+          storeCerts = collector {
+            client_cert = storeCert;
+            web_tls = {
+              cert = "${builtins.storeDir}/xxx-web.pem";
+              key = "/run/xmsg-observer/web.key";
+            };
+          };
+          storeClientKey = collector { client_key = storeCert; };
+          storeWebKey = collector {
+            web_tls = {
+              cert = "/run/xmsg-observer/web.pem";
+              key = "${builtins.storeDir}/xxx-web.key";
+            };
+          };
+          storeLookupSecret = collector { auth.lookup_secret_file = storeCert; };
+        };
+        expected = {
+          storeCerts = [ ];
+          storeClientKey = refused "client_key";
+          storeWebKey = refused "web_tls.key";
+          storeLookupSecret = refused "auth.lookup_secret_file";
+        };
+      };
+
+    # The rendered peers file, read-only, is the one `--peers-file` names.
+    test-federation-peers-file = {
+      expr = "${linux.programs.xmsg.server.federation.peersFile}";
+      expected = "${pinLiteralPeers}";
+    };
+
+    # execServices: one entry admits xmsg's own executable under its name and runs
+    # `xmsg service exec` as a user service on each platform.
+    test-exec-services =
+      let
+        entry = {
+          programs.xmsg.server.execServices = {
+            quota = {
+              command = "/opt/quota/bin/quota";
+              args = [ "--json" ];
+              environment.QUOTA_MODE = "read-only";
+            };
+            off = {
+              enable = false;
+              command = "/opt/off/bin/off";
+            };
+          };
+        };
+        l = hmEval "x86_64-linux" entry;
+        d = hmEval "aarch64-darwin" entry;
+        darwinExe = lib.getExe xmsg.packages.aarch64-darwin.default;
+      in
+      {
+        expr = {
+          svcExe = l.programs.xmsg.server.svcExe;
+          exec = l.systemd.user.services.quota.Service.ExecStart;
+          inherit (l.systemd.user.services.quota.Service) Restart RestartSec Environment;
+          inherit (l.systemd.user.services.quota.Unit) After;
+          wantedBy = l.systemd.user.services.quota.Install.WantedBy;
+          linuxOff = l.systemd.user.services ? off;
+          linuxLaunchd = l.launchd.agents ? quota;
+          darwinArgs = d.launchd.agents.quota.config.ProgramArguments;
+          darwinEnv = d.launchd.agents.quota.config.EnvironmentVariables;
+          darwinSvcExe = d.programs.xmsg.server.svcExe.quota;
+          darwinOff = d.launchd.agents ? off;
+          darwinSystemd = d.systemd.user.services ? quota;
+          failed = failedAssertions l ++ failedAssertions d;
+        };
+        expected = {
+          svcExe = {
+            my-bot = "/opt/my-bot/bin/my-bot";
+            quota = exe;
+          };
+          exec = [ "${exe} service exec --name quota -- /opt/quota/bin/quota --json" ];
+          Restart = "on-failure";
+          RestartSec = 10;
+          Environment = [ "QUOTA_MODE=read-only" ];
+          After = [ "xmsg.service" ];
+          wantedBy = [ "default.target" ];
+          linuxOff = false;
+          linuxLaunchd = false;
+          darwinArgs = [
+            darwinExe
+            "service"
+            "exec"
+            "--name"
+            "quota"
+            "--"
+            "/opt/quota/bin/quota"
+            "--json"
+          ];
+          darwinEnv.QUOTA_MODE = "read-only";
+          darwinSvcExe = darwinExe;
+          darwinOff = false;
+          darwinSystemd = false;
+          failed = [ ];
+        };
+      };
 
     # D19 (and XH3 oracle 7): a switch whose harness module is off is refused, naming the option.
     test-switch-needs-harness = {
