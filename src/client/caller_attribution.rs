@@ -564,6 +564,61 @@ thread_local! {
     static NEXT_CONTROL_LEN: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy)]
+struct DarwinAncillaryHeader {
+    len: usize,
+    level: libc::c_int,
+    kind: libc::c_int,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn darwin_peek_verdict(
+    count: usize,
+    control_len: usize,
+    header: Option<DarwinAncillaryHeader>,
+    flags: libc::c_int,
+    expect_right: bool,
+) -> io::Result<()> {
+    let length = unsafe { libc::CMSG_LEN(std::mem::size_of::<RawFd>() as _) } as usize;
+    let valid = if expect_right {
+        count > 0
+            && control_len == length
+            && header.is_some_and(|header| {
+                header.len == length
+                    && header.level == libc::SOL_SOCKET
+                    && header.kind == libc::SCM_RIGHTS
+            })
+    } else {
+        control_len == 0
+    };
+    if !valid || flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "attribution ancillary preflight",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_consume_control_capacity() -> libc::socklen_t {
+    let control_fds = 1;
+    unsafe { libc::CMSG_SPACE((control_fds * std::mem::size_of::<RawFd>()) as _) }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn darwin_consume_verdict(
+    count: usize,
+    received: usize,
+    expect_right: bool,
+) -> Result<(), FailureReason> {
+    if count > 0 && received != usize::from(expect_right) {
+        return Err(FailureReason::Ancillary);
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn darwin_peek(stream: &UnixStream, bytes: &mut [u8], expect_right: bool) -> io::Result<usize> {
     let mut control = [0usize; 4];
@@ -588,26 +643,22 @@ fn darwin_peek(stream: &UnixStream, bytes: &mut [u8], expect_right: bool) -> io:
     if count < 0 {
         return Err(io::Error::last_os_error());
     }
-    let valid = unsafe {
-        let header = libc::CMSG_FIRSTHDR(&message);
-        if expect_right {
-            let length = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as _);
-            count > 0
-                && !header.is_null()
-                && message.msg_controllen == length
-                && (*header).cmsg_len == length
-                && (*header).cmsg_level == libc::SOL_SOCKET
-                && (*header).cmsg_type == libc::SCM_RIGHTS
-        } else {
-            message.msg_controllen == 0
-        }
+    let header = unsafe {
+        libc::CMSG_FIRSTHDR(&message)
+            .as_ref()
+            .map(|header| DarwinAncillaryHeader {
+                len: header.cmsg_len as usize,
+                level: header.cmsg_level,
+                kind: header.cmsg_type,
+            })
     };
-    if !valid || message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "attribution ancillary preflight",
-        ));
-    }
+    darwin_peek_verdict(
+        count as usize,
+        message.msg_controllen as usize,
+        header,
+        message.msg_flags,
+        expect_right,
+    )?;
     Ok(count as usize)
 }
 
@@ -657,11 +708,14 @@ fn receive(
             message.msg_iovlen = 1;
             message.msg_control = control.as_mut_ptr().cast();
             #[cfg(target_os = "macos")]
-            let control_fds = 1;
+            {
+                message.msg_controllen = darwin_consume_control_capacity();
+            }
             #[cfg(not(target_os = "macos"))]
-            let control_fds = 2;
-            message.msg_controllen =
-                unsafe { libc::CMSG_SPACE((control_fds * std::mem::size_of::<RawFd>()) as _) } as _;
+            {
+                message.msg_controllen =
+                    unsafe { libc::CMSG_SPACE((2 * std::mem::size_of::<RawFd>()) as _) } as _;
+            }
             #[cfg(all(test, target_os = "linux"))]
             if let Some(length) = NEXT_CONTROL_LEN.get() {
                 message.msg_controllen = length;
@@ -746,9 +800,7 @@ fn receive(
             Err(error) => return Err(failure(error)),
         };
         #[cfg(target_os = "macos")]
-        if count > 0 && received.len() != usize::from(expect_fd && data.is_empty()) {
-            return Err(FailureReason::Ancillary);
-        }
+        darwin_consume_verdict(count, received.len(), expect_fd && data.is_empty())?;
         if malformed || (!data.is_empty() && !received.is_empty()) {
             return Err(FailureReason::Ancillary);
         }
@@ -1154,6 +1206,106 @@ mod tests {
             "second excess descriptor leaked"
         );
     }
+    #[test]
+    fn darwin_peek_decision_checks_each_ancillary_field_independently() {
+        let len = unsafe { libc::CMSG_LEN(std::mem::size_of::<RawFd>() as _) } as usize;
+        let right = DarwinAncillaryHeader {
+            len,
+            level: libc::SOL_SOCKET,
+            kind: libc::SCM_RIGHTS,
+        };
+        let cases = [
+            ("one right", 1, len, Some(right), 0, true, true),
+            (
+                "control truncation",
+                1,
+                len,
+                Some(right),
+                libc::MSG_CTRUNC,
+                true,
+                false,
+            ),
+            (
+                "data truncation",
+                1,
+                len,
+                Some(right),
+                libc::MSG_TRUNC,
+                true,
+                false,
+            ),
+            (
+                "wrong header length",
+                1,
+                len,
+                Some(DarwinAncillaryHeader {
+                    len: len - 1,
+                    ..right
+                }),
+                0,
+                true,
+                false,
+            ),
+            (
+                "wrong level",
+                1,
+                len,
+                Some(DarwinAncillaryHeader { level: 0, ..right }),
+                0,
+                true,
+                false,
+            ),
+            (
+                "wrong type",
+                1,
+                len,
+                Some(DarwinAncillaryHeader { kind: 0, ..right }),
+                0,
+                true,
+                false,
+            ),
+            ("later right", 1, len, Some(right), 0, false, false),
+            ("later data", 1, 0, None, 0, false, true),
+            ("clean EOF", 0, 0, None, 0, false, true),
+        ];
+        for (label, count, control, header, flags, expected, accepted) in cases {
+            assert_eq!(
+                darwin_peek_verdict(count, control, header, flags, expected).is_ok(),
+                accepted,
+                "Darwin peek verdict: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn darwin_consume_decision_checks_owned_descriptor_count() {
+        for (bytes, descriptors, expected, accepted) in [
+            (1, 1, true, true),
+            (1, 0, true, false),
+            (1, 2, true, false),
+            (1, 1, false, false),
+            (1, 0, false, true),
+            (0, 0, false, true),
+        ] {
+            assert_eq!(
+                darwin_consume_verdict(bytes, descriptors, expected).is_ok(),
+                accepted,
+                "Darwin consume count: bytes={bytes} descriptors={descriptors} expected={expected}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_consume_uses_exactly_one_fd_control_capacity() {
+        let expected = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as _) };
+        assert_eq!(
+            darwin_consume_control_capacity(),
+            expected,
+            "Darwin consuming control capacity must fit exactly one FD"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn darwin_marker_multi_fd_refuses_before_consuming() {
