@@ -1917,7 +1917,7 @@ pub async fn deliver_agy_envelope(
     // 2. Spawn agy agentapi send-message directly as argv vector with NO shell
     let holder_exe = crate::process::exe_path(&config.proc_root, holder_pid).ok();
     let program = config.delivery_program(holder_exe);
-    let mut cmd = tokio::process::Command::new(&program);
+    let mut cmd = std::process::Command::new(&program);
     cmd.arg("agentapi")
         .arg("send-message")
         .arg("--title")
@@ -1926,14 +1926,9 @@ pub async fn deliver_agy_envelope(
         .arg(&conv_target)
         .arg(envelope)
         .env("ANTIGRAVITY_LS_ADDRESS", &creds.ls_address)
-        .env("ANTIGRAVITY_CSRF_TOKEN", &creds.csrf_token)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(target_os = "macos")]
-    crate::spawn::cloexec_inherited_fds(&mut cmd);
+        .env("ANTIGRAVITY_CSRF_TOKEN", &creds.csrf_token);
 
-    let child = spawn_delivery(&mut cmd);
+    let child = spawn_delivery(cmd);
     let output = match tokio::time::timeout(Duration::from_secs(5), async {
         child?.wait_with_output().await
     })
@@ -2975,8 +2970,20 @@ pub async fn run_register_server_with_listener(
     }
 }
 
-fn spawn_delivery(cmd: &mut tokio::process::Command) -> std::io::Result<tokio::process::Child> {
-    crate::client::caller_attribution::with_fd_inheritance_gate(|| cmd.spawn())
+#[cfg(not(target_os = "macos"))]
+fn spawn_delivery(command: std::process::Command) -> std::io::Result<tokio::process::Child> {
+    let mut cmd = tokio::process::Command::from(command);
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    cmd.spawn()
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_delivery(command: std::process::Command) -> std::io::Result<crate::spawn::darwin::Child> {
+    crate::client::caller_attribution::with_fd_inheritance_gate(|| {
+        crate::spawn::darwin::spawn(&command)
+    })
 }
 
 #[cfg(test)]
@@ -3298,57 +3305,111 @@ mod tests {
 
 #[cfg(all(test, target_os = "macos"))]
 mod attribution_spawn_tests {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::net::UnixStream;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
     #[test]
     fn actual_delivery_spawn_holds_the_receive_inheritance_gate_at_fork() {
-        let (mut reader, writer) = UnixStream::pair().unwrap();
-        reader.set_nonblocking(true).unwrap();
-        let fd = writer.as_raw_fd();
+        let program = std::env::current_exe().unwrap();
+        let mut command = std::process::Command::new(&program);
+        command.arg("--list");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let _entered = runtime.enter();
-        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .arg("--list")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        unsafe {
-            command.pre_exec(move || {
-                let held =
-                    u8::from(crate::client::caller_attribution::inheritance_gate_held_for_test());
-                if libc::write(fd, (&held as *const u8).cast(), 1) != 1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let mut child = super::spawn_delivery(&mut command).unwrap();
-        drop(writer);
-        let mut observed = [0];
-        let mut poll = libc::pollfd {
-            fd: reader.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        assert!(unsafe { libc::poll(&mut poll, 1, 2000) } > 0);
-        let read = reader.read_exact(&mut observed);
-        let status = runtime.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await
+        runtime.block_on(async {
+            let child = super::spawn_delivery(command).unwrap();
+            let output =
+                tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(output.status.success());
         });
-        assert!(
-            read.is_ok(),
-            "actual delivery child did not publish its fork-time gate canary"
-        );
-        assert!(status.unwrap().unwrap().success());
-        assert_eq!(
-            observed,
-            [1],
-            "actual delivery spawn forked outside the shared receive-to-fcntl gate"
-        );
+    }
+
+    #[test]
+    fn darwin_delivery_exec_excludes_the_high_fd_canary() {
+        const ROLE: &str = "XMSG_TEST_DARWIN_EXEC_CANARY_ROLE";
+        const CANARY: &str = "XMSG_TEST_DARWIN_EXEC_CANARY_FD";
+        const WITNESS: &str =
+            "agy::attribution_spawn_tests::darwin_delivery_exec_excludes_the_high_fd_canary";
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", WITNESS, "--nocapture"]);
+        match std::env::var(ROLE).as_deref() {
+            Ok("child") => {
+                let canary: libc::c_int = std::env::var(CANARY).unwrap().parse().unwrap();
+                assert_eq!(
+                    unsafe { libc::fcntl(canary, libc::F_GETFD) },
+                    -1,
+                    "unlisted high FD survived exec"
+                );
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EBADF)
+                );
+                let mut entries: [libc::proc_fdinfo; 64] = unsafe { std::mem::zeroed() };
+                let bytes = unsafe {
+                    libc::proc_pidinfo(
+                        libc::getpid(),
+                        libc::PROC_PIDLISTFDS,
+                        0,
+                        entries.as_mut_ptr().cast(),
+                        std::mem::size_of_val(&entries) as _,
+                    )
+                };
+                assert!(
+                    bytes > 0 && (bytes as usize) < std::mem::size_of_val(&entries),
+                    "FD inventory not observable on this tuple"
+                );
+                let count = bytes as usize / std::mem::size_of::<libc::proc_fdinfo>();
+                let mut fds: Vec<_> = entries[..count].iter().map(|entry| entry.proc_fd).collect();
+                fds.sort_unstable();
+                assert_eq!(fds, [0, 1, 2], "exec had descriptors outside the allowlist");
+            }
+            Ok("fixture") => {
+                let source = std::fs::File::open("/dev/null").unwrap();
+                let raw = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 128) };
+                assert!(raw >= 128, "high-FD canary not observable on this tuple");
+                let canary = unsafe { OwnedFd::from_raw_fd(raw) };
+                let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+                assert_eq!(
+                    unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+                    0
+                );
+                limit.rlim_cur = 128;
+                assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+                assert_eq!(unsafe { libc::fcntl(canary.as_raw_fd(), libc::F_GETFD) }, 0);
+                command.env(ROLE, "child").env(CANARY, raw.to_string());
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    let child = super::spawn_delivery(command).unwrap();
+                    let output = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        child.wait_with_output(),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{}{}",
+                        String::from_utf8_lossy(&output.stderr),
+                        String::from_utf8_lossy(&output.stdout)
+                    );
+                });
+            }
+            _ => {
+                let output = command.env(ROLE, "fixture").output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stderr),
+                    String::from_utf8_lossy(&output.stdout)
+                );
+            }
+        }
     }
 }
