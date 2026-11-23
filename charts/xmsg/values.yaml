@@ -1,3 +1,7 @@
+# node: one full node or federation hub (StatefulSet). leaf: an outbound-only leaf
+# sidecar beside your application containers (Deployment); see `leaf` below.
+mode: node
+
 image:
   repository: ghcr.io/sini/xmsg
   # Use an immutable published tag for upgrades.
@@ -47,3 +51,18 @@ networkPolicy:
   #       matchLabels:
   #         app.kubernetes.io/name: xmsg-mcp-gateway
   allowedPeers: []
+
+# Used only when mode is leaf. The pod runs every container as securityContext.runAsUser.
+leaf:
+  # Required: the --leaf-principal the app container registers as.
+  principal: ""
+  # Image for the prepare-state init container; it needs only `mkdir`.
+  prepareImage: busybox:1.37
+  # Hubs this leaf dials: [{name, address, identity}]. Each is allowed `list` only, and
+  # its CA is the TLS Secret's ca.crt.
+  hubs: []
+  # Your application containers. Each gets XDG_RUNTIME_DIR=/run, the shared runtime
+  # mount, and the hardened securityContext when it sets none.
+  containers: []
+  # Extra pod volumes your application containers mount.
+  volumes: []

@@ -1,0 +1,127 @@
+{{- if eq .Values.mode "leaf" }}
+{{- $uid := .Values.securityContext.runAsUser }}
+{{- $gid := .Values.securityContext.runAsGroup }}
+{{- $hardened := dict "runAsUser" $uid "runAsGroup" $gid "runAsNonRoot" true "readOnlyRootFilesystem" true "allowPrivilegeEscalation" false "capabilities" (dict "drop" (list "ALL")) }}
+{{- $runMount := dict "name" "runtime" "mountPath" "/run" }}
+{{- $runEnv := dict "name" "XDG_RUNTIME_DIR" "value" "/run" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "xmsg.fullname" . }}
+  labels:
+    {{- include "xmsg.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "xmsg.fullname" . }}
+  labels:
+    {{- include "xmsg.labels" . | nindent 4 }}
+spec:
+  # One database writer; the old pod stops before the new one starts.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "xmsg.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "xmsg.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/peers: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "xmsg.fullname" . }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ $uid }}
+        runAsGroup: {{ $gid }}
+        fsGroup: {{ .Values.securityContext.fsGroup }}
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # xmsg refuses a state root it does not own; an fsGroup emptyDir is root-owned, 2777.
+        - name: prepare-state
+          image: {{ .Values.leaf.prepareImage | quote }}
+          command: ["mkdir", "-m", "0700", "-p", "/var/lib/xmsg/db"]
+          securityContext:
+            {{- toYaml $hardened | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/xmsg
+      containers:
+        - name: xmsg
+          {{- if .Values.image.digest }}
+          image: {{ printf "%s@%s" .Values.image.repository .Values.image.digest | quote }}
+          {{- else }}
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          {{- end }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - serve
+            - --leaf
+            - --leaf-principal
+            - {{ required "leaf.principal must name the app container's principal" .Values.leaf.principal | quote }}
+            # Required by --leaf; loopback in the pod's own network namespace.
+            - --listen
+            - 127.0.0.1:7787
+            # Every endpoint pinned, so xmsg derives no managed directory it would refuse.
+            - --leaf-register-sock
+            - /run/xmsg/register.sock
+            - --agent-sock
+            - /run/xmsg/agent.sock
+            - --db-path
+            - /var/lib/xmsg/db/xmsg.db
+            - --peers-file
+            - /etc/xmsg/peers/peers.json
+            - --fed-cert
+            - /etc/xmsg/tls/tls.crt
+            - --fed-key
+            - /etc/xmsg/tls/tls.key
+          env:
+            - name: XDG_RUNTIME_DIR
+              value: /run
+          securityContext:
+            {{- toYaml $hardened | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: runtime
+              mountPath: /run
+            - name: state
+              mountPath: /var/lib/xmsg
+            - name: tls
+              mountPath: /etc/xmsg/tls
+              readOnly: true
+            - name: peers
+              mountPath: /etc/xmsg/peers
+              readOnly: true
+        {{- range .Values.leaf.containers }}
+        {{- /* The app shares the runtime dir and the UID: the leaf admits register.sock by SO_PEERCRED uid. */}}
+        {{- $c := deepCopy . }}
+        {{- $_ := set $c "env" (append (default list $c.env) $runEnv) }}
+        {{- $_ = set $c "volumeMounts" (append (default list $c.volumeMounts) $runMount) }}
+        {{- $_ = set $c "securityContext" (default $hardened $c.securityContext) }}
+        - {{ toYaml $c | indent 10 | trim }}
+        {{- end }}
+      volumes:
+        - name: runtime
+          emptyDir:
+            medium: Memory
+        - name: state
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: {{ required "tls.existingSecret must name an existing TLS Secret" .Values.tls.existingSecret | quote }}
+            defaultMode: 0440
+        - name: peers
+          configMap:
+            name: {{ include "xmsg.fullname" . }}-peers
+        {{- with .Values.leaf.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

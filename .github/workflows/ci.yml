@@ -23,6 +23,7 @@ concurrency:
 env:
   FAST_CHECKS: >-
     agents-md-citations
+    chart-leaf
     ci-plane-coverage
     ci-self-input
     default

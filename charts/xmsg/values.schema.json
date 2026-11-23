@@ -3,6 +3,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
+    "mode",
     "image",
     "canonicalNodeName",
     "tls",
@@ -11,9 +12,16 @@
     "trustedServices",
     "securityContext",
     "persistence",
-    "networkPolicy"
+    "networkPolicy",
+    "leaf"
   ],
   "properties": {
+    "mode": {
+      "enum": [
+        "node",
+        "leaf"
+      ]
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
@@ -45,8 +53,7 @@
       }
     },
     "canonicalNodeName": {
-      "type": "string",
-      "minLength": 1
+      "type": "string"
     },
     "tls": {
       "type": "object",
@@ -167,8 +174,114 @@
     },
     "resources": {
       "type": "object"
+    },
+    "leaf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "principal",
+        "prepareImage",
+        "hubs",
+        "containers",
+        "volumes"
+      ],
+      "properties": {
+        "principal": {
+          "type": "string"
+        },
+        "prepareImage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hubs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "address",
+              "identity"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "address": {
+                "type": "string",
+                "minLength": 1
+              },
+              "identity": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "containers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "image"
+            ]
+          }
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ]
+          }
+        }
+      }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "node"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "canonicalNodeName": {
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "leaf"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "leaf": {
+            "properties": {
+              "principal": {
+                "minLength": 1
+              },
+              "hubs": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "definitions": {
     "labelSelector": {
       "type": "object",

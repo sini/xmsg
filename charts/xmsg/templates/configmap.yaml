@@ -1,3 +1,11 @@
+{{- $peers := .Values.peers }}
+{{- if eq .Values.mode "leaf" }}
+{{- $peers = dict }}
+{{- range .Values.leaf.hubs }}
+{{- /* A leaf has no listener; `list` lets it answer a hub's list query from its mailbox. */}}
+{{- $_ := set $peers .name (dict "address" .address "ca" "/etc/xmsg/tls/ca.crt" "identities" (list .identity) "allow" (list "list")) }}
+{{- end }}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,4 +13,4 @@ metadata:
   labels:
     {{- include "xmsg.labels" . | nindent 4 }}
 data:
-  peers.json: {{ dict "peers" .Values.peers | toJson | quote }}
+  peers.json: {{ dict "peers" $peers | toJson | quote }}

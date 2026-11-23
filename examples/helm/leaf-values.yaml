@@ -1,0 +1,31 @@
+# Example; adapt. An xmsg leaf sidecar beside one application container.
+mode: leaf
+image:
+  repository: ghcr.io/sini/xmsg
+  tag: latest
+tls:
+  # A kubernetes.io/tls Secret with tls.crt, tls.key and ca.crt (cert-manager writes all three).
+  existingSecret: my-app-xmsg-tls
+securityContext:
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+leaf:
+  principal: my-app
+  hubs:
+    - name: alice.hub
+      address: hub.example.com:7788
+      identity: spiffe://example.com/host/hub/user/alice
+  containers:
+    - name: my-app
+      image: registry.example.com/my-app:1.0.0
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}

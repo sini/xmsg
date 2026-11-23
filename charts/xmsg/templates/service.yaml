@@ -1,3 +1,4 @@
+{{- if eq .Values.mode "node" }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -13,3 +14,4 @@ spec:
       port: 7788
       targetPort: federation
       protocol: TCP
+{{- end }}

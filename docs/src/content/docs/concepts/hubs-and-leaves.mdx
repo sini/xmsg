@@ -87,6 +87,9 @@ Matrix bridge sidecar. For them, `xmsg serve --leaf` runs as an outbound-only si
   acknowledgement, the message stays in the hub mailbox. The hub delivers it again when the leaf
   connects again.
 
+In Kubernetes, the chart's [leaf sidecar](/operations/helm-and-kubernetes/#leaf-sidecar) mode
+renders this pod. <Status id="xmsg.chart-leaf" />
+
 ## Outbound links (`"dial": "outbound"`)
 
 A full `xmsg` node can run interactive agent harnesses (`claude`, `codex`, `agy`, `opencode`,

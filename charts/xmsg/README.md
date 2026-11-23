@@ -1,7 +1,9 @@
 # xmsg Helm chart
 
-This application chart runs one full node or federation hub. It does not package
-harnesses, a gateway, a leaf sidecar or a certificate issuer. Install directly from
+This application chart runs one full node or federation hub, or, with `mode: leaf`, a
+leaf sidecar beside your application containers (see `examples/helm/leaf-values.yaml`
+and the [guide](https://xmsg.dev/operations/helm-and-kubernetes/#leaf-sidecar)). It
+does not package harnesses, a gateway or a certificate issuer. Install directly from
 this checkout with Helm 4.3.1.
 
 Provision an existing `kubernetes.io/tls` Secret containing `tls.crt` and `tls.key`.

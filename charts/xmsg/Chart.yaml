@@ -1,6 +1,6 @@
 apiVersion: v2
 name: xmsg
-description: A single xmsg full node or federation hub
+description: A single xmsg full node, federation hub or leaf sidecar
 version: 0.1.0
 appVersion: "0.1.0"
 type: application

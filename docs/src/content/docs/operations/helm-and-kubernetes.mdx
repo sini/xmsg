@@ -4,10 +4,12 @@ description: Install one persistent xmsg node per Helm release and verify federa
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import Status from '../../../components/Status.astro';
 
 The application chart in `charts/xmsg` runs one full [node](/glossary/#node) or
-federation [hub](/glossary/#hub) per release. It does not bundle harnesses, a gateway,
-a leaf sidecar or a certificate issuer. Install directly from a repository checkout.
+federation [hub](/glossary/#hub) per release, or, with `mode: leaf`, a
+[leaf sidecar](#leaf-sidecar) beside your application. It does not bundle harnesses,
+a gateway or a certificate issuer. Install directly from a repository checkout.
 
 <Aside type="note" title="Checkout version">
 The chart and examples are planned for the next release. The disposable fixture
@@ -177,10 +179,161 @@ denial/restoration and an enabled empty allowlist. It temporarily changes releas
 The verified fixture used a separately installed `kube-network-policies` v1.1.3
 DaemonSet. The chart does not install that controller.
 
-## Leaf sidecars
+## Leaf sidecar
 
-Leaf deployments remain separate from this full-node chart. A leaf shares a
-runtime socket volume and UID with its worker, and needs its loopback listener
-alongside the shared Unix sockets. See
-[Hubs, Leaves & Gateways](/concepts/hubs-and-leaves/#leaf-node-mode---leaf) for the
-`--leaf` setup and its trust boundary.
+A workload that only needs to send and receive messages runs xmsg as an outbound-only
+[leaf](/concepts/hubs-and-leaves/#leaf-node-mode---leaf) in its own pod. With
+`mode: leaf` the chart renders a one-replica Deployment: a `prepare-state` init
+container, the xmsg leaf container and your application containers, all as one UID and
+sharing a memory `emptyDir` as `XDG_RUNTIME_DIR`. It also renders a ServiceAccount with
+no token and a `peers.json` that dials your hubs. No Service, StatefulSet or
+NetworkPolicy is rendered, and the full-node values (`canonicalNodeName`, `peers`,
+`persistence`, `networkPolicy`) are unused.
+
+<Status id="xmsg.chart-leaf" />
+
+The render check `ci/tests/check-chart-leaf.py` verifies the invariants below against
+`examples/helm/leaf-values.yaml`.
+
+A minimal values file (`examples/helm/leaf-values.yaml`). It's an example, so adapt it:
+
+```yaml
+mode: leaf
+image:
+  repository: ghcr.io/sini/xmsg
+  tag: latest
+tls:
+  # kubernetes.io/tls Secret with tls.crt, tls.key and ca.crt.
+  existingSecret: my-app-xmsg-tls
+securityContext:
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+leaf:
+  principal: my-app
+  hubs:
+    - name: alice.hub
+      address: hub.example.com:7788
+      identity: spiffe://example.com/host/hub/user/alice
+  containers:
+    - name: my-app
+      image: registry.example.com/my-app:1.0.0
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+```
+
+```sh
+helm install my-app ./charts/xmsg -n my-app -f leaf-values.yaml
+```
+
+Each hub entry becomes `{"address", "ca": "/etc/xmsg/tls/ca.crt", "identities": [identity],
+"allow": ["list"]}`. The hub's own `peers.json` needs a matching entry for the leaf, with
+`"leaf": true` and the leaf's SPIFFE identity; see
+[hub-side durable mailbox](/concepts/hubs-and-leaves/#leaf-node-mode---leaf). Each
+`leaf.containers` entry is rendered as given, plus `XDG_RUNTIME_DIR=/run`, the `runtime`
+mount and, if it sets no `securityContext`, the hardened one. `leaf.volumes` adds the
+pod volumes those containers mount. The app reaches the leaf at
+`/run/xmsg/register.sock` and `/run/xmsg/agent.sock`.
+
+What each invariant is for:
+
+| Invariant | Why |
+|---|---|
+| `prepare-state` runs `mkdir -m 0700 -p /var/lib/xmsg/db` as the pod UID | xmsg refuses a DB directory it does not own at `0700`; an `fsGroup` `emptyDir` root is `root:<gid>` `2777`. |
+| One UID for every container | The leaf admits a registration on `register.sock` by `SO_PEERCRED` UID, because it can't attest an executable across containers. |
+| A shared memory `emptyDir` at `XDG_RUNTIME_DIR` | The app and the leaf meet on Unix sockets there; the leaf makes its `xmsg/` socket directory `0700` itself. |
+| `--agent-sock`, `--leaf-register-sock`, `--db-path` pinned | With every endpoint explicit, xmsg derives no default directory it would refuse as unsafe. |
+| `--listen 127.0.0.1:7787` and no `--fed-listen` | `--leaf` requires an HTTP listener; loopback keeps it inside the pod's network namespace, and a leaf accepts no federation connections. |
+| Hubs allowed `list` only | The leaf withholds `list` otherwise, and every bare send on the hub reports the leaf `unavailable`. |
+| `automountServiceAccountToken: false` | Neither container calls the Kubernetes API. |
+| `readOnlyRootFilesystem`, `drop: [ALL]`, `runAsNonRoot` | Neither needs a writable root, a capability or root. |
+| `replicas: 1`, `Recreate` | One writer per database. |
+
+The state `emptyDir` is per pod: the leaf's queue starts empty on a new pod, and the
+hub's durable mailbox holds anything not yet acknowledged.
+
+### SPIFFE certificate
+
+The TLS Secret comes from your issuer. With cert-manager, a Certificate like this one,
+in the release namespace, gives the leaf a URI SAN bound to its namespace and
+ServiceAccount (`<release>-xmsg`). It's an example, so adapt it:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: my-app-xmsg
+  namespace: my-app
+spec:
+  secretName: my-app-xmsg-tls
+  issuerRef:
+    name: my-ca            # your CA issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+  uris:
+    - spiffe://example.com/ns/my-app/sa/my-app-xmsg
+  usages: [digital signature, key encipherment, server auth, client auth]
+  # Short-lived: expiry stands in for revocation. xmsg reloads rotated files.
+  duration: 24h
+  renewBefore: 8h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+    rotationPolicy: Always
+```
+
+### Optional: restrict SPIFFE URIs at admission
+
+A namespace that can create Certificates against a shared CA issuer can name any
+identity. A ValidatingAdmissionPolicy can hold each Certificate for that issuer to
+exactly one URI SAN, `spiffe://<trust-domain>/ns/<its namespace>/sa/<sa>`, and leave
+CertificateRequests to cert-manager's controller. It's an example, so adapt it:
+replace `my-ca`, `example[.]com` and the controller's service-account name with your own.
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: my-ca-spiffe
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [cert-manager.io]
+        apiVersions: ["*"]
+        operations: [CREATE, UPDATE]
+        resources: [certificates, certificaterequests]
+  matchConditions:
+    - name: issued-by-my-ca
+      expression: >-
+        object.spec.issuerRef.name == 'my-ca' &&
+        has(object.spec.issuerRef.kind) && object.spec.issuerRef.kind == 'ClusterIssuer'
+  validations:
+    - expression: >-
+        request.resource.resource != 'certificaterequests' ||
+        request.userInfo.username == 'system:serviceaccount:cert-manager:cert-manager'
+      message: only cert-manager's controller may request from my-ca; create a Certificate
+    - expression: >-
+        request.resource.resource != 'certificates' ||
+        (has(object.spec.uris) && size(object.spec.uris) == 1 &&
+         object.spec.uris[0].matches('^spiffe://example[.]com/ns/' + request.namespace +
+           '/sa/[a-z0-9]([-.a-z0-9]*[a-z0-9])?$'))
+      message: a my-ca certificate carries exactly one URI SAN, spiffe://example.com/ns/<its namespace>/sa/<sa>
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: my-ca-spiffe
+spec:
+  policyName: my-ca-spiffe
+  validationActions: [Deny]
+```
+
+The policy checks the name a namespace asks for. It does not check that the
+ServiceAccount exists or that the pod runs as it; mTLS and the hub's peer entry still
+decide what the leaf may do.

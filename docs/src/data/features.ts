@@ -185,6 +185,13 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [{ path: 'src/doctor_peers.rs', anchor: 'pub(crate) struct Report' }],
 	},
+	'xmsg.chart-leaf': {
+		id: 'xmsg.chart-leaf',
+		title: 'Helm chart leaf-sidecar mode',
+		owner: 'sini',
+		evidence: [{ path: 'charts/xmsg/templates/leaf.yaml', anchor: '- --leaf-register-sock' }],
+		plannedSince: '2026-11-23',
+	},
 	'xmsg.leaf-stalled-ack': {
 		id: 'xmsg.leaf-stalled-ack',
 		title: 'Leaf inbox stalled service ACK diagnostics',
