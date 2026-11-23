@@ -663,25 +663,24 @@ fn p6_bind_mounted_consumer_reconnects_across_restart() {
     }
     stop(daemon);
     let daemon = start();
+    let inode_after = fs::metadata(&pins.dir).unwrap().ino();
+    fs::write(&restarted, b"").unwrap();
+    // The bind-mount cell, where a runner arm exists: the consumer reconnects without restarting.
+    if let Some((arm, mut child)) = consumer {
+        let status = child.wait().unwrap();
+        assert!(
+            status.success() && fs::read_to_string(&log).unwrap().contains("reconnected"),
+            "the bound consumer must reconnect without restarting ({status}; directory inode {inode} -> {inode_after})"
+        );
+        eprintln!("P6: runner arm {arm} ran the bind-mount cell");
+    } else {
+        eprintln!("P6: no runner arm (sudo -n, bwrap) available; the inode cell ran alone");
+    }
     // The portable cell: the daemon keeps the directory across a restart.
     assert_eq!(
-        fs::metadata(&pins.dir).unwrap().ino(),
-        inode,
+        inode_after, inode,
         "the pinned directory's inode must survive a daemon restart"
     );
-    fs::write(&restarted, b"").unwrap();
-    match consumer {
-        Some((arm, mut child)) => {
-            let status = child.wait().unwrap();
-            assert!(
-                status.success(),
-                "the bound consumer must reconnect without restarting ({status})"
-            );
-            assert!(fs::read_to_string(&log).unwrap().contains("reconnected"));
-            eprintln!("P6: runner arm {arm} ran the bind-mount cell");
-        }
-        None => eprintln!("P6: no runner arm (sudo -n, bwrap) available; the inode cell ran alone"),
-    }
     stop(daemon);
 }
 
