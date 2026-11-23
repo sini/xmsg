@@ -12,8 +12,9 @@ import Status from '../../../components/Status.astro';
 A discovery candidate is an address, not a peer identity or permission. A local hint may order
 candidates, but cannot admit a peer. The mDNS source ignores incoming `root` TXT claims and
 advertises rotating opaque handles, without identity names or root hashes. A candidate becomes a
-verified presence only after mutual TLS proves the exact configured certificate identity under its
-configured CA roots. Presence is keyed by the certificate's URI, never by an announcement's name.
+verified presence only after mutual TLS proves the exact configured identity: the certificate URI
+under the entry's configured CA roots, or the exact SPKI of a `pin` entry. Presence is keyed by
+that proven URI or SPKI digest, never by an announcement's name. <Status id="xmsg.discovery-pin" />
 
 Federation chooses an endpoint in this order:
 
@@ -135,10 +136,28 @@ example `--no-default-features --features daemon`), configuring `discovery.mdns`
 keeps the source off (`state: "off"`, detail `"not compiled into this build"`), and cannot justify
 an address-less peer entry.
 
-Address omission requires a CA entry with one exact URI identity and a source that is both
-configured and available in the build, except for the existing leaf and default-route cases. A pin
-alone or a wildcard identity pattern cannot enable address-less discovery. Pattern probing is
-outside this exact-identity core.
+Address omission requires an exact identity and a source that is both configured and available
+in the build, except for the existing leaf and default-route cases. An exact identity is a `pin`
+or a CA entry with one concrete URI; a wildcard identity pattern cannot enable address-less
+discovery, and pattern probing is outside this exact-identity core.
+<Status id="xmsg.discovery-pin" />
+
+```json
+{
+  "discovery": { "mdns": {} },
+  "peers": {
+    "laptop": {
+      "pin": "sha256:<64 hex characters of the laptop's SPKI SHA-256>",
+      "allow": ["send", "reply"]
+    }
+  }
+}
+```
+
+A `pin` names no CA root, so a pinned entry probes only candidates that carry no root hint. The
+pin verifier refuses any other key, so a different device answering at an address the pinned peer
+used before is refused, its presence evicted and the address negatively cached. A pinned entry
+keeps its existing date-independent admission; its presence lives at most ten minutes per proof.
 
 The standalone fleet collector has a separate client and configuration; this resolver does not
 silently add discovery to it. See [federation](/concepts/federation/) and the

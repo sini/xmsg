@@ -203,8 +203,9 @@ Each `peers` entry takes the same field names as an entry in the
 build time, and `observeLabels` (boolean, default `false`) emits `observe_labels = true` only
 when enabled and requires `"observe"` in `allow`. These limits apply:
 
-- **`address` has no default.** On a `leaf = true` entry the hub never dials the peer, so set
-  `address = "";`.
+- **`address` is optional.** Leave it unset on a `leaf = true` entry, which the hub never dials;
+  the rendered entry then has no `address` key. The bare-map form holds no `discovery` key, so
+  any other entry without an address is refused when the daemon loads the file.
 - **No `default_route` option.** The module cannot mark a default route.
 - **No `hub` block.** The module writes the bare-map form of the peers file, which cannot hold
   [hub admission](/concepts/federation/#hub-admission-hub).

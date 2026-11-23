@@ -190,7 +190,7 @@ HTTPS client are separate. See the [offboarding runbook](/operations/enrollment-
 
 | Field | Type | Description |
 |---|---|---|
-| `address` | `string` | The peer's `host:port` endpoint. Required, except on a `leaf: true` entry (the hub never dials it) or when another entry sets `default_route`. |
+| `address` | `string` | The peer's `host:port` endpoint. Required, except on a `leaf: true` entry (the hub never dials it), when another entry sets `default_route`, or on an exact-identity entry (a `pin`, or a `ca` entry with one identity) that an enabled [discovery](/concepts/discovery/#the-discovery-key-and-source-availability) source can find. |
 | `pin` | `string` (optional) | Expected SHA-256 certificate fingerprint (`sha256:...`). Mutually exclusive with `ca`. |
 | `ca` | `string` (optional) | Path to PEM trust anchor bundle. Mutually exclusive with `pin`; requires `identities`. |
 | `identities` | `list[string]` (optional) | Single concrete SPIFFE URI SAN (`["spiffe://..."]`). Required with `ca`. |
@@ -451,7 +451,7 @@ header can select or stamp an origin. See [collector relay setup](/operations/fl
 
 <Status id="xmsg.discovery" />
 
-The [discovery core](/concepts/discovery/) keeps configured addresses authoritative, then verifies candidate addresses against an exact configured CA identity. Announcements do not grant admission. Core-only builds keep the unimplemented source off; address-less onboarding requires the later source integration. Existing leaf mailboxes and applicable hub forwarding retain their semantics.
+The [discovery core](/concepts/discovery/) keeps configured addresses authoritative, then verifies candidate addresses against an exact configured identity: one CA URI, or an SPKI pin. Announcements do not grant admission. Core-only builds keep the unimplemented source off; address-less onboarding requires the later source integration. Existing leaf mailboxes and applicable hub forwarding retain their semantics.
 
 ## Remote session locators
 

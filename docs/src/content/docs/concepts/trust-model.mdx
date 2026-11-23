@@ -217,6 +217,36 @@ Google device support remains unverified until owner-run real-provider acceptanc
 These certificates authenticate a peer. They do not turn its messages into
 instructions or isolate hostile processes within the same UID.
 
+## Planned: manual pairing grants
+
+<Status id="xmsg.pairing" />
+
+Manual pairing authorizes a device by its full key, exchanged out of band, with no CA, account or
+hub. A device ID is `xmsg-spki1:` followed by 52 lowercase base32 characters of the SHA-256 of
+its DER SPKI; a peers-file `pin` names the same digest in hex. Discovery still supplies only
+addresses. These rules hold once the pairing ceremony and its local controls arrive:
+
+- **One grant, one decision.** A grant carries both its scope and its own provenance. A request
+  is allowed only when a single grant permits it, so an expired grant's scope cannot be combined
+  with another grant's fresh provenance, and two partial grants never add up to one permission.
+- **Two fixed profiles.** `contact` permits send and reply, with their own reply polls and
+  attachments. `owner-device` also permits session listing. Neither permits observe,
+  forwarding, relaying, handoff or administration. A grant's exposure policy names the targets
+  and principals it reaches and its size limits; an empty target list grants no data.
+- **Removal is permanent for that grant.** Removing a grant records its ID for good: a retried,
+  cached or delayed activation of it fails, before or after a restart, and the ID is never
+  reused. A later, deliberate pairing creates a new grant.
+- **A device block dominates.** A block on a device ID stops every grant and pinned entry for it,
+  refuses new pairing with it, and survives restarts until it is lifted.
+- **Existing pins stay as they are.** Each pinned peers-file entry is recorded as a
+  `legacy_unilateral` grant with its exact `allow`, `targets`, `principals`, `from` and `leaf`
+  values, and stays valid only while the peers file holds that exact entry. It gains no profile
+  right and is not reported as mutual. Pairing a device that already has a pin adds a separate
+  grant; replacing the pin is a separate, explicit action.
+
+Until the ceremony lands, no command creates, removes or blocks a pairing grant: pinned and CA
+entries in the peers file, and its `deny` list, remain the whole of federation admission.
+
 ## Observation boundary
 
 <Status id="fleet-observer.collector" />
@@ -238,4 +268,4 @@ reader is added.
 
 <Status id="xmsg.discovery" />
 
-A discovery announcement supplies only an address and optional ordering hints. The application connection retains the exact configured identity verifier used for the TLS proof, and presence is keyed by the actual certificate URI. A reloaded policy invalidates older proofs. This does not widen incoming admission or implement pattern probing. The standalone collector client remains outside daemon discovery; see [peer discovery](/concepts/discovery/).
+A discovery announcement supplies only an address and optional ordering hints. The application connection retains the exact configured identity verifier used for the TLS proof, and presence is keyed by the actual certificate URI or, for a pinned entry, the exact SPKI digest <Status id="xmsg.discovery-pin" />. A reloaded policy invalidates older proofs. This does not widen incoming admission or implement pattern probing. The standalone collector client remains outside daemon discovery; see [peer discovery](/concepts/discovery/).

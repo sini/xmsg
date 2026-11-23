@@ -211,6 +211,20 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [{ path: 'src/discovery/mod.rs', anchor: 'pub struct CandidateTable' }],
 	},
+	'xmsg.discovery-pin': {
+		id: 'xmsg.discovery-pin',
+		title: 'Address-less discovery for exact-SPKI pinned entries',
+		owner: 'sini',
+		evidence: [{ path: 'src/discovery/dial.rs', anchor: 'pub(crate) fn exact_identity' }],
+	},
+	'xmsg.pairing': {
+		id: 'xmsg.pairing',
+		title: 'Manual exact-SPKI pairing grants',
+		owner: 'sini',
+		evidence: [{ path: 'src/pairing/ceremony.rs', anchor: 'xmsg-pair/1' }],
+		plannedSince: '2026-11-23',
+		note: 'The grant store and one-grant authorization exist; nothing creates a grant until the pairing ceremony lands.',
+	},
 	'xmsg.peer-mailbox': {
 		id: 'xmsg.peer-mailbox',
 		title: 'Bounded per-leaf stored peer_mailbox',
