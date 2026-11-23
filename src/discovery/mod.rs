@@ -85,8 +85,10 @@ struct RawConfig {
     ttl_secs: Option<u64>,
 }
 
-pub(crate) fn permits_address_omission(has_ca: bool, source_enabled: bool) -> bool {
-    has_ca && source_enabled
+/// An entry may omit `address` only when it names one exact identity (an exact-SPKI pin, or a
+/// CA entry with one concrete URI) and an enabled source can find it.
+pub(crate) fn permits_address_omission(exact_identity: bool, source_enabled: bool) -> bool {
+    exact_identity && source_enabled
 }
 
 impl Config {
@@ -256,6 +258,23 @@ impl CandidateTable {
         let mut out: Vec<Candidate> = self
             .live(now)
             .filter(|c| c.root_fp.is_none_or(|fp| &fp == rule_root))
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| {
+            b.hint
+                .is_some()
+                .cmp(&a.hint.is_some())
+                .then(b.seen_at.cmp(&a.seen_at))
+        });
+        out
+    }
+
+    /// Candidates with no root hint, the only ones an exact-SPKI rule may probe.
+    /// Order: hinted first, then newest seen_at.
+    pub fn unrooted(&self, now: Instant) -> Vec<Candidate> {
+        let mut out: Vec<Candidate> = self
+            .live(now)
+            .filter(|c| c.root_fp.is_none())
             .cloned()
             .collect();
         out.sort_by(|a, b| {
@@ -611,11 +630,11 @@ mod tests {
     }
 
     #[test]
-    fn address_omission_requires_ca_and_an_available_source() {
+    fn address_omission_requires_an_exact_identity_and_an_available_source() {
         assert!(permits_address_omission(true, true));
         assert!(
             !permits_address_omission(false, true),
-            "pin-only entry accepted source-dependent omission"
+            "entry without an exact identity accepted source-dependent omission"
         );
         assert!(
             !permits_address_omission(true, false),

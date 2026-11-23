@@ -88,10 +88,13 @@ async fn connect(
     })
 }
 
-fn exact_uri(peer: &PeerConfig) -> Option<&str> {
-    if peer.pin.is_some() {
-        return None;
+/// The one exact identity a rule can be discovered by, which also keys its presence: the
+/// normalized SPKI pin of a pinned entry, or the single concrete URI of a CA entry.
+pub(crate) fn exact_identity(peer: &PeerConfig) -> Option<&str> {
+    if let Some(pin) = &peer.pin {
+        return (peer.ca.is_none() && peer.identities.is_none()).then_some(pin.as_str());
     }
+    peer.ca.as_ref()?;
     match peer.identities.as_deref()? {
         [uri] if !uri.contains('*') => Some(uri),
         _ => None,
@@ -104,6 +107,10 @@ fn candidates(fs: &FedState, peer: &PeerConfig, policy: &PeersMap, now: Instant)
         .candidates
         .read()
         .unwrap_or_else(|e| e.into_inner());
+    if peer.pin.is_some() {
+        // A pin names no CA root, so only a candidate without a root hint can be probed.
+        return table.unrooted(now);
+    }
     eligible_candidates(&table, policy.discovery_roots(&peer.name), now)
 }
 
@@ -127,8 +134,16 @@ fn eligible_candidates(
     eligible
 }
 
-fn witness(tls: &TlsStream<TcpStream>) -> Option<(String, i64)> {
+fn witness(tls: &TlsStream<TcpStream>, peer: &PeerConfig) -> Option<(String, i64)> {
     let leaf = tls.get_ref().1.peer_certificates()?.first()?;
+    if let Some(pin) = &peer.pin {
+        // The pin verifier already refused any other key; re-derive it so presence is keyed
+        // by the key actually proven. Pin mode ignores certificate expiry, so the proof is
+        // bounded only by the presence TTL.
+        let actual = crate::fed::spki_sha256_from_der(leaf.as_ref()).ok()?;
+        let not_after = crate::storage::now_epoch_secs().checked_add(super::MAX_TTL_SECS as i64)?;
+        return (crate::fed::normalize_pin(&actual) == *pin).then_some((actual, not_after));
+    }
     let uris = crate::fed::extract_uri_sans(leaf.as_ref()).ok()?;
     let [uri] = uris.as_slice() else {
         return None;
@@ -155,7 +170,7 @@ async fn discovered(
     )
     .await
     .map_err(|_| AppError::PeerUnreachable("discovery handshake timed out".into()))??;
-    let (verified_uri, not_after) = witness(&tls)
+    let (verified_uri, not_after) = witness(&tls, peer)
         .ok_or_else(|| AppError::PeerRejected("discovery identity mismatch".into()))?;
     let now = Instant::now();
     let row = Presence {
@@ -191,9 +206,10 @@ pub async fn resolve_dial(fs: &FedState, peer: &PeerConfig) -> Result<Dial, AppE
 
 pub(crate) async fn prepare_send(fs: &FedState, name: &str) -> Result<Option<Dial>, AppError> {
     let policy = fs.current_peers();
-    let Some(peer) = policy.get(name).filter(|peer| {
-        !peer.leaf && peer.address.is_empty() && peer.ca.is_some() && exact_uri(peer).is_some()
-    }) else {
+    let Some(peer) = policy
+        .get(name)
+        .filter(|peer| !peer.leaf && peer.address.is_empty() && exact_identity(peer).is_some())
+    else {
         return Ok(None);
     };
     resolve_with_policy(fs, peer.clone(), policy)
@@ -215,7 +231,7 @@ async fn resolve_with_policy(
             });
     }
     let work = async {
-        if let Some(uri) = exact_uri(&peer) {
+        if let Some(uri) = exact_identity(&peer) {
             let cached = fs
                 .with_discovery_policy(&policy, || {
                     fs.discovery.lookup(
@@ -309,7 +325,7 @@ pub fn is_direct(fs: &FedState, peer: &PeerConfig) -> bool {
     if !peer.address.is_empty() {
         return true;
     }
-    let Some(uri) = exact_uri(peer) else {
+    let Some(uri) = exact_identity(peer) else {
         return false;
     };
     let policy = fs.current_peers();
@@ -422,7 +438,9 @@ pub fn spawn_sweep(fs: &Arc<FedState>) -> tokio::task::JoinHandle<()> {
             }
             let mut peers = policy
                 .values()
-                .filter(|peer| !peer.leaf && peer.address.is_empty() && exact_uri(peer).is_some())
+                .filter(|peer| {
+                    !peer.leaf && peer.address.is_empty() && exact_identity(peer).is_some()
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             peers.sort_by(|a, b| a.name.cmp(&b.name));

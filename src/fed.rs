@@ -1555,10 +1555,11 @@ impl PeersMap {
                 && address.is_empty()
                 && !has_default_route
                 && !crate::discovery::permits_address_omission(
-                    has_ca
-                        && identities
-                            .as_deref()
-                            .is_some_and(|ids| matches!(ids, [uri] if !uri.contains('*'))),
+                    has_pin
+                        || (has_ca
+                            && identities
+                                .as_deref()
+                                .is_some_and(|ids| matches!(ids, [uri] if !uri.contains('*')))),
                     discovery.source_enabled(crate::discovery::Source::Mdns),
                 )
             {

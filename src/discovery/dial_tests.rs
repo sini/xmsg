@@ -79,6 +79,11 @@ struct Fixture {
 
 impl Fixture {
     fn new(ca: &Ca, entries: &[(&str, Option<String>)]) -> Self {
+        Self::with_pins(ca, entries, &[])
+    }
+
+    /// Adds address-less pinned entries `(nickname, pin)` beside the CA entries.
+    fn with_pins(ca: &Ca, entries: &[(&str, Option<String>)], pins: &[(&str, &str)]) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let root = tempfile::tempdir().unwrap();
         let ca_file = root.path().join("ca.pem");
@@ -97,6 +102,9 @@ impl Fixture {
                 entry["address"] = Value::String(address.clone());
             }
             peers.insert((*node).into(), entry);
+        }
+        for (name, pin) in pins {
+            peers.insert((*name).into(), json!({"pin":pin,"allow":["send"]}));
         }
         let peers = PeersMap::load_from_json(&json!({"peers":peers}).to_string()).unwrap();
         let connection = rusqlite::Connection::open_in_memory().unwrap();
@@ -509,16 +517,189 @@ fn unavailable_discovery_cannot_permit_addressless_entries_or_malformed_addresse
     let error = PeersMap::load_from_json(&config(multi, mdns_on.clone())).unwrap_err();
     assert!(error.contains("holds exactly one identity"), "{error}");
 
+    // An exact-SPKI pin is an exact identity: it may omit `address` exactly when a source is on.
     let (_, _, pin) = crate::fed::generate_self_signed_ed25519("pinned").unwrap();
     let pinned = json!({"pin":pin,"allow":["send"]});
-    let error = PeersMap::load_from_json(
-        &json!({"peers":{"pinned":pinned},"discovery":mdns_on}).to_string(),
-    )
-    .unwrap_err();
+    for (discovery, permitted) in [
+        (mdns_on, cfg!(feature = "mdns")),
+        (json!(null), false),
+        (json!({"mdns":{"browse":false,"announce":false}}), false),
+    ] {
+        let res = PeersMap::load_from_json(
+            &json!({"peers":{"pinned":pinned.clone()},"discovery":discovery}).to_string(),
+        );
+        if permitted {
+            assert!(
+                res.is_ok(),
+                "address-less pin refused with a source on: {res:?}"
+            );
+        } else {
+            let error = res.unwrap_err();
+            assert!(
+                error.contains("missing required field 'address'"),
+                "{error}"
+            );
+        }
+    }
+}
+
+fn pinned_identity() -> (Identity, String) {
+    let (cert, key, pin) = crate::fed::generate_self_signed_ed25519("pinned-device").unwrap();
+    (Identity { cert, key }, crate::fed::normalize_pin(&pin))
+}
+
+#[tokio::test]
+async fn pin_only_rule_is_dialled_and_keyed_by_its_exact_spki() {
+    let ca = Ca::new();
+    let (identity, pin) = pinned_identity();
+    let fixture = Fixture::with_pins(&ca, &[], &[("laptop", &pin)]);
+    let server = Server::start(identity, &fixture.client_pin).await;
+    fixture.inject(&server, "opaque");
+    let peer = fixture.peer("laptop");
     assert!(
-        error.contains("missing required field 'address'"),
-        "{error}"
+        is_direct(&fixture.fs, &peer),
+        "address-less pin rule saw no candidate"
     );
+    let dial = resolve_dial(&fixture.fs, &peer)
+        .await
+        .unwrap()
+        .into_direct()
+        .expect("pin-only rule was not dialled");
+    let actual =
+        crate::fed::spki_sha256_from_der(dial.get_ref().1.peer_certificates().unwrap()[0].as_ref())
+            .unwrap();
+    assert_eq!(actual, pin);
+    let policy = fixture.fs.current_peers();
+    let now = crate::storage::now_epoch_secs();
+    assert!(
+        fixture
+            .fs
+            .discovery
+            .lookup(&pin, "laptop", &policy, Instant::now(), now)
+            .is_some(),
+        "verified pin presence was not keyed by its SPKI"
+    );
+    assert!(
+        fixture
+            .fs
+            .discovery
+            .lookup("opaque", "laptop", &policy, Instant::now(), now)
+            .is_none(),
+        "untrusted hint keyed a pin presence"
+    );
+    assert!(
+        prepare_send(&fixture.fs, "laptop").await.unwrap().is_some(),
+        "send preparation skipped the address-less pin rule"
+    );
+}
+
+#[tokio::test]
+async fn pin_rule_refuses_another_key_at_a_reused_address() {
+    let ca = Ca::new();
+    let (identity, pin) = pinned_identity();
+    let (other, other_pin) = pinned_identity();
+    let fixture = Fixture::with_pins(&ca, &[], &[("laptop", &pin)]);
+    let genuine = Server::start(identity, &fixture.client_pin).await;
+    let impostor = Server::start(other, &fixture.client_pin).await;
+    let policy = fixture.fs.current_peers();
+    let peer = fixture.peer("laptop");
+    let candidate = fixture.inject(&genuine, "opaque");
+    drop(
+        discovered(&fixture.fs, &peer, &policy, candidate)
+            .await
+            .unwrap(),
+    );
+    // The address now answers with a different key, as when a DHCP lease is reused.
+    let mut moved = fixture
+        .fs
+        .discovery
+        .lookup(
+            &pin,
+            "laptop",
+            &policy,
+            Instant::now(),
+            crate::storage::now_epoch_secs(),
+        )
+        .unwrap()
+        .candidate;
+    fixture
+        .fs
+        .discovery
+        .candidates
+        .write()
+        .unwrap()
+        .clear_source(Source::Mdns);
+    moved.addr = impostor.address;
+    let now = Instant::now();
+    moved.seen_at = now;
+    moved.expires_at = now + Duration::from_secs(60);
+    fixture
+        .fs
+        .discovery
+        .candidates
+        .write()
+        .unwrap()
+        .inject_for_test(moved.clone());
+    let presence = super::super::state::Presence {
+        uri: pin.clone(),
+        rule: "laptop".into(),
+        policy: policy.clone(),
+        candidate: moved.clone(),
+        verified_at: now,
+        expires_at: moved.expires_at,
+        not_after: crate::storage::now_epoch_secs() + 60,
+    };
+    assert!(fixture.fs.discovery.record_verified(
+        presence,
+        &policy,
+        now,
+        crate::storage::now_epoch_secs()
+    ));
+    let dial = resolve_dial(&fixture.fs, &peer).await.unwrap();
+    assert_eq!(
+        dial.via_hub(),
+        Some("hub"),
+        "a different key at the remembered address became the pinned peer"
+    );
+    assert_eq!(impostor.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(impostor.requests.load(Ordering::SeqCst), 0);
+    let now_wall = crate::storage::now_epoch_secs();
+    assert!(fixture
+        .fs
+        .discovery
+        .lookup(&pin, "laptop", &policy, Instant::now(), now_wall)
+        .is_none());
+    assert!(fixture
+        .fs
+        .discovery
+        .lookup(&other_pin, "laptop", &policy, Instant::now(), now_wall)
+        .is_none());
+    assert!(fixture
+        .fs
+        .discovery
+        .is_negative(impostor.address, "laptop", &policy, Instant::now()));
+}
+
+#[tokio::test]
+async fn pin_rule_never_probes_a_root_hinted_candidate() {
+    let ca = Ca::new();
+    let (identity, pin) = pinned_identity();
+    let fixture = Fixture::with_pins(&ca, &[], &[("laptop", &pin)]);
+    let server = Server::start(identity, &fixture.client_pin).await;
+    let mut candidate = fixture.inject(&server, "opaque");
+    candidate.root_fp = Some([7; 32]);
+    fixture
+        .fs
+        .discovery
+        .candidates
+        .write()
+        .unwrap()
+        .inject_for_test(candidate);
+    let dial = resolve_dial(&fixture.fs, &fixture.peer("laptop"))
+        .await
+        .unwrap();
+    assert_eq!(dial.via_hub(), Some("hub"));
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

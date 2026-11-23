@@ -288,15 +288,9 @@ impl State {
 }
 
 fn configured_exact_rule(policy: &PeersMap, rule: &str) -> bool {
-    policy.get(rule).is_some_and(|peer| {
-        peer.name == rule
-            && peer.pin.is_none()
-            && peer.ca.is_some()
-            && peer
-                .identities
-                .as_deref()
-                .is_some_and(|ids| matches!(ids, [uri] if !uri.contains('*')))
-    })
+    policy
+        .get(rule)
+        .is_some_and(|peer| peer.name == rule && super::dial::exact_identity(peer).is_some())
 }
 
 fn prune_attempts(tables: &mut Tables, policy: &Arc<PeersMap>, active: &HashSet<SocketAddr>) {
