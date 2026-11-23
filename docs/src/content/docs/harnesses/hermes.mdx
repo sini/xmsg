@@ -84,6 +84,11 @@ switch links the plugin into `services.hermes-agent.extraPlugins`, adds `"xmsg"`
 `settings.plugins.enabled`, enables `allow_gateway_injection` and installs the `xmsg` skill. See
 [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).
 
+With [`programs.xmsg.server.sockets.dir`](/operations/nixos-and-home-manager/#a-stable-socket-directory)
+set, the switch also sets `XMSG_REGISTER_SOCK`, `XMSG_AGENT_SOCK` and `XMSG_HTTP_SOCK` in
+`services.hermes-agent.environment`. Hermes loads them from `$HERMES_HOME/.env` at each start, the
+gateway service included.
+
 ## Session locator
 
 The [session locator](/reference/cli-and-mcp/#locating-a-session) captures the

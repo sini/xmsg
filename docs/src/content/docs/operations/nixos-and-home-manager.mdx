@@ -32,7 +32,8 @@ To install the CLI and the harness integrations without a local `xmsg serve` dae
 | Option | CLI Flag | Default |
 |---|---|---|
 | `programs.xmsg.package` | — | `inputs.xmsg.packages.${system}.default` |
-| `programs.xmsg.server.httpSocket` | `--http-sock` | `$XDG_RUNTIME_DIR/xmsg/http.sock` (on macOS, the Darwin user temp directory, `getconf DARWIN_USER_TEMP_DIR`) |
+| `programs.xmsg.server.httpSocket` | `--http-sock` | `http.sock` in the managed directory `xmsg-<uid>-<12hex>/` (see [the socket reference](/reference/http-and-sockets/)); conflicts with `sockets.dir` |
+| `programs.xmsg.server.sockets.dir` | `--http-sock`, `--agent-sock`, `--register-sock` under one directory | `null` (the managed directory) |
 | `programs.xmsg.server.agyExe` | `--agy-exe` (repeated, optional pin) | `programs.antigravity-cli.package`'s `bin/agy` when `harnesses.agy.enable = true` |
 | `programs.xmsg.server.codexExe` | `--codex-exe` (repeated) | `programs.codex.package`'s `bin/codex` when `harnesses.codex.enable = true` |
 | `programs.xmsg.server.codexHome` | `--codex-home` (repeated) | `[ "${config.home.homeDirectory}/.codex" ]` |
@@ -41,6 +42,50 @@ To install the CLI and the harness integrations without a local `xmsg serve` dae
 | `programs.xmsg.server.sessionsDirs` | `XMSG_SESSIONS_DIR` (colon-joined) | `[ "${config.home.homeDirectory}/.claude/sessions" ]` |
 | `programs.xmsg.server.extraSessionsDirs` | appended to `sessionsDirs` | `[ ]` |
 | `programs.xmsg.server.stableExecutable` | — (macOS only) | `"${config.xdg.dataHome}/xmsg/serve/xmsg"` |
+
+## A stable socket directory
+
+<Status id="nixos.module-options" />
+
+By default the daemon's sockets live in its managed directory, `xmsg-<uid>-<12hex>/`, whose name
+depends on the state root. Set `programs.xmsg.server.sockets.dir` only where a consumer needs the
+socket paths when its unit is generated, such as a sandboxed service that bind-mounts the
+directory. Leave it unset everywhere else.
+
+```nix
+programs.xmsg.server.sockets.dir = "/run/user/1000/xmsg-sockets";
+```
+
+The value is an absolute, owner-private directory. The module renders its three sockets,
+`<dir>/{http,agent,register}.sock`, into every consumer it generates:
+
+| Consumer | How it receives the paths |
+| --- | --- |
+| `xmsg serve` | `--http-sock`, `--agent-sock`, `--register-sock` |
+| Every MCP entry (Claude Code, Antigravity, Codex) | `xmsg mcp --agent-sock <dir>/agent.sock --http-sock <dir>/http.sock` |
+| Claude Code hooks | `register claude --hook --sock <dir>/agent.sock`; `activity hook claude --sock <dir>/agent.sock` |
+| Antigravity hooks (all three events) | `register agy --hook --sock <dir>/register.sock --agent-sock <dir>/agent.sock` |
+| Codex hooks | `register codex --hook --sock <dir>/agent.sock` |
+| `execServices` | `XMSG_REGISTER_SOCK`, `XMSG_AGENT_SOCK`, `XMSG_HTTP_SOCK` in the unit or agent environment |
+| pi, opencode plugins | the installed file sets `XMSG_*_SOCK` unless the harness's environment already sets them |
+| hermes plugin | `services.hermes-agent.environment`, which hermes loads from `$HERMES_HOME/.env` |
+| Login shells | `XMSG_HTTP_SOCK`, `XMSG_AGENT_SOCK`, `XMSG_REGISTER_SOCK` in `home.sessionVariables` |
+
+The pins are not added to `systemd.user.sessionVariables`: no user-manager process needs them
+ambiently. A service you add yourself that starts an agent session must set them in its own
+environment.
+
+Evaluation refuses a relative path, a `<dir>/register.sock` longer than a socket path holds (107
+bytes on Linux, 103 on macOS), and the option together with `server.httpSocket`.
+
+**Shell pins outrank `--db-path`.** In a pinned deployment's shells, the exported `XMSG_*_SOCK`
+are explicit socket settings, and an explicit socket wins over a database selection. So a shell
+client given `--db-path` or `XMSG_DB_PATH` for another state root still reaches the pinned daemon,
+unless it passes that root's socket flags. To run a second profile from such a shell, give it its
+own socket flags. A shell opened before the switch has no pins until the next login;
+`xmsg doctor` names them (see
+[moving to a pinned socket directory](/operations/runtime-and-systemd/#moving-to-a-pinned-socket-directory),
+which also gives the cutover order and the rollback).
 
 ## macOS: a stable daemon executable
 

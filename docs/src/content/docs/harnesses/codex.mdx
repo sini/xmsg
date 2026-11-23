@@ -147,9 +147,12 @@ This behavior was measured with Codex 0.167.0 and matches its
 - It installs `${xdg.dataHome}/xmsg/bin/xmsg`.
 - It configures `programs.codex.skills.xmsg` and `programs.codex.settings.mcp_servers.xmsg`.
 - It adds `--codex-exe` and `--codex-home` to `xmsg serve`.
+- With [`programs.xmsg.server.sockets.dir`](/operations/nixos-and-home-manager/#a-stable-socket-directory)
+  set, the MCP server passes `--agent-sock` and `--http-sock` as arguments (Codex forwards only the
+  environment variable names in `env_vars`), and each hook passes `--sock <dir>/agent.sock`.
 - It exposes `programs.xmsg.harnesses.codex.hooks`:
 
-```nix file=<rootDir>/nix/modules/home-manager.nix#L41-L120
+```nix file=<rootDir>/nix/modules/home-manager.nix#L80-L165
 ```
 
 ## Session locator

@@ -183,6 +183,10 @@ server, the `xmsg` skill, the tool permission rules under `mcp__plugin_hm_xmsg__
 `mcp__xmsg__`, and all four subagent hooks. See
 [NixOS & Home Manager](/operations/nixos-and-home-manager/#per-harness-switches).
 
+With [`programs.xmsg.server.sockets.dir`](/operations/nixos-and-home-manager/#a-stable-socket-directory)
+set, the MCP entry passes `--agent-sock` and `--http-sock`, and the register and activity hooks pass
+`--sock <dir>/agent.sock`.
+
 ## Session locator
 
 The [session locator](/reference/cli-and-mcp/#locating-a-session) captures the
