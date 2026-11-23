@@ -611,6 +611,15 @@ fn darwin_peek(stream: &UnixStream, bytes: &mut [u8], expect_right: bool) -> io:
     Ok(count as usize)
 }
 
+#[cfg(all(test, target_os = "macos"))]
+type DarwinHook = Box<dyn FnOnce()>;
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static DARWIN_AFTER_PEEK: std::cell::Cell<Option<DarwinHook>> = const { std::cell::Cell::new(None) };
+    static DARWIN_AFTER_CONSUME: std::cell::Cell<Option<DarwinHook>> = const { std::cell::Cell::new(None) };
+    static DARWIN_CONSUME_SPY: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 fn receive(
     stream: &UnixStream,
     marker: u8,
@@ -628,6 +637,10 @@ fn receive(
             #[cfg(target_os = "macos")]
             let length = {
                 let length = darwin_peek(stream, &mut bytes, expect_fd && data.is_empty())?;
+                #[cfg(test)]
+                if let Some(hook) = DARWIN_AFTER_PEEK.take() {
+                    hook();
+                }
                 if length == 0 {
                     return Ok((0, Vec::new(), false));
                 }
@@ -657,6 +670,12 @@ fn receive(
             let flags = libc::MSG_DONTWAIT | libc::MSG_CMSG_CLOEXEC;
             #[cfg(not(target_os = "linux"))]
             let flags = libc::MSG_DONTWAIT;
+            #[cfg(all(test, target_os = "macos"))]
+            assert_ne!(
+                DARWIN_CONSUME_SPY.get(),
+                Some(data.is_empty()),
+                "Darwin consuming read reached an unapproved ancillary record"
+            );
             let count = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut message, flags) };
             if count < 0 {
                 return Err(io::Error::last_os_error());
@@ -703,6 +722,10 @@ fn receive(
             }
             if message.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {
                 malformed = true;
+            }
+            #[cfg(all(test, target_os = "macos"))]
+            if let Some(hook) = DARWIN_AFTER_CONSUME.take() {
+                hook();
             }
             Ok((count as usize, received, malformed))
         });
@@ -1065,6 +1088,11 @@ mod tests {
     }
 
     fn extra_fd_frame(client: &UnixStream, descriptors: &[RawFd], bytes: &[u8]) {
+        fixture_rights_record(client, descriptors, bytes);
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+    }
+
+    fn fixture_rights_record(client: &UnixStream, descriptors: &[RawFd], bytes: &[u8]) {
         let mut control = [0usize; 16];
         let mut vector = libc::iovec {
             iov_base: bytes.as_ptr().cast_mut().cast(),
@@ -1091,7 +1119,6 @@ mod tests {
                 bytes.len() as libc::ssize_t
             );
         }
-        client.shutdown(std::net::Shutdown::Write).unwrap();
     }
     #[test]
     fn attribution_extra_descriptors_are_rejected_and_all_closed() {
@@ -1116,6 +1143,8 @@ mod tests {
             ),
             "multiple original descriptors accepted"
         );
+        #[cfg(target_os = "macos")]
+        drop(server);
         assert!(
             matches!(first_peer.read(&mut [0]), Ok(0)),
             "first excess descriptor leaked"
@@ -1125,6 +1154,116 @@ mod tests {
             "second excess descriptor leaked"
         );
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_marker_multi_fd_refuses_before_consuming() {
+        let (send, receive) = UnixStream::pair().unwrap();
+        let first = std::fs::File::open("/dev/null").unwrap();
+        let second = std::fs::File::open("/dev/null").unwrap();
+        extra_fd_frame(
+            &send,
+            &[first.as_raw_fd(), second.as_raw_fd()],
+            &[QUERY_MARKER],
+        );
+        DARWIN_CONSUME_SPY.set(Some(true));
+        let result = receive_query(&receive, Instant::now() + Duration::from_secs(2));
+        DARWIN_CONSUME_SPY.set(None);
+        assert!(matches!(result, Err(FailureReason::Ancillary)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_later_rights_refuse_without_consuming() {
+        let (send, receive) = UnixStream::pair().unwrap();
+        let fd = std::fs::File::open("/dev/null").unwrap();
+        fixture_rights_record(&send, &[fd.as_raw_fd()], &[QUERY_MARKER]);
+        extra_fd_frame(&send, &[fd.as_raw_fd()], &[0]);
+        DARWIN_CONSUME_SPY.set(Some(false));
+        let result = receive_query(&receive, Instant::now() + Duration::from_secs(2));
+        DARWIN_CONSUME_SPY.set(None);
+        assert!(matches!(result, Err(FailureReason::Ancillary)));
+    }
+
+    #[cfg(target_os = "macos")]
+    fn receiving_fd_count() -> usize {
+        let mut entries: [libc::proc_fdinfo; 128] = unsafe { std::mem::zeroed() };
+        let capacity = std::mem::size_of_val(&entries);
+        let bytes = unsafe {
+            libc::proc_pidinfo(
+                libc::getpid(),
+                libc::PROC_PIDLISTFDS,
+                0,
+                entries.as_mut_ptr().cast(),
+                capacity as _,
+            )
+        };
+        let entry = std::mem::size_of::<libc::proc_fdinfo>();
+        assert!(
+            bytes > 0 && (bytes as usize) < capacity && bytes as usize % entry == 0,
+            "receiving FD counter not observable on this tuple"
+        );
+        bytes as usize / entry
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_record_boundary_and_fd_counter_sensitivity() {
+        const ROLE: &str = "XMSG_TEST_DARWIN_RECEIVE_COUNT";
+        if std::env::var_os(ROLE).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "client::caller_attribution::tests::darwin_record_boundary_and_fd_counter_sensitivity", "--nocapture"])
+                .env(ROLE, "fixture").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let sender = std::sync::Arc::new(sender);
+        let fd = std::fs::File::open("/dev/null").unwrap();
+        let later = std::sync::Arc::new(std::fs::File::open("/dev/null").unwrap());
+        fixture_rights_record(&sender, &[fd.as_raw_fd()], &[QUERY_MARKER]);
+        let sender_hook = sender.clone();
+        let later_hook = later.clone();
+        let baseline = receiving_fd_count();
+        DARWIN_AFTER_PEEK.set(Some(Box::new(move || {
+            fixture_rights_record(&sender_hook, &[later_hook.as_raw_fd()], &[0]);
+            DARWIN_AFTER_CONSUME.set(Some(Box::new(move || {
+                let owned = 1;
+                assert_eq!(
+                    receiving_fd_count() - owned,
+                    baseline,
+                    "unowned FD growth after consume"
+                );
+                let sensitivity = std::fs::File::open("/dev/null").unwrap();
+                assert_eq!(
+                    receiving_fd_count() - owned,
+                    baseline + 1,
+                    "FD counter missed its sensitivity control"
+                );
+                drop(sensitivity);
+                assert_eq!(receiving_fd_count() - owned, baseline);
+            })));
+        })));
+        assert!(matches!(
+            receive_query(&receiver, Instant::now() + Duration::from_secs(2)),
+            Err(FailureReason::Ancillary)
+        ));
+        assert_eq!(
+            receiving_fd_count(),
+            baseline,
+            "unowned FD growth after later-frame refusal"
+        );
+        assert!(
+            DARWIN_AFTER_CONSUME.take().is_none(),
+            "consume checkpoint was not observed"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn attribution_truncated_ancillary_closes_visible_and_hidden_rights() {
