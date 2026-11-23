@@ -149,6 +149,7 @@ export default defineConfig({
 						{ label: 'OCI & Docker', slug: 'operations/docker' },
 						{ label: 'Kubernetes & Helm', slug: 'operations/helm-and-kubernetes' },
 						{ label: 'macOS', slug: 'getting-started/macos' },
+						{ label: 'macOS Staging', slug: 'getting-started/macos-staging' },
 						{ label: 'Arch Linux', slug: 'getting-started/arch' },
 						{ label: 'Ubuntu', slug: 'getting-started/ubuntu' },
 						{ label: 'Fedora', slug: 'getting-started/fedora' },

@@ -162,6 +162,11 @@ client re-pins together):
   `<runtime>/identity.json`, the running daemon verifies its directory identity under the held
   state lock and re-stamps `identity.json` atomically on its periodic maintenance cadence
   (`reply_ttl.clamp(1, 600)` seconds) without restarting.
+- **macOS Homebrew staging & verified cache:** Planned (<Status id="xmsg.macos-staging" />) —
+  arm64 staging builds embed the source revision in a bounded Mach-O `__DATA,__xmsg_rev` section,
+  verify independent upstream GitHub run/artifact provenance before touching Homebrew, and retain
+  verified rollback bundles in `<state>/staging-cache`. See
+  [macOS Staging](/getting-started/macos-staging/).
 
 ## Persisted state & SQLite schema version
 
