@@ -307,10 +307,10 @@ jobs:
           controls = [
               (
                   "src/caller_attribution.rs",
-                  '    if cfg!(target_os = "macos") {\n        return Err(FailureReason::Unsupported);\n    }\n',
+                  '    #[cfg(target_os = "macos")]\n    eligibility(provider, &key)?;\n',
                   "",
                   "caller_attribution::darwin_tests::darwin_refuses_attribution_before_receiving_rights",
-                  "Darwin attribution must refuse before receiving rights:",
+                  "unqualified Darwin receiver consumed the query",
               ),
               (
                   "src/agy.rs",

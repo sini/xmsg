@@ -284,38 +284,7 @@ fn bind(
         stats,
     })
 }
-fn handle(
-    config: &ServerConfig,
-    state: &AppState,
-    provider: &dyn QualificationProvider,
-    stats: &ServerStats,
-    stream: &std::os::unix::net::UnixStream,
-    deadline: Instant,
-) -> Result<Reply, FailureReason> {
-    if wire::socket_peer(stream.as_fd())
-        .map_err(|_| FailureReason::PeerUid)?
-        .0
-        != config.expected_uid
-    {
-        return Err(FailureReason::PeerUid);
-    }
-    // XNU may install more rights than it reports when ancillary data is truncated.
-    if cfg!(target_os = "macos") {
-        return Err(FailureReason::Unsupported);
-    }
-    let (query, original) = wire::receive_query(stream, deadline)?;
-    wire::private_socket(&config.lifecycle_socket, config.expected_uid)?;
-    wire::original_endpoint(original.as_fd(), &config.lifecycle_socket)?;
-    let original_ids = wire::socket_peer(original.as_fd()).map_err(|_| FailureReason::PeerUid)?;
-    if original_ids.0 != config.expected_uid {
-        return Err(FailureReason::PeerUid);
-    }
-    let mut digest = Sha256::new();
-    digest.update(wire::CONTEXT_DOMAIN);
-    digest.update(wire::context_bytes(&query.context)?);
-    if hex::encode(digest.finalize()) != query.context_digest {
-        return Err(FailureReason::Context);
-    }
+fn runtime_key(config: &ServerConfig, state: &AppState) -> Result<RuntimeKey, FailureReason> {
     let mut native: libc::utsname = unsafe { std::mem::zeroed() };
     let kernel = if unsafe { libc::uname(&mut native) } == 0 {
         unsafe { std::ffi::CStr::from_ptr(native.release.as_ptr()) }
@@ -333,7 +302,7 @@ fn handle(
     };
     #[cfg(not(target_os = "linux"))]
     let pid_namespace = None;
-    let key = RuntimeKey {
+    Ok(RuntimeKey {
         os: std::env::consts::OS,
         arch: std::env::consts::ARCH,
         kernel,
@@ -342,7 +311,42 @@ fn handle(
         uid: config.expected_uid,
         node: state.node_name.clone(),
         lifecycle: config.lifecycle_socket.clone(),
-    };
+    })
+}
+fn handle(
+    config: &ServerConfig,
+    state: &AppState,
+    provider: &dyn QualificationProvider,
+    stats: &ServerStats,
+    stream: &std::os::unix::net::UnixStream,
+    deadline: Instant,
+) -> Result<Reply, FailureReason> {
+    if wire::socket_peer(stream.as_fd())
+        .map_err(|_| FailureReason::PeerUid)?
+        .0
+        != config.expected_uid
+    {
+        return Err(FailureReason::PeerUid);
+    }
+    #[cfg(target_os = "macos")]
+    let key = runtime_key(config, state)?;
+    #[cfg(target_os = "macos")]
+    eligibility(provider, &key)?;
+    let (query, original) = wire::receive_query(stream, deadline)?;
+    wire::private_socket(&config.lifecycle_socket, config.expected_uid)?;
+    wire::original_endpoint(original.as_fd(), &config.lifecycle_socket)?;
+    let original_ids = wire::socket_peer(original.as_fd()).map_err(|_| FailureReason::PeerUid)?;
+    if original_ids.0 != config.expected_uid {
+        return Err(FailureReason::PeerUid);
+    }
+    let mut digest = Sha256::new();
+    digest.update(wire::CONTEXT_DOMAIN);
+    digest.update(wire::context_bytes(&query.context)?);
+    if hex::encode(digest.finalize()) != query.context_digest {
+        return Err(FailureReason::Context);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let key = runtime_key(config, state)?;
     let facts = eligibility(provider, &key)?;
     let original_peer =
         crate::process::strict_peer_cred_from_fd(original.as_fd(), &state.agy_config.proc_root)?;
@@ -462,14 +466,27 @@ mod darwin_tests {
         let before = app.db.lock().unwrap().total_changes();
         let result = handle(&config, &app, &NoQualification, &stats, &worker, deadline);
         assert!(
-            matches!(result, Err(FailureReason::Unsupported)),
+            matches!(result, Err(FailureReason::Unqualified)),
             "Darwin attribution must refuse before receiving rights: {result:?}"
+        );
+        let mut marker = 0u8;
+        assert_eq!(
+            unsafe {
+                libc::recv(
+                    worker.as_raw_fd(),
+                    (&mut marker as *mut u8).cast(),
+                    1,
+                    libc::MSG_PEEK | libc::MSG_DONTWAIT,
+                )
+            },
+            1,
+            "unqualified Darwin receiver consumed the query"
         );
         wire::send_reply(
             &worker,
             &Reply::Unavailable {
                 v: wire::VERSION,
-                reason: FailureReason::Unsupported,
+                reason: FailureReason::Unqualified,
             },
             deadline,
         )
@@ -477,7 +494,7 @@ mod darwin_tests {
         assert!(matches!(
             wire::receive_reply(&caller, deadline),
             Ok(Reply::Unavailable {
-                reason: FailureReason::Unsupported,
+                reason: FailureReason::Unqualified,
                 ..
             })
         ));
