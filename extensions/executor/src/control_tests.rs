@@ -1894,6 +1894,7 @@ fn configured_runtime_with_empty_registry_has_zero_dispatch_effects() {
     let path = |name: &str| f._dir.path().join(name);
     let model = configuration.defaults[0].resolved.model.clone();
     let runtime = RuntimeConfig {
+        bus: None,
         launch_environment: Default::default(),
         version: 1,
         control: configuration,

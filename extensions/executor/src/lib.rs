@@ -4,6 +4,8 @@ pub mod acp;
 pub mod approval;
 pub mod capability;
 #[allow(dead_code)]
+mod content_delivery;
+#[allow(dead_code)]
 mod eligibility;
 pub mod framing;
 pub mod launch_environment;

@@ -67,6 +67,8 @@ pub struct RuntimeConfig {
     pub workspaces: Vec<WorkspaceConfig>,
     #[serde(default)]
     pub launch_environment: crate::launch_environment::LaunchEnvironment,
+    #[serde(default)]
+    pub bus: Option<crate::content::BusConfig>,
 }
 
 impl PinnedExecutable {
@@ -168,6 +170,7 @@ impl RuntimeConfig {
         let bytes = serde_json::to_vec(&(
             &self.paths,
             &self.launch_environment,
+            &self.bus,
             program,
             workspace,
             &resolved.harness,
@@ -183,6 +186,9 @@ impl RuntimeConfig {
 
     pub fn validate(&self) -> Result<(), ErrorCode> {
         self.launch_environment.validate()?;
+        if let Some(bus) = &self.bus {
+            bus.validate().map_err(invalid)?;
+        }
         self.control.validate()?;
         if self.version != 1 {
             return Err(ErrorCode::InvalidConfiguration);
@@ -410,6 +416,7 @@ mod tests {
             native_model_id: "fixture-native-model".into(),
         };
         let mut config = RuntimeConfig {
+            bus: None,
             version: 1,
             control: OwnerConfig {
                 revision: 1,
@@ -433,6 +440,22 @@ mod tests {
             launch_environment: Default::default(),
         };
         assert_eq!(config.validate(), Ok(()));
+        let mut old = serde_json::to_value(&config).unwrap();
+        old.as_object_mut().unwrap().remove("bus");
+        assert!(serde_json::from_value::<RuntimeConfig>(old)
+            .unwrap()
+            .bus
+            .is_none());
+        config.bus = Some(crate::content::BusConfig {
+            node: "fixture".into(),
+            register_socket: path("register"),
+            agent_socket: path("agent"),
+            auto_input: false,
+        });
+        assert_eq!(config.validate(), Ok(()));
+        config.bus.as_mut().unwrap().agent_socket = PathBuf::from("relative");
+        assert_eq!(config.validate(), Err(ErrorCode::InvalidConfiguration));
+        config.bus = None;
         config.programs.push(program);
         assert_eq!(config.validate(), Err(ErrorCode::InvalidConfiguration));
         config.programs.pop();

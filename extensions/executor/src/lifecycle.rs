@@ -198,7 +198,8 @@ impl Journal {
                 let key = serde_json::to_string(rpc.ok_or(ErrorCode::PendingMismatch)?)
                     .map_err(storage)?;
                 let changed=tx.execute("UPDATE native_operations SET state=?1 WHERE session_id=?2 AND generation=?3 AND transport_epoch=?4 AND rpc_id=?5 AND state='submitted' AND json_extract(command,'$.command')='prompt' AND json_extract(command,'$.turn_id')=?6",params![if qualified && !quiescence_unproven {"turn_ended"} else {"unknown"},native.identity.session_id,generation,native.transport_epoch,key,turn_id]).map_err(storage)?;
-                if changed != 1 {
+                let content_changed=tx.execute("UPDATE native_content SET state=?1 WHERE session_id=?2 AND generation=?3 AND transport_epoch=?4 AND rpc_id=?5 AND state='submitted' AND json_extract(command,'$.turn_id')=?6",params![if qualified && !quiescence_unproven {"turn_ended"} else {"unknown"},native.identity.session_id,generation,native.transport_epoch,key,turn_id]).map_err(storage)?;
+                if changed + content_changed != 1 {
                     return Err(ErrorCode::PendingMismatch);
                 }
                 tx.execute("UPDATE approvals SET consumed=1 WHERE session_id=?1 AND generation=?2 AND turn_id=?3",params![native.identity.session_id,generation,turn_id]).map_err(storage)?;
@@ -273,6 +274,7 @@ impl Journal {
         .map_err(storage)?;
         tx.execute("UPDATE executions SET state='unknown' WHERE session_id=?1 AND generation=?2 AND identity=?3 AND state!='stopped'",params![native.identity.session_id,integer(native.identity.generation)?,serde_json::to_string(&native.identity).map_err(storage)?]).map_err(storage)?;
         tx.execute("UPDATE native_operations SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('submitting','submitted')",params![native.identity.session_id,integer(native.identity.generation)?,native.transport_epoch]).map_err(storage)?;
+        tx.execute("UPDATE native_content SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('submitting','submitted')",params![native.identity.session_id,integer(native.identity.generation)?,native.transport_epoch]).map_err(storage)?;
         tx.execute("UPDATE approvals SET consumed=1 WHERE id IN(SELECT approval_id FROM native_pending WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('pending','decision_recorded'))",params![native.identity.session_id,integer(native.identity.generation)?,native.transport_epoch]).map_err(storage)?;
         tx.execute("UPDATE native_pending SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('pending','decision_recorded')",params![native.identity.session_id,integer(native.identity.generation)?,native.transport_epoch]).map_err(storage)?;
         tx.commit().map_err(storage)
@@ -753,6 +755,8 @@ fn mark_unknown(tx: &rusqlite::Transaction<'_>, native: &NativeBinding) -> Resul
     )
     .map_err(storage)?;
     tx.execute("UPDATE executions SET state='unknown' WHERE session_id=?1 AND generation=?2 AND state!='stopped'",params![native.identity.session_id,generation]).map_err(storage)?;
+    tx.execute("UPDATE native_operations SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('submitting','submitted')",params![native.identity.session_id,generation,native.transport_epoch]).map_err(storage)?;
+    tx.execute("UPDATE native_content SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('submitting','submitted')",params![native.identity.session_id,generation,native.transport_epoch]).map_err(storage)?;
     tx.execute("UPDATE approvals SET consumed=1 WHERE id IN(SELECT approval_id FROM native_pending WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('pending','decision_recorded'))",params![native.identity.session_id,generation,native.transport_epoch]).map_err(storage)?;
     tx.execute("UPDATE native_pending SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('pending','decision_recorded')",params![native.identity.session_id,generation,native.transport_epoch]).map_err(storage)?;
     Ok(())

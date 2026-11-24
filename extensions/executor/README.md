@@ -8,6 +8,8 @@ The startup channel is restored to close-on-exec before any adapter spawn. Nativ
 
 Owner launch environment is a bounded fixed search path plus an optional real account home validated against the current UID's passwd entry. Preflight lookup occurs outside journal locks; native executable overrides come from pinned program paths. This launch description is not proof of native effective settings, account limits or capability qualification.
 
+Optional owner `bus` configuration exposes only text `list`, `send` and `reply` through a separate execution-bound content socket. The SDK registration remains in the supervisor process. Sidecar initialization and tool discovery are local; SDK calls run on bounded dedicated tasks. Inbound automatic input additionally requires explicit `auto_input: true`: content is committed before ACK and gets its own durable native-delivery intent. A message's sender, origin, JSON or prose cannot create a lifecycle admission or human decision. Unknown transports keep queued content without rebinding or relaunching.
+
 ## Contracts
 
 `runtime_config::RuntimeConfig` describes owner-selected program paths and SHA256 pins, native modes, workspace bindings, service paths and separate credential-file references. Its bounded private-file reader and artifact verification do not execute programs or qualify runtime capabilities. Caller requests cannot replace those settings. Runtime activation remains unavailable until separately reviewed qualification records exist.

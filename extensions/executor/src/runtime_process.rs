@@ -167,15 +167,20 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
         expires,
     )?;
     finish_initialization(&mut reader, &mut driver, &id, &mut input, expires)?;
+    let mut content = RuntimeContent::prepare(configuration, &manifest)?;
+    let mcp_servers = content
+        .as_ref()
+        .map(|content| vec![content.descriptor.clone()])
+        .unwrap_or_default();
     let session = match load_native {
         Some(id) => crate::acp::Command::LoadSession {
             native_session_id: id.clone(),
             cwd: manifest.workspace.to_string_lossy().into_owned(),
-            mcp_servers: vec![],
+            mcp_servers: mcp_servers.clone(),
         },
         None => crate::acp::Command::NewSession {
             cwd: manifest.workspace.to_string_lossy().into_owned(),
-            mcp_servers: vec![],
+            mcp_servers,
         },
     };
     let id = initialize_command(
@@ -247,6 +252,7 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
         input,
         binding,
         expires,
+        content: content.take(),
     };
     crate::supervisor::frame_until(
         &mut startup,
@@ -336,6 +342,7 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
             }
         }
         session.schedule()?;
+        session.start_content()?;
     }
 }
 
@@ -546,8 +553,67 @@ struct Session {
     input: ChildStdin,
     binding: NativeBinding,
     expires: Instant,
+    content: Option<RuntimeContent>,
+}
+
+struct RuntimeContent {
+    config: crate::content::BusConfig,
+    listener: Option<std::os::unix::net::UnixListener>,
+    service: Option<crate::content::ContentServiceHandle>,
+    journal: std::path::PathBuf,
+    descriptor: serde_json::Value,
+}
+impl RuntimeContent {
+    fn prepare(
+        configuration: &RuntimeConfig,
+        manifest: &ChildManifest,
+    ) -> Result<Option<Self>, SupervisorError> {
+        let Some(config) = &configuration.bus else {
+            return Ok(None);
+        };
+        config
+            .validate()
+            .map_err(|_| ErrorCode::InvalidConfiguration)?;
+        let socket = manifest
+            .socket
+            .parent()
+            .ok_or(SupervisorError::Directory)?
+            .join("content.sock");
+        let listener = crate::unix::bind_private_socket(&socket)?;
+        let executable = std::env::current_exe()?;
+        let command = executable.to_str().ok_or(ErrorCode::InvalidConfiguration)?;
+        let socket_name = socket.to_str().ok_or(ErrorCode::InvalidConfiguration)?;
+        Ok(Some(Self {
+            config: config.clone(),
+            listener: Some(listener),
+            service: None,
+            journal: configuration.paths.journal.clone(),
+            descriptor: serde_json::json!({"name":"xmsg","command":command,"args":["content-mcp","--socket",socket_name],"env":[]}),
+        }))
+    }
 }
 impl Session {
+    fn start_content(&mut self) -> Result<(), SupervisorError> {
+        let Some(content) = &mut self.content else {
+            return Ok(());
+        };
+        if let Some(service) = &mut content.service {
+            let _ = service.status();
+            return Ok(());
+        }
+        let binding = match self.journal.proxy_binding(&self.binding.identity) {
+            Ok(binding) => binding,
+            Err(ErrorCode::StaleGeneration) => return Ok(()),
+            Err(code) => return Err(code.into()),
+        };
+        let store = Journal::open_existing(&content.journal)?;
+        let listener = content.listener.take().ok_or(SupervisorError::Unknown)?;
+        content.service = Some(
+            crate::content::start_content_service(content.config.clone(), binding, store, listener)
+                .map_err(|_| ErrorCode::Storage)?,
+        );
+        Ok(())
+    }
     fn hello(&mut self) -> Result<SupervisorHello, SupervisorError> {
         let cursor: i64 = self
             .journal
@@ -693,6 +759,22 @@ impl Session {
         let queued:Option<i64>=self.journal.db.query_row("SELECT n.admission_id FROM native_operations n JOIN admissions a ON a.id=n.admission_id WHERE n.session_id=?1 AND n.generation=?2 AND n.transport_epoch=?3 AND n.state='queued' ORDER BY CASE a.verb WHEN '\"interrupt\"' THEN 0 WHEN '\"steer\"' THEN 1 ELSE 2 END,n.admission_id LIMIT 1",rusqlite::params![self.binding.identity.session_id,i64::try_from(self.binding.identity.generation).map_err(|_|ErrorCode::Storage)?,self.binding.transport_epoch],|r|r.get(0)).optional().map_err(|_|ErrorCode::Storage)?;
         if let Some(id) = queued {
             let _ = self.submit(id);
+        }
+        if self
+            .content
+            .as_ref()
+            .is_some_and(|content| content.config.auto_input)
+        {
+            let mut writer = DeadlineIo::new(
+                &mut self.input,
+                self.expires.min(Instant::now() + Duration::from_secs(2)),
+            )?;
+            let _ = self.journal.submit_content(
+                &self.binding,
+                &mut self.driver,
+                &unix_now,
+                &mut writer,
+            );
         }
         Ok(())
     }
