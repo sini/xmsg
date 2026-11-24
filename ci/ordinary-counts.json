@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "main 26bcc7e9ca9d7541b4f9559edb1c7663f90b5341 counts plus the two leaf reply tests: +2 passed measured in PR #298 job 138092103736, Nix ordinary",
-    "darwin": "main 26bcc7e9ca9d7541b4f9559edb1c7663f90b5341 counts plus the two leaf reply tests: +2 passed measured in PR #298 job 138083566537, darwin Nix ordinary"
+    "linux": "main ea825d4d7c9ebe294b31ab336981996a848c7d93 counts plus sp13_eligible_current_connection_states: +1 passed measured in PR #314 job 138519967421, Nix ordinary",
+    "darwin": "main ea825d4d7c9ebe294b31ab336981996a848c7d93 counts plus sp13_eligible_current_connection_states: +1 passed measured in PR #314 job 138512210214, darwin Nix ordinary"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -127,13 +127,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1852,
+      "passed": 1853,
       "failed": 0,
       "ignored": 12,
       "summaries": 123
     },
     "darwin": {
-      "passed": 1837,
+      "passed": 1838,
       "failed": 0,
       "ignored": 12,
       "summaries": 123

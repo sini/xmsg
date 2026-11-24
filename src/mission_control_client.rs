@@ -182,6 +182,17 @@ async fn device_grant(args: &Args) -> Result<String, Error> {
     }
 }
 
+fn is_eligible_current(node: &codec::Node) -> bool {
+    !matches!(
+        node.status,
+        codec::Status::RemovedRetained
+            | codec::Status::Loading
+            | codec::Status::Denied
+            | codec::Status::UnsupportedOutboundOnly
+            | codec::Status::UnsupportedTransport
+    )
+}
+
 fn handle_valid(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 512
@@ -256,14 +267,31 @@ impl View {
         {
             return Connection::Unknown;
         }
-        if self
-            .nodes
-            .values()
-            .any(|node| node.delivery == Delivery::Delayed)
-        {
+        let mut any_eligible = false;
+        let mut any_eligible_delayed = false;
+        let mut any_in_view_delayed = false;
+        for node in self.nodes.values() {
+            if is_eligible_current(node) {
+                any_eligible = true;
+                if node.delivery == Delivery::Delayed {
+                    any_eligible_delayed = true;
+                }
+            } else if node.status != codec::Status::RemovedRetained
+                && node.delivery == Delivery::Delayed
+            {
+                any_in_view_delayed = true;
+            }
+        }
+        if any_eligible {
+            if any_eligible_delayed {
+                Connection::Delayed
+            } else {
+                Connection::Live
+            }
+        } else if any_in_view_delayed {
             Connection::Delayed
         } else {
-            Connection::Live
+            Connection::Unknown
         }
     }
 
@@ -607,11 +635,29 @@ mod tests {
     #[test]
     fn tick_is_not_an_event_and_proxy_refusal_is_terminal() {
         let now = Instant::now();
+        let live_node = codec::Node {
+            node: "live-current".into(),
+            status: codec::Status::Healthy,
+            delivery: Delivery::Live,
+            last_success_at: Some(1000),
+            last_source_at: Some(1000),
+            via_hub: None,
+            history_hidden: false,
+            last_activity_at: None,
+            activity_authority: None,
+            endpoints: Vec::new(),
+            endpoints_truncated: false,
+            exchanges: Vec::new(),
+            source_gaps: Vec::new(),
+        };
+        let mut nodes = BTreeMap::new();
+        nodes.insert(live_node.node.clone(), live_node);
         let mut view = View {
             open: true,
             synced: true,
             last_message: Some(now),
             last_event: Some(now),
+            nodes,
             ..View::default()
         };
         view.apply(
@@ -660,6 +706,91 @@ mod tests {
                 response
             ))));
         }
+    }
+
+    fn test_node(name: &str, status: codec::Status, delivery: Delivery) -> codec::Node {
+        codec::Node {
+            node: name.into(),
+            status,
+            delivery,
+            last_success_at: None,
+            last_source_at: None,
+            via_hub: None,
+            history_hidden: false,
+            last_activity_at: None,
+            activity_authority: None,
+            endpoints: Vec::new(),
+            endpoints_truncated: false,
+            exchanges: Vec::new(),
+            source_gaps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sp13_eligible_current_connection_states() {
+        let now = Instant::now();
+        let synced_view = |nodes: Vec<codec::Node>| View {
+            open: true,
+            synced: true,
+            last_message: Some(now),
+            last_event: Some(now),
+            nodes: nodes.into_iter().map(|n| (n.node.clone(), n)).collect(),
+            ..View::default()
+        };
+
+        // Empty fleet -> Unknown (never Live).
+        assert_eq!(synced_view(vec![]).state(now), Connection::Unknown);
+
+        // Removed delayed node + live current node -> Live.
+        assert_eq!(
+            synced_view(vec![
+                test_node("removed", codec::Status::RemovedRetained, Delivery::Delayed),
+                test_node("current", codec::Status::Healthy, Delivery::Live),
+            ])
+            .state(now),
+            Connection::Live,
+        );
+
+        // Removed delayed node alone -> Unknown (never forces Delayed).
+        assert_eq!(
+            synced_view(vec![test_node(
+                "removed",
+                codec::Status::RemovedRetained,
+                Delivery::Delayed,
+            )])
+            .state(now),
+            Connection::Unknown,
+        );
+
+        // All-loading fleet -> Unknown when live, Delayed when delayed (never Live).
+        assert_eq!(
+            synced_view(vec![test_node(
+                "loading",
+                codec::Status::Loading,
+                Delivery::Live,
+            )])
+            .state(now),
+            Connection::Unknown,
+        );
+        assert_eq!(
+            synced_view(vec![test_node(
+                "loading",
+                codec::Status::Loading,
+                Delivery::Delayed,
+            )])
+            .state(now),
+            Connection::Delayed,
+        );
+
+        // One delayed eligible current node -> Delayed.
+        assert_eq!(
+            synced_view(vec![
+                test_node("live", codec::Status::Healthy, Delivery::Live),
+                test_node("delayed", codec::Status::Healthy, Delivery::Delayed),
+            ])
+            .state(now),
+            Connection::Delayed,
+        );
     }
     #[tokio::test]
     async fn proxy_refusal_stops_before_reconnecting() {
