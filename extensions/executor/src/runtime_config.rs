@@ -65,6 +65,8 @@ pub struct RuntimeConfig {
     pub paths: ServicePaths,
     pub programs: Vec<ProgramConfig>,
     pub workspaces: Vec<WorkspaceConfig>,
+    #[serde(default)]
+    pub launch_environment: crate::launch_environment::LaunchEnvironment,
 }
 
 impl PinnedExecutable {
@@ -165,6 +167,7 @@ impl RuntimeConfig {
             .ok_or(ErrorCode::InvalidConfiguration)?;
         let bytes = serde_json::to_vec(&(
             &self.paths,
+            &self.launch_environment,
             program,
             workspace,
             &resolved.harness,
@@ -179,6 +182,7 @@ impl RuntimeConfig {
     }
 
     pub fn validate(&self) -> Result<(), ErrorCode> {
+        self.launch_environment.validate()?;
         self.control.validate()?;
         if self.version != 1 {
             return Err(ErrorCode::InvalidConfiguration);
@@ -426,6 +430,7 @@ mod tests {
             },
             programs: vec![program.clone()],
             workspaces: vec![],
+            launch_environment: Default::default(),
         };
         assert_eq!(config.validate(), Ok(()));
         config.programs.push(program);

@@ -135,6 +135,10 @@ impl RuntimePolicy {
     }
 
     #[cfg(test)]
+    pub(crate) fn fixture_records(&self) -> Vec<crate::eligibility::AdapterQualification> {
+        self.eligibility.fixture_records()
+    }
+    #[cfg(test)]
     pub(crate) fn fixture(
         configuration: RuntimeConfig,
         records: Vec<crate::eligibility::AdapterQualification>,

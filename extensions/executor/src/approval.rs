@@ -98,12 +98,19 @@ pub(crate) fn disable_pending(tx: &Transaction<'_>) -> Result<(), ErrorCode> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum DecisionPhase {
+    Human,
+    Response,
+}
+
 pub(crate) fn prepare_confirmation(
     tx: &Transaction<'_>,
     request: &ControlRequest,
     confirmation: Option<&HumanConfirmation>,
     clock: &dyn Fn() -> Result<i64, ErrorCode>,
     policy: Option<&crate::runtime_policy::RuntimePolicy>,
+    phase: DecisionPhase,
 ) -> Result<bool, ErrorCode> {
     let now = clock()?;
     let Action::Approve(args) = &request.action else {
@@ -127,7 +134,13 @@ pub(crate) fn prepare_confirmation(
     confirmation
         .ok_or(ErrorCode::HumanRequired)?
         .validate(request, now)?;
-    if state != "pending" {
+    let expected = match phase {
+        DecisionPhase::Human => state == "pending",
+        DecisionPhase::Response => {
+            matches!(state.as_str(), "decision_recorded" | "response_submitting")
+        }
+    };
+    if !expected {
         return Err(ErrorCode::AlreadyConsumed);
     }
     let pending: NativePending = serde_json::from_str(&raw).map_err(|_| ErrorCode::Storage)?;
@@ -198,6 +211,13 @@ pub(crate) fn prepare_confirmation(
     if !valid {
         return Err(ErrorCode::PendingMismatch);
     }
+    if matches!(phase, DecisionPhase::Response) {
+        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM approvals a JOIN decisions d ON d.approval_id=a.id WHERE a.id=?1 AND a.consumed=1 AND a.option_id=?2 AND d.request_id=?3)",params![args.approval_id,args.option_id,request.request_id],|r|r.get(0)).map_err(|_|ErrorCode::Storage)?;
+        if !valid {
+            return Err(ErrorCode::PendingMismatch);
+        }
+        return Ok(true);
+    }
     let changed = tx
         .execute(
             "UPDATE approvals SET option_id=?1 WHERE id=?2 AND consumed=0",
@@ -213,6 +233,126 @@ pub(crate) fn prepare_confirmation(
 // Callback ingress stays internal until the supervisor pump is wired.
 #[allow(dead_code)]
 impl crate::journal::Journal {
+    pub(crate) fn submit_native_decision(
+        &mut self,
+        approval_id: &str,
+        driver: &mut crate::acp::Driver,
+        epoch: &str,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+        writer: &mut crate::supervisor::DeadlineIo<'_, impl std::io::Write + std::os::fd::AsRawFd>,
+    ) -> Result<(), ErrorCode> {
+        writer.limit_to(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        let policy = self.runtime_policy.clone();
+        let (pending, call) = {
+            let tx = self
+                .db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|_| ErrorCode::Storage)?;
+            let (raw,payload,state):(String,String,String)=tx.query_row("SELECT p.record,d.payload,p.state FROM native_pending p JOIN decisions d ON d.approval_id=p.approval_id WHERE p.approval_id=?1",[approval_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(|_|ErrorCode::Storage)?.ok_or(ErrorCode::PendingMismatch)?;
+            if state != "decision_recorded" {
+                return Err(ErrorCode::AlreadyConsumed);
+            }
+            let pending: NativePending =
+                serde_json::from_str(&raw).map_err(|_| ErrorCode::Storage)?;
+            let call: HumanDecisionCall =
+                serde_json::from_str(&payload).map_err(|_| ErrorCode::Storage)?;
+            if pending.binding.transport_epoch != epoch {
+                return Err(ErrorCode::PendingMismatch);
+            }
+            let Some(crate::acp::Event::PendingPermission {
+                raw,
+                turn_id,
+                tool_call_id,
+                ..
+            }) = driver.outstanding_permission(&pending.request_id)
+            else {
+                return Err(ErrorCode::PendingMismatch);
+            };
+            if raw != pending.raw
+                || turn_id != pending.turn_id
+                || tool_call_id != pending.tool_call_id
+            {
+                return Err(ErrorCode::PendingMismatch);
+            }
+            prepare_confirmation(
+                &tx,
+                &call.request,
+                Some(&call.confirmation),
+                clock,
+                policy.as_deref(),
+                DecisionPhase::Response,
+            )?;
+            let changed=tx.execute("UPDATE native_pending SET state='response_submitting' WHERE approval_id=?1 AND state='decision_recorded'",[approval_id]).map_err(|_|ErrorCode::Storage)?;
+            if changed != 1 {
+                return Err(ErrorCode::AlreadyConsumed);
+            }
+            tx.commit().map_err(|_| ErrorCode::Storage)?;
+            (pending, call)
+        };
+        let Action::Approve(args) = &call.request.action else {
+            return Err(ErrorCode::HumanRequired);
+        };
+        let choice =
+            if args.decision == crate::protocol::Decision::Deny && args.option_id == "@cancel" {
+                crate::acp::PermissionDecision::Cancel
+            } else {
+                crate::acp::PermissionDecision::SelectOnce {
+                    option_id: args.option_id.clone(),
+                }
+            };
+        let frame = match driver.answer_permission(pending.request_id.clone(), choice) {
+            Ok(frame) => frame,
+            Err(_) => {
+                self.db
+                    .execute(
+                        "UPDATE native_pending SET state='unknown' WHERE approval_id=?1",
+                        [approval_id],
+                    )
+                    .map_err(|_| ErrorCode::Storage)?;
+                return Err(ErrorCode::PendingMismatch);
+            }
+        };
+        let result = (|| {
+            let tx = self
+                .db
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|_| ErrorCode::Storage)?;
+            let current: String = tx
+                .query_row(
+                    "SELECT state FROM native_pending WHERE approval_id=?1",
+                    [approval_id],
+                    |r| r.get(0),
+                )
+                .map_err(|_| ErrorCode::Storage)?;
+            if current != "response_submitting" {
+                return Err(ErrorCode::AlreadyConsumed);
+            }
+            prepare_confirmation(
+                &tx,
+                &call.request,
+                Some(&call.confirmation),
+                clock,
+                policy.as_deref(),
+                DecisionPhase::Response,
+            )?;
+            crate::framing::write_frame(writer, &frame).map_err(|_| ErrorCode::Storage)?;
+            tx.execute("UPDATE native_pending SET state='response_submitted' WHERE approval_id=?1 AND state='response_submitting'",[approval_id]).map_err(|_|ErrorCode::Storage)?;
+            tx.commit().map_err(|_| ErrorCode::Storage)
+        })();
+        if let Err(error) = result {
+            driver.transport_lost();
+            self.db
+                .execute(
+                    "UPDATE native_pending SET state='unknown' WHERE approval_id=?1",
+                    [approval_id],
+                )
+                .map_err(|_| ErrorCode::Storage)?;
+            self.native_transport_unknown(&pending.binding)?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(crate) fn permission_event(
         &mut self,
         native: &NativeBinding,

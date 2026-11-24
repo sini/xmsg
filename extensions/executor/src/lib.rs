@@ -6,14 +6,20 @@ pub mod capability;
 #[allow(dead_code)]
 mod eligibility;
 pub mod framing;
+pub mod launch_environment;
 #[allow(dead_code)]
 mod lifecycle;
+pub mod operator;
 pub mod protocol;
 pub mod runtime_config;
 #[allow(dead_code)]
 mod runtime_policy;
+#[allow(dead_code)]
+mod runtime_process;
 
 pub mod auth;
+#[allow(dead_code)]
+pub mod content;
 pub mod control;
 mod journal;
 pub mod unix;

@@ -35,6 +35,36 @@ fn fingerprint(principal: &str, input: &str, resolved: &str) -> String {
     )))
 }
 impl Journal {
+    pub(crate) fn open_existing(path: &Path) -> Result<Self, ErrorCode> {
+        use std::os::unix::fs::MetadataExt;
+        let path = crate::unix::private_parent(path, xmsg::client::current_uid())?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(storage)?;
+        if !metadata.is_file()
+            || metadata.uid() != xmsg::client::current_uid()
+            || metadata.mode() & 0o7777 != 0o600
+        {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        let db = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(storage)?;
+        db.busy_timeout(std::time::Duration::ZERO)
+            .map_err(storage)?;
+        let after = std::fs::symlink_metadata(&path).map_err(storage)?;
+        if after.dev() != metadata.dev() || after.ino() != metadata.ino() {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_operations')",[],|r|r.get(0)).map_err(storage)?;
+        if !exists {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        Ok(Self {
+            db,
+            runtime_policy: None,
+        })
+    }
     pub(crate) fn open(path: &Path, configuration: &OwnerConfig) -> Result<Self, ErrorCode> {
         let db = Connection::open_with_flags(
             path,
@@ -230,6 +260,17 @@ impl Journal {
             submission: Submission::NotAttempted,
             observed_effect: ObservedEffect::NotObserved,
         };
+        let pre_launch_failure = if matches!(request.action, Action::Status(_) | Action::Result(_))
+        {
+            match &receipt.target {
+                Some(Target::Execution { session_id, .. } | Target::Turn { session_id, .. }) => {
+                    crate::execution::pre_launch_failure(&tx, session_id)?
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let reply = ControlReply {
             request_id: request.request_id.clone(),
             replayed: false,
@@ -237,6 +278,7 @@ impl Journal {
             receipt,
             dispatch,
             decision: None,
+            pre_launch_failure,
         };
         tx.execute(
             "INSERT INTO requests VALUES(?1,?2,?3,?4,?5)",
@@ -407,6 +449,7 @@ impl Journal {
             confirmation.as_ref(),
             clock,
             runtime_policy.as_deref(),
+            crate::approval::DecisionPhase::Human,
         )?;
         let pending:Option<PendingRecord>=tx.query_row("SELECT session_id,generation,turn_id,operation_digest,policy_revision,expires_at,option_id,consumed FROM approvals WHERE id=?1",[&args.approval_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional().map_err(storage)?;
         let p = pending.ok_or(ErrorCode::PendingMismatch)?;
@@ -435,6 +478,7 @@ impl Journal {
                 confirmation.as_ref(),
                 clock,
                 runtime_policy.as_deref(),
+                crate::approval::DecisionPhase::Human,
             )?;
         }
         tx.execute(
@@ -475,6 +519,7 @@ impl Journal {
             historical: false,
             dispatch: None,
             decision: Some(args.clone()),
+            pre_launch_failure: None,
             receipt: OperationReceipt {
                 request_id: request.request_id.clone(),
                 target: request.target.clone(),
@@ -630,6 +675,10 @@ fn replay(
                 return Err(ErrorCode::RequestConflict);
             }
             let mut reply: ControlReply = serde_json::from_str(&body).map_err(storage)?;
+            if let Some(dispatch) = &reply.dispatch {
+                reply.pre_launch_failure =
+                    crate::execution::pre_launch_failure(tx, &dispatch.session_id)?;
+            }
             reply.replayed = true;
             reply.historical = true;
             Ok(Some(reply))
@@ -770,7 +819,7 @@ pub(crate) fn admit_new(
         }
         let live: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE state!='ended'",
+                "SELECT COUNT(*) FROM sessions WHERE state NOT IN('ended','failed')",
                 [],
                 |r| r.get(0),
             )

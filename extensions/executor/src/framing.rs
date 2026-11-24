@@ -115,6 +115,9 @@ impl<R: BufRead> FrameReader<R> {
     pub fn into_inner(self) -> R {
         self.inner
     }
+    pub(crate) fn inner_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
 }
 
 impl Frame {
