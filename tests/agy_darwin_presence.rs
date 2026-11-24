@@ -344,8 +344,19 @@ fn two_flagged_processes_are_ambiguous() {
         "control: the grandchild is flagged"
     );
     let meta = fs::metadata(&path).unwrap();
-    let holder =
-        find_lock_holder_fdinfo(live(), Path::new(LIVE_PROC_LOCKS), meta.dev(), meta.ino());
+    let (dev, ino) = (meta.dev(), meta.ino());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(find_lock_holder_fdinfo(
+            live(),
+            Path::new(LIVE_PROC_LOCKS),
+            dev,
+            ino,
+        ));
+    });
+    let holder = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("darwin_holder exceeded bounded settle deadline on persistent ambiguity");
     assert!(
         !matches!(holder, Ok(Some(_))),
         "ambiguous holders fail closed: {holder:?}"
@@ -514,5 +525,181 @@ async fn unregistered_conversation_is_listed_queued_and_delivered_before_any_hoo
         info.credentials.unwrap().csrf_token,
         "token-darwin-da05",
         "from the grandchild's environment"
+    );
+}
+
+struct HoldEnvGuard {
+    _dir: TempDir,
+    path: PathBuf,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl HoldEnvGuard {
+    fn new() -> Self {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let prev = std::env::var_os("XMSG_TEST_HOLD_DIR");
+        // SAFETY: tests in this file serialize via `SERIAL`.
+        unsafe { std::env::set_var("XMSG_TEST_HOLD_DIR", &path) };
+        HoldEnvGuard {
+            _dir: dir,
+            path,
+            prev,
+        }
+    }
+
+    fn arm(&self, point: &str) -> (PathBuf, PathBuf) {
+        let hold = self.path.join(point);
+        let entered = self.path.join(format!("{point}.entered"));
+        fs::write(&hold, b"").unwrap();
+        (hold, entered)
+    }
+}
+
+impl Drop for HoldEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: tests in this file serialize via `SERIAL`.
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("XMSG_TEST_HOLD_DIR", v),
+                None => std::env::remove_var("XMSG_TEST_HOLD_DIR"),
+            }
+        }
+    }
+}
+
+fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// If the first-scan nominees release during the settle window and a different
+// PID becomes the sole holder mid-window, darwin_holder must fail closed rather
+// than attesting the newcomer in the original holder's place.
+// ---------------------------------------------------------------------------
+#[test]
+fn settle_window_rejects_new_holder_not_in_first_scan() {
+    let _serial = serial();
+    let hold_env = HoldEnvGuard::new();
+    let p = Presence::new();
+    let conv = "0199cecf-da07-7000-8000-00000000da07";
+    let path = p.lock(conv);
+    let h1 = Holder::spawn(&path, "dup", &[]);
+    let meta = fs::metadata(&path).unwrap();
+    let (dev, ino) = (meta.dev(), meta.ino());
+
+    let (hold_file, entered_file) = hold_env.arm("darwin-holder-after-first-scan");
+    let handle = std::thread::spawn(move || {
+        find_lock_holder_fdinfo(live(), Path::new(LIVE_PROC_LOCKS), dev, ino)
+    });
+
+    wait_for_file(&entered_file);
+    // Replace the original 2-process holder pair with a brand-new sole holder mid-window.
+    drop(h1);
+    let h2 = Holder::spawn(&path, "lock", &[]);
+    assert!(has_flock(h2.pid(), &path), "control: newcomer holds lock");
+    fs::remove_file(&hold_file).unwrap();
+
+    let result = handle.join().unwrap();
+    assert!(
+        result.is_err(),
+        "new holder not in first scan must fail closed, got: {result:?}"
+    );
+    drop(h2);
+}
+
+// ---------------------------------------------------------------------------
+// A concurrent scan paused with DARWIN_HOLDERS unlocked must re-check
+// Live/Released on re-acquire and never resurrect a holder released by LOCK_UN
+// while it was scanning.
+// ---------------------------------------------------------------------------
+#[test]
+fn concurrent_release_during_scan_is_not_resurrected_on_reacquire() {
+    let _serial = serial();
+    let hold_env = HoldEnvGuard::new();
+    let p = Presence::new();
+    let conv = "0199cecf-da08-7000-8000-00000000da08";
+    let path = p.lock(conv);
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    flock(f.as_raw_fd(), libc::LOCK_EX);
+    let meta = fs::metadata(&path).unwrap();
+    let (dev, ino) = (meta.dev(), meta.ino());
+    let me = std::process::id();
+
+    let (hold_file, entered_file) = hold_env.arm("darwin-holder-after-first-scan");
+    let thread_a = std::thread::spawn(move || {
+        find_lock_holder_fdinfo(live(), Path::new(LIVE_PROC_LOCKS), dev, ino)
+    });
+
+    wait_for_file(&entered_file);
+    // Thread B skips the one-shot hold, installs Live, unlocks (sticky FWASLOCKED remains),
+    // and transitions this PID to Released while Thread A is still paused.
+    assert_eq!(
+        find_lock_holder_fdinfo(live(), Path::new(LIVE_PROC_LOCKS), dev, ino).unwrap(),
+        Some(me),
+        "thread B must observe and watch holder"
+    );
+    flock(f.as_raw_fd(), libc::LOCK_UN);
+    assert!(
+        has_flock(me, &path),
+        "control: sticky FWASLOCKED stays set after LOCK_UN"
+    );
+    assert_eq!(
+        find_lock_holder_fdinfo(live(), Path::new(LIVE_PROC_LOCKS), dev, ino).unwrap(),
+        None,
+        "thread B must transition unlocked holder to Released"
+    );
+
+    fs::remove_file(&hold_file).unwrap();
+    let res_a = thread_a.join().unwrap().unwrap();
+    assert_eq!(
+        res_a, None,
+        "thread A must not resurrect a Released holder on lock re-acquire"
+    );
+    assert_eq!(
+        find_lock_holder_fdinfo(live(), Path::new(LIVE_PROC_LOCKS), dev, ino).unwrap(),
+        None,
+        "released holder must stay absent after thread A finishes"
+    );
+    drop(f);
+}
+
+// ---------------------------------------------------------------------------
+// When all first-scan nominees exit during the settle window leaving zero
+// nominees, darwin_holder must return Ok(None) (so attestation refuses), never
+// treating zero nominees as a valid holder.
+// ---------------------------------------------------------------------------
+#[test]
+fn settle_window_zero_nominees_after_release_returns_none() {
+    let _serial = serial();
+    let hold_env = HoldEnvGuard::new();
+    let p = Presence::new();
+    let conv = "0199cecf-da09-7000-8000-00000000da09";
+    let path = p.lock(conv);
+    let h = Holder::spawn(&path, "dup", &[]);
+    let meta = fs::metadata(&path).unwrap();
+    let (dev, ino) = (meta.dev(), meta.ino());
+
+    let (hold_file, entered_file) = hold_env.arm("darwin-holder-after-first-scan");
+    let handle = std::thread::spawn(move || {
+        find_lock_holder_fdinfo(live(), Path::new(LIVE_PROC_LOCKS), dev, ino)
+    });
+
+    wait_for_file(&entered_file);
+    drop(h);
+    fs::remove_file(&hold_file).unwrap();
+
+    let result = handle.join().unwrap().unwrap();
+    assert_eq!(
+        result, None,
+        "zero nominees after settle window must return None, got: {result:?}"
     );
 }

@@ -356,9 +356,17 @@ fn darwin_test_hold(point: &str) {
         let dir = Path::new(&dir);
         let hold = dir.join(point);
         if hold.exists() {
-            let _ = fs::write(dir.join(format!("{point}.entered")), b"");
-            while hold.exists() {
-                std::thread::sleep(Duration::from_millis(5));
+            let claim = dir.join(format!("{point}.claim"));
+            if fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&claim)
+                .is_ok()
+            {
+                let _ = fs::write(dir.join(format!("{point}.entered")), b"");
+                while hold.exists() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
             }
         }
     }
@@ -459,14 +467,28 @@ fn darwin_holder(dev: u64, ino: u64) -> io::Result<Option<u32>> {
 
     // 3. Nominees: the lock flag set, and not released. On macOS, a child spawned by the holder
     // briefly mirrors the parent's O_CLOEXEC descriptors until exec closes them, so retry briefly
-    // when multiple nominees appear before failing closed.
+    // when multiple nominees appear before failing closed. The deadline is fixed once after the
+    // first scan, and any surviving sole nominee must already have been present in the first scan.
     let mut nominees = darwin_nominees(live, dev, ino, &released_ids)?;
     darwin_test_hold("darwin-holder-after-first-scan");
     if nominees.len() > 1 {
+        let initial_nominees: Vec<(u32, String)> = nominees
+            .iter()
+            .map(|(pid, st, _)| (*pid, st.clone()))
+            .collect();
         let deadline = std::time::Instant::now() + DARWIN_AMBIGUITY_SETTLE;
         while nominees.len() > 1 && std::time::Instant::now() < deadline {
             std::thread::sleep(DARWIN_AMBIGUITY_POLL);
             nominees = darwin_nominees(live, dev, ino, &released_ids)?;
+        }
+        if nominees.len() == 1
+            && !initial_nominees
+                .iter()
+                .any(|(ipid, ist)| *ipid == nominees[0].0 && ist == &nominees[0].1)
+        {
+            return Err(io::Error::other(
+                "presence lock holder changed during settle window",
+            ));
         }
     }
     let (pid, starttime, path) = match nominees.len() {
