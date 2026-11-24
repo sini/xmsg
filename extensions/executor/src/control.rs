@@ -191,6 +191,8 @@ pub struct ControlReply {
     pub status: Option<crate::protocol::StatusReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<crate::protocol::NormalizedResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect: Option<crate::protocol::ReconnectReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

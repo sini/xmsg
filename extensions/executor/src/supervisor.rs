@@ -562,9 +562,9 @@ fn call(
     {
         return Err(SupervisorError::Protocol);
     }
-    let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    let expires = std::time::Instant::now() + Duration::from_secs(3);
+    let mut stream = xmsg::client::caller_attribution::connect(socket, expires)
+        .map_err(|_| SupervisorError::Unknown)?;
     if crate::unix::peer(&stream)?.uid != xmsg::client::current_uid() {
         return Err(SupervisorError::Protocol);
     }
@@ -577,12 +577,25 @@ fn call(
             identity: expected.clone(),
         }
     };
-    frame(&mut stream, &request)?;
-    let hello: SupervisorHello = read_frame(&stream)?;
+    frame_until(&mut stream, &request, expires)?;
+    let hello: SupervisorHello = read_frame_until(&stream, expires)?;
     if hello.identity != *expected {
         return Err(SupervisorError::Protocol);
     }
     Ok(hello)
+}
+
+pub(crate) fn attach_existing(
+    root: &Path,
+    identity: &ExecutionIdentity,
+) -> Result<SupervisorHello, SupervisorError> {
+    call(
+        &root
+            .join(component(&identity.session_id, identity.generation))
+            .join("supervisor.sock"),
+        identity,
+        false,
+    )
 }
 struct OwnedProcessGroup {
     child: Child,

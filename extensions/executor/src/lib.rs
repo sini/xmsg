@@ -19,6 +19,8 @@ mod lifecycle;
 mod lifecycle_client;
 pub mod operator;
 pub mod protocol;
+#[allow(dead_code)]
+mod resume;
 pub mod runtime_config;
 #[allow(dead_code)]
 mod runtime_policy;
