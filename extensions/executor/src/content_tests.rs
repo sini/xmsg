@@ -2,6 +2,29 @@ use super::*;
 use std::{io::Cursor, sync::Mutex};
 
 #[derive(Default)]
+struct PermitStore {
+    admissions: Vec<(ProxyBinding, ContentOperation, String)>,
+}
+impl ContentStore for PermitStore {
+    fn commit(
+        &mut self,
+        _: &ProxyBinding,
+        _: &crate::membership::ContentRecord,
+    ) -> Result<crate::membership::CommitOutcome, crate::membership::MembershipError> {
+        Err(crate::membership::MembershipError::Storage)
+    }
+    fn admit_outgoing(
+        &mut self,
+        binding: &ProxyBinding,
+        kind: ContentOperation,
+        key: &str,
+    ) -> Result<(), crate::membership::MembershipError> {
+        self.admissions.push((binding.clone(), kind, key.into()));
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 struct FakeBus {
     calls: Mutex<Vec<Value>>,
     fail: bool,
@@ -219,7 +242,7 @@ async fn opaque_control_looking_text_is_sent_as_content_once_without_retry() {
     if let ContentCall::Send(args) = &mut call {
         args.text = r#"{"verb":"stop","owner":true,"human":true}"#.into();
     }
-    let result = dispatch(&bus, &binding(1), &call).await;
+    let result = dispatch(&bus, &binding(1), &call, &mut PermitStore::default()).await;
     assert_eq!(result["ok"], true);
     let calls = bus.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
@@ -239,10 +262,15 @@ async fn invalid_request_never_reaches_sdk_and_transport_failure_never_retries()
     if let ContentCall::Send(a) = &mut bad {
         a.text = "x".repeat(MAX_TEXT_BYTES + 1);
     }
-    assert_eq!(dispatch(&bus, &binding(1), &bad).await["ok"], false);
-    assert!(bus.calls.lock().unwrap().is_empty());
+    let mut store = PermitStore::default();
     assert_eq!(
-        dispatch(&bus, &binding(1), &send_call()).await["error"],
+        dispatch(&bus, &binding(1), &bad, &mut store).await["ok"],
+        false
+    );
+    assert!(bus.calls.lock().unwrap().is_empty());
+    assert!(store.admissions.is_empty());
+    assert_eq!(
+        dispatch(&bus, &binding(1), &send_call(), &mut store).await["error"],
         "content_submission_unknown"
     );
     assert_eq!(bus.calls.lock().unwrap().len(), 1);
@@ -265,6 +293,7 @@ async fn sdk_deadline_is_bounded_without_fallback() {
             within: None,
             limit: 50,
         }),
+        &mut PermitStore::default(),
     )
     .await;
     assert_eq!(result["error"], "content_submission_unknown");
@@ -280,4 +309,156 @@ fn bus_configuration_is_explicit_and_auto_input_defaults_off() {
     let mut invalid = config;
     invalid.agent_socket = invalid.register_socket.clone();
     assert!(invalid.validate().is_err());
+}
+
+fn all_content_calls() -> Vec<ContentCall> {
+    vec![
+        ContentCall::List(ListArgs {
+            name: None,
+            node: None,
+            kind: None,
+            status: None,
+            within: None,
+            limit: 50,
+        }),
+        send_call(),
+        ContentCall::Reply(ReplyArgs {
+            message_id: "message-a".into(),
+            text: "fixture".into(),
+            request_id: "reply-a".into(),
+        }),
+    ]
+}
+#[tokio::test]
+async fn each_validated_call_admits_exact_binding_operation_and_bounded_key() {
+    let bus = FakeBus::default();
+    let bound = binding(7);
+    let mut store = PermitStore::default();
+    for call in all_content_calls() {
+        assert_eq!(dispatch(&bus, &bound, &call, &mut store).await["ok"], true);
+    }
+    assert_eq!(store.admissions.len(), 3);
+    assert_eq!(bus.calls.lock().unwrap().len(), 3);
+    let kinds: Vec<_> = store.admissions.iter().map(|(_, kind, _)| *kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ContentOperation::List,
+            ContentOperation::Send,
+            ContentOperation::Reply
+        ]
+    );
+    for (binding, _, key) in &store.admissions {
+        assert_eq!(binding, &bound);
+        assert_eq!(key.len(), 64);
+        assert!(key
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+    }
+    assert_eq!(store.admissions[1].2, idempotency_key(&bound, "request-a"));
+    assert_eq!(store.admissions[2].2, idempotency_key(&bound, "reply-a"));
+    let previous = store.admissions[0].2.clone();
+    dispatch(&bus, &bound, &all_content_calls().remove(0), &mut store).await;
+    assert_ne!(store.admissions[3].2, previous);
+}
+#[tokio::test]
+async fn outgoing_default_denial_has_zero_sdk_effect_and_static_error() {
+    struct DefaultDeny;
+    impl ContentStore for DefaultDeny {
+        fn commit(
+            &mut self,
+            _: &ProxyBinding,
+            _: &crate::membership::ContentRecord,
+        ) -> Result<crate::membership::CommitOutcome, crate::membership::MembershipError> {
+            Err(crate::membership::MembershipError::Storage)
+        }
+    }
+    let bus = FakeBus::default();
+    let mut store = DefaultDeny;
+    for call in all_content_calls() {
+        let result = dispatch(&bus, &binding(1), &call, &mut store).await;
+        assert_eq!(result, json!({"ok":false,"error":"content_effect_denied"}));
+    }
+    assert!(
+        bus.calls.lock().unwrap().is_empty(),
+        "default-denied content call reached SDK"
+    );
+}
+#[tokio::test]
+async fn real_caller_revocation_refuses_next_call_while_adapter_remains_current() {
+    for call in all_content_calls() {
+        let fixture = crate::content_admission::fixture();
+        let bound = fixture.binding.clone();
+        let mut store = fixture.store.clone();
+        let bus = FakeBus::default();
+        assert!(fixture.adapter_is_current());
+        assert_eq!(dispatch(&bus, &bound, &call, &mut store).await["ok"], true);
+        assert_eq!(bus.calls.lock().unwrap().len(), 1);
+        fixture.revoke().unwrap();
+        assert!(
+            fixture.adapter_is_current(),
+            "adapter drift masked caller-only revocation"
+        );
+        let denied = dispatch(&bus, &bound, &call, &mut store).await;
+        assert_eq!(
+            bus.calls.lock().unwrap().len(),
+            1,
+            "revoked caller content reached SDK"
+        );
+        assert_eq!(denied, json!({"ok":false,"error":"content_effect_denied"}));
+    }
+}
+#[tokio::test]
+async fn real_emergency_disable_refuses_next_call_while_adapter_remains_current() {
+    for call in all_content_calls() {
+        let mut fixture = crate::content_admission::fixture();
+        let bound = fixture.binding.clone();
+        let mut store = fixture.store.clone();
+        let bus = FakeBus::default();
+        assert!(fixture.adapter_is_current());
+        assert_eq!(dispatch(&bus, &bound, &call, &mut store).await["ok"], true);
+        fixture.disable().unwrap();
+        assert!(
+            fixture.adapter_is_current(),
+            "adapter drift masked emergency disable"
+        );
+        let denied = dispatch(&bus, &bound, &call, &mut store).await;
+        assert_eq!(
+            bus.calls.lock().unwrap().len(),
+            1,
+            "disabled content reached SDK"
+        );
+        assert_eq!(denied, json!({"ok":false,"error":"content_effect_denied"}));
+    }
+}
+#[tokio::test]
+async fn admitted_inflight_call_may_complete_but_next_call_is_rechecked() {
+    let fixture = crate::content_admission::fixture();
+    let bound = fixture.binding.clone();
+    let mut store = fixture.store.clone();
+    let bus = FakeBus {
+        delay: Duration::from_millis(100),
+        ..FakeBus::default()
+    };
+    let call = send_call();
+    let mut pending = Box::pin(dispatch(&bus, &bound, &call, &mut store));
+    std::future::poll_fn(|cx| {
+        assert!(matches!(
+            pending.as_mut().poll(cx),
+            std::task::Poll::Pending
+        ));
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(bus.calls.lock().unwrap().len(), 1);
+    fixture.revoke().unwrap();
+    assert!(fixture.adapter_is_current());
+    assert_eq!(pending.await["ok"], true);
+    let denied = dispatch(&bus, &bound, &call, &mut store).await;
+    assert_eq!(
+        bus.calls.lock().unwrap().len(),
+        1,
+        "inflight admission was cached for the next call"
+    );
+    assert_eq!(denied["error"], "content_effect_denied");
 }

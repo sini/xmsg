@@ -1,6 +1,6 @@
 use crate::{
     framing::{RequestId, MAX_FRAME_BYTES},
-    membership::{ContentProxy, ContentStore, ProxyBinding},
+    membership::{ContentOperation, ContentProxy, ContentStore, ProxyBinding, SharedContentStore},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, value::RawValue, Value};
@@ -187,11 +187,12 @@ pub(crate) fn start_content_service<S: ContentStore + Send + 'static>(
 async fn run_content_service<S: ContentStore + Send + 'static>(
     config: BusConfig,
     binding: ProxyBinding,
-    mut store: S,
+    store: S,
     listener: StdListener,
     stop: Arc<AtomicBool>,
     ready: &mpsc::SyncSender<Result<String, ()>>,
 ) -> Result<(), ContentError> {
+    let store = SharedContentStore::new(store);
     let mut proxy = ContentProxy::register(config.client_options()?, binding.clone())
         .await
         .map_err(|_| ContentError::Bus)?;
@@ -202,10 +203,11 @@ async fn run_content_service<S: ContentStore + Send + 'static>(
     let retained_proxy;
     if config.auto_input {
         let input_stop = stop.clone();
+        let mut input_store = store.clone();
         input_task = Some(tokio::spawn(async move {
             while !input_stop.load(Ordering::Acquire) {
                 proxy
-                    .receive_once(&mut store, 0)
+                    .receive_once(&mut input_store, 0)
                     .await
                     .map_err(|_| ContentError::Bus)?;
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -232,10 +234,11 @@ async fn run_content_service<S: ContentStore + Send + 'static>(
             Ok(Ok((stream, _))) if workers.len() < MAX_WORKERS => {
                 let client = bus.clone();
                 let bound = binding.clone();
+                let mut gate = store.clone();
                 workers.push(tokio::spawn(async move {
                     let _ = tokio::time::timeout(
                         REQUEST_TIMEOUT,
-                        serve_connection(stream, &client, &bound),
+                        serve_connection(stream, &client, &bound, &mut gate),
                     )
                     .await;
                 }));
@@ -387,15 +390,43 @@ fn idempotency_key(binding: &ProxyBinding, request_id: &str) -> String {
     .expect("fixed tuple serializes");
     hex::encode(Sha256::digest(bytes))
 }
-async fn dispatch(bus: &impl TextBus, binding: &ProxyBinding, call: &ContentCall) -> Value {
+async fn dispatch(
+    bus: &impl TextBus,
+    binding: &ProxyBinding,
+    call: &ContentCall,
+    store: &mut (impl ContentStore + Send),
+) -> Value {
     if call.validate().is_err() {
         return json!({"ok":false,"error":"invalid_content_call"});
+    }
+    let (kind, request_key) = match call {
+        ContentCall::List(_) => {
+            let mut random = [0u8; 16];
+            if getrandom::fill(&mut random).is_err() {
+                return json!({"ok":false,"error":"content_effect_denied"});
+            }
+            (
+                ContentOperation::List,
+                idempotency_key(binding, &format!("list:{}", hex::encode(random))),
+            )
+        }
+        ContentCall::Send(args) => (
+            ContentOperation::Send,
+            idempotency_key(binding, &args.request_id),
+        ),
+        ContentCall::Reply(args) => (
+            ContentOperation::Reply,
+            idempotency_key(binding, &args.request_id),
+        ),
+    };
+    if store.admit_outgoing(binding, kind, &request_key).is_err() {
+        return json!({"ok":false,"error":"content_effect_denied"});
     }
     let operation = async {
         match call {
             ContentCall::List(a) => bus.list(a).await,
-            ContentCall::Send(a) => bus.send(a, &idempotency_key(binding, &a.request_id)).await,
-            ContentCall::Reply(a) => bus.reply(a, &idempotency_key(binding, &a.request_id)).await,
+            ContentCall::Send(a) => bus.send(a, &request_key).await,
+            ContentCall::Reply(a) => bus.reply(a, &request_key).await,
         }
     };
     match tokio::time::timeout(SDK_TIMEOUT, operation).await {
@@ -424,6 +455,7 @@ async fn serve_connection(
     stream: UnixStream,
     bus: &impl TextBus,
     binding: &ProxyBinding,
+    store: &mut (impl ContentStore + Send),
 ) -> Result<(), ContentError> {
     if stream.peer_cred()?.uid() != xmsg::client::current_uid() {
         return Err(ContentError::Peer);
@@ -435,7 +467,7 @@ async fn serve_connection(
     reader.get_mut().write_all(PREAMBLE).await?;
     let bytes = read_async_line(&mut reader, MAX_FRAME_BYTES).await?;
     let response = match serde_json::from_slice::<ContentCall>(&bytes) {
-        Ok(call) => dispatch(bus, binding, &call).await,
+        Ok(call) => dispatch(bus, binding, &call, store).await,
         Err(_) => json!({"ok":false,"error":"invalid_content_call"}),
     };
     let mut bytes = serde_json::to_vec(&response).map_err(|_| ContentError::Frame)?;
