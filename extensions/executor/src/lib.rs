@@ -1,6 +1,7 @@
 //! Executor contracts and a fail-closed control journal; no runtime launcher or host bridge.
 
 pub mod acp;
+pub mod approval;
 pub mod capability;
 #[allow(dead_code)]
 mod eligibility;

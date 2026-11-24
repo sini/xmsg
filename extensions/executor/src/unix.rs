@@ -201,4 +201,18 @@ impl ControlService {
         })();
         reply(&mut stream, result)
     }
+
+    pub fn handle_native_human_connection(&self, mut stream: UnixStream) -> Result<(), ErrorCode> {
+        prepare(&stream)?;
+        let peer = peer(&stream)?;
+        let mut reader = BufReader::new(stream.try_clone().map_err(|_| ErrorCode::Storage)?);
+        let result = (|| {
+            let proof = line(&mut reader, 256)?;
+            let body = line(&mut reader, MAX_FRAME_BYTES)?;
+            let call: crate::approval::HumanDecisionCall =
+                serde_json::from_slice(&body).map_err(|_| ErrorCode::MalformedFrame)?;
+            self.native_human(peer, &proof, call)
+        })();
+        reply(&mut stream, result)
+    }
 }

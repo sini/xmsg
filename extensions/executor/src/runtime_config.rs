@@ -30,6 +30,8 @@ pub struct ProgramConfig {
     pub native: PinnedExecutable,
     pub arguments: Vec<String>,
     pub native_mode: String,
+    pub model: crate::protocol::Model,
+    pub native_model_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +148,7 @@ impl RuntimeConfig {
             .ok_or(ErrorCode::InvalidConfiguration)
     }
 
+    /// Hashes owner launch settings; native effective inventory needs separate evidence.
     pub fn effective_digest(
         &self,
         resolved: &crate::capability::ResolvedDispatch,
@@ -204,6 +207,11 @@ impl RuntimeConfig {
                 || p.native_mode.is_empty()
                 || p.native_mode.len() > 128
                 || p.native_mode.chars().any(char::is_control)
+                || p.native_model_id.is_empty()
+                || p.native_model_id.len() > 128
+                || p.native_model_id.chars().any(char::is_control)
+                || p.model.provider.is_empty()
+                || p.model.name.is_empty()
                 || p.arguments.len() > 256
                 || p.arguments.iter().any(|s| s.contains('\0'))
                 || p.arguments.iter().map(String::len).sum::<usize>() > 16384
@@ -253,6 +261,7 @@ impl RuntimeConfig {
                 || pin.runtime_version != q.runtime_version
                 || pin.protocol_version != q.protocol_version
                 || p.native_mode != q.native_mode
+                || p.model != d.resolved.model
                 || q.model != d.resolved.model
                 || q.profile != d.resolved.profile.mode
                 || q.review_mode != crate::capability::ReviewMode::HumanOnly
@@ -390,6 +399,11 @@ mod tests {
             native: artifact(root.path(), "native"),
             arguments: vec![],
             native_mode: "default".into(),
+            model: crate::protocol::Model {
+                provider: "fixture".into(),
+                name: "no-model".into(),
+            },
+            native_model_id: "fixture-native-model".into(),
         };
         let mut config = RuntimeConfig {
             version: 1,

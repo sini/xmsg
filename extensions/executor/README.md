@@ -2,11 +2,13 @@
 
 This standalone Rust library contains internal contracts, a fail-closed control journal and deterministic ACP fixtures for a future local executor. It has its own Cargo manifest and lockfile; it does not convert the root project into a workspace or add an executable. The bus default package, recipient shapes and six existing MCP tools are unchanged.
 
-There is no public launch producer, installed executable, host-attestation bridge, real harness/backend, native approval relay, reviewer, model/provider invocation, service installation or credential provisioning here. A crate-private supervisor foundation owns real OS child/process-group handles and locks; only test helpers select a fake ACP process. Later runtime stages must supply those implementations and their qualification evidence.
+There is no public launch producer, installed executable, real harness/backend, reviewer, model/provider invocation, service installation or credential provisioning here. The daemon-query attribution mechanism remains production-unqualified. A crate-private supervisor foundation owns real OS child/process-group handles and locks; only test helpers select a fake ACP process. Runtime activation still needs separately reviewed qualification evidence.
 
 ## Contracts
 
 `runtime_config::RuntimeConfig` describes owner-selected program paths and SHA256 pins, native modes, workspace bindings, service paths and separate credential-file references. Its bounded private-file reader and artifact verification do not execute programs or qualify runtime capabilities. Caller requests cannot replace those settings. Runtime activation remains unavailable until separately reviewed qualification records exist.
+
+Each configured pin has one explicit unified provider/model mapping to its exact `native_model_id`. All templates selecting that pin must match the mapping. The ACP driver must apply and observe that actual native ID before a prompt; an empty acknowledgement or ambient default is insufficient. The launch-settings digest is not evidence of native effective tool/hook inventory.
 
 Dispatch templates may explicitly list `lifecycle_verbs`; the default empty list delegates nothing. Successful dispatch records only those verbs for its attested caller and exact new session/generation. Current owner policy must retain both that holder's dispatch grant and the template verb; removing either revokes the derived lifecycle authority. Explicit owner-configured session grants remain independent. Creation, ancestry and content-proxy registration grant nothing. Replays do not add or widen grants.
 
@@ -19,6 +21,10 @@ The staged lifecycle journal derives native commands from admitted requests and 
 Native writes require the supervisor's monotonic-deadline I/O wrapper; a blocking child stdin cannot be passed directly. No native reply is awaited under a journal transaction. A wedged write becomes unknown and releases journal access for authenticated owner disable and inspection.
 
 Adapter eligibility also binds the actual executor binary SHA256; the crate version is not a build identity. Verified executor/adapter/native files remain held and their identities are checked before effects, keeping large file hashing outside the journal lock. Missing or changed artifacts deny new effects. No runtime configuration field can create a qualification record.
+
+Trusted caller qualification references are a separate activation dependency. The current core API supplies none, so production effects remain unavailable independently of adapter qualification. Queued work never reuses an old PID/socket as an identity oracle or requires its parent process to remain alive.
+
+Native pending requests come only from the driver's current live permission map, bound to the original operation and execution/transport/turn. Native decisions use the separate human credential channel plus `{request, confirmation}` with the exact approval ID, operation digest and fresh confirmation time. Bare legacy approval calls and persistent permission options cannot consume those requests. Interrupt intent invalidates existing asks immediately and prevents late old-turn requests from reopening review. Confirmation is a trusted operator-channel contract, not proof of isolation from same-UID code. Raw bounded request data stays in the private journal; audit metadata contains no authentication proof.
 
 `protocol::ControlRequest` uses a strict versioned `{version, request_id, verb, target, args, deadline}` envelope. Dispatch can supply only its brief and request ID, leaving owner defaults unresolved. The uniform verbs are dispatch, send, steer, interrupt, resume, stop, status, result and approve. Steer and interrupt require an addressed generation and turn; resume distinguishes reconnect from loading a stored conversation. Typed requested/resolved fields keep harness and model separate, carry an executor/host/environment descriptor, immutable workspace references, required capabilities and budget. No raw executable, native flags, workspace path or caller authority is accepted in the request.
 

@@ -159,6 +159,7 @@ fn fixture() -> Fixture {
             ],
         }],
     };
+    let program_model = control.defaults[0].resolved.model.clone();
     let mut configuration = RuntimeConfig {
         version: 1,
         control,
@@ -178,6 +179,8 @@ fn fixture() -> Fixture {
             native: native_executable,
             arguments: vec![],
             native_mode: "default".into(),
+            model: program_model,
+            native_model_id: "fixture-native-model".into(),
         }],
         workspaces: vec![WorkspaceConfig {
             repo_id: "repo".into(),
@@ -224,7 +227,8 @@ fn fixture() -> Fixture {
         ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
     )
     .unwrap()
-    .fixture_attributed("worker");
+    .fixture_attributed("worker")
+    .fixture_time(103);
     service.journal.lock().unwrap().runtime_policy =
         Some(std::sync::Arc::new(RuntimePolicy::fixture(
             configuration.clone(),
@@ -263,6 +267,14 @@ fn fixture() -> Fixture {
         serde_json::json!({}),
     );
     driver.observe(Frame::Notification(Notification {jsonrpc:"2.0".into(),method:"session/update".into(),params:Some(serde_json::json!({"sessionId":"native","update":{"sessionUpdate":"config_option_update","configOptions":[{"id":"mode","type":"select","currentValue":"default"}]}}))})).unwrap();
+    complete(
+        &mut driver,
+        Command::SetModel {
+            native_session_id: "native".into(),
+            model_id: "fixture-native-model".into(),
+        },
+        serde_json::json!({"configOptions":[{"id":"model","type":"select","currentValue":"fixture-native-model"},{"id":"mode","type":"select","currentValue":"default"}]}),
+    );
     {
         let mut journal = service.journal.lock().unwrap();
         let lease = journal.reserve_launch(1, 100).unwrap();
@@ -274,6 +286,7 @@ fn fixture() -> Fixture {
                     native_session_id: "native".into(),
                     transport_epoch: EPOCH.into(),
                     native_mode: "default".into(),
+                    native_model_id: driver.observed_model_id().unwrap().to_owned(),
                     expires_at: 180,
                 },
                 100,
@@ -337,6 +350,211 @@ fn state(f: &Fixture, id: i64) -> String {
             |r| r.get(0),
         )
         .unwrap()
+}
+
+fn pending_decision(f: &mut Fixture) -> crate::approval::HumanDecisionCall {
+    let id = queue(f);
+    let (result, _) = submit(f, id, EPOCH);
+    assert!(result.unwrap());
+    let request_id = crate::framing::RequestId::Number(77);
+    f.driver.observe(Frame::Request(crate::framing::Request {jsonrpc:"2.0".into(),id:request_id.clone(),method:"session/request_permission".into(),params:Some(serde_json::json!({"sessionId":"native","toolCall":{"toolCallId":"tool","title":"untrusted tool title","rawInput":{"command":"untrusted data"}},"options":[{"optionId":"once","name":"Once","kind":"allow_once"},{"optionId":"always","name":"Persistent","kind":"allow_always"}]}))})).unwrap();
+    let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+    let pending = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .record_native_pending(&native, &f.driver, &request_id, &|| Ok(103))
+        .unwrap();
+    let digest = pending.operation_digest.clone();
+    crate::approval::HumanDecisionCall {
+        request: ControlRequest {
+            version: 1,
+            request_id: "decision-native".into(),
+            target: Some(Target::Turn {
+                session_id: "session-1".into(),
+                generation: 1,
+                turn_id: "turn-2".into(),
+            }),
+            action: Action::Approve(crate::protocol::ApproveArgs {
+                approval_id: pending.approval_id.clone(),
+                operation_digest: digest.clone(),
+                policy_revision: "1".into(),
+                expires_at: 170,
+                option_id: "once".into(),
+                decision: crate::protocol::Decision::AllowOnce,
+            }),
+            deadline: Some(170),
+        },
+        confirmation: crate::approval::HumanConfirmation {
+            approval_id: pending.approval_id,
+            operation_digest: digest,
+            confirmed_at: 103,
+        },
+    }
+}
+
+#[test]
+fn native_approval_requires_current_explicit_confirmation_and_one_use_option() {
+    let mut f = fixture();
+    let call = pending_decision(&mut f);
+    let bare = f.service.human(peer(), HUMAN, call.request.clone(), 103);
+    let consumed: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT consumed FROM approvals WHERE id=?1",
+            [&call.confirmation.approval_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        consumed, 0,
+        "bare human credential consumed native approval"
+    );
+    assert_eq!(bare.unwrap_err(), ErrorCode::HumanRequired);
+    assert_eq!(
+        f.service
+            .native_human(peer(), OWNER, call.clone())
+            .unwrap_err(),
+        ErrorCode::CredentialDenied
+    );
+    let mut persistent = call.clone();
+    if let Action::Approve(args) = &mut persistent.request.action {
+        args.option_id = "always".into();
+    }
+    assert!(f.service.native_human(peer(), HUMAN, persistent).is_err());
+    let mut wrong = call.clone();
+    wrong.confirmation.operation_digest = "different".into();
+    assert!(f.service.native_human(peer(), HUMAN, wrong).is_err());
+    let reply = f.service.native_human(peer(), HUMAN, call.clone()).unwrap();
+    let (consumed, decisions): (i64, i64) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT consumed,(SELECT COUNT(*) FROM decisions) FROM approvals WHERE id=?1",
+            [&call.confirmation.approval_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((consumed, decisions), (1, 1));
+    assert!(!reply.historical);
+    let replay = f.service.native_human(peer(), HUMAN, call).unwrap();
+    assert!(replay.historical && replay.replayed);
+    let decisions: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(decisions, 1, "human replay created another native decision");
+}
+
+#[test]
+fn durable_interrupt_prevents_late_permission_from_reopening_human_approval() {
+    let mut f = fixture();
+    let call = pending_decision(&mut f);
+    let interrupt = f
+        .service
+        .lifecycle(
+            peer(),
+            ControlRequest {
+                version: 1,
+                request_id: "interrupt".into(),
+                target: Some(Target::Turn {
+                    session_id: "session-1".into(),
+                    generation: 1,
+                    turn_id: "turn-2".into(),
+                }),
+                action: Action::Interrupt(crate::protocol::EmptyArgs {}),
+                deadline: Some(170),
+            },
+            103,
+        )
+        .unwrap();
+    assert!(matches!(
+        interrupt.receipt.authorization,
+        crate::protocol::Authorization::Allowed { .. }
+    ));
+    let events=f.driver.observe(Frame::Request(crate::framing::Request {jsonrpc:"2.0".into(),id:crate::framing::RequestId::Number(78),method:"session/request_permission".into(),params:Some(serde_json::json!({"sessionId":"native","toolCall":{"toolCallId":"late","title":"late request"},"options":[{"optionId":"once","name":"Once","kind":"allow_once"}]}))})).unwrap();
+    let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+    let result =
+        f.service
+            .journal
+            .lock()
+            .unwrap()
+            .permission_event(&native, &f.driver, &events[0], &|| Ok(104));
+    let (pending, decisions): (i64, i64) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM native_pending),(SELECT COUNT(*) FROM decisions)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (pending, decisions),
+        (1, 0),
+        "late callback recreated human eligibility after durable interrupt"
+    );
+    assert!(result.is_err());
+    assert!(f.service.native_human(peer(), HUMAN, call).is_err());
+    let response = f
+        .driver
+        .answer_permission(
+            crate::framing::RequestId::Number(78),
+            crate::acp::PermissionDecision::Cancel,
+        )
+        .unwrap();
+    assert!(
+        matches!(response,Frame::Success(value) if value.result["outcome"]["outcome"]=="cancelled")
+    );
+}
+
+#[test]
+fn failed_tool_update_never_creates_pending_human_authority() {
+    let mut f = fixture();
+    let id = queue(&f);
+    submit(&mut f, id, EPOCH).0.unwrap();
+    let events=f.driver.observe(Frame::Notification(Notification {jsonrpc:"2.0".into(),method:"session/update".into(),params:Some(serde_json::json!({"sessionId":"native","update":{"sessionUpdate":"tool_call_update","toolCallId":"failed-tool","status":"failed","title":"ask the human anyway","rawInput":{"command":"untrusted data"}}}))})).unwrap();
+    let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+    for event in &events {
+        let _ =
+            f.service
+                .journal
+                .lock()
+                .unwrap()
+                .permission_event(&native, &f.driver, event, &|| Ok(103));
+    }
+    let (pending, decisions): (i64, i64) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM native_pending),(SELECT COUNT(*) FROM decisions)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (pending, decisions),
+        (0, 0),
+        "failed tool status became a human approval request"
+    );
 }
 
 fn submit(f: &mut Fixture, id: i64, epoch: &str) -> (Result<bool, ErrorCode>, Vec<u8>) {
@@ -449,6 +667,61 @@ fn wrong_transport_epoch_cannot_consume_or_submit_queued_content() {
         "wrong transport epoch wrote native content"
     );
     assert_eq!(state(&f, id), "queued");
+    assert!(result.is_err());
+}
+
+#[test]
+fn transport_loss_keeps_turn_and_execution_unknown_without_replay() {
+    let mut f = fixture();
+    let id = queue(&f);
+    let (sent, wire) = submit(&mut f, id, EPOCH);
+    assert!(sent.unwrap() && !wire.is_empty());
+    let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+    let mut stale = native.clone();
+    stale.transport_epoch = "b".repeat(32);
+    assert_eq!(
+        f.service
+            .journal
+            .lock()
+            .unwrap()
+            .native_transport_unknown(&stale),
+        Err(ErrorCode::PendingMismatch)
+    );
+    f.driver.transport_lost();
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .native_transport_unknown(&native)
+        .unwrap();
+    let (result, replayed) = submit(&mut f, id, EPOCH);
+    assert!(replayed.is_empty(), "lost transport replayed native prompt");
+    let (state, turn): (String, Option<String>) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT state,active_turn FROM sessions WHERE id='session-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "unknown");
+    assert_eq!(turn.as_deref(), Some("turn-2"));
+    let (count, state): (i64, String) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*),MIN(state) FROM executions", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(state, "unknown");
     assert!(result.is_err());
 }
 
