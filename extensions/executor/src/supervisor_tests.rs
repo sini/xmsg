@@ -16,6 +16,18 @@ const OWNER: &[u8] = b"synthetic-owner-only-proof-0000000000";
 const HUMAN: &[u8] = b"synthetic-human-only-proof-0000000000";
 
 #[test]
+fn owned_group_signal_refuses_all_processes_and_reserved_targets() {
+    for value in [i32::MIN, -1, 0, 1] {
+        assert!(
+            negative_owned_group(value).is_err(),
+            "reserved signal target accepted"
+        );
+    }
+    assert_eq!(negative_owned_group(2).unwrap(), -2);
+    assert_eq!(negative_owned_group(123).unwrap(), -123);
+}
+
+#[test]
 fn long_socket_path_refuses_before_execution_or_workspace_effects() {
     let f = fixture();
     admit(&f);
@@ -382,8 +394,563 @@ fn fake_runtime(f: &Fixture) -> OwnerRuntimeConfig {
         backend: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_acp_process.py"),
         python,
         accept_probe: None,
+        acp_configuration: None,
     });
     runtime
+}
+
+#[test]
+fn real_acp_bootstrap_uses_inherited_lease_and_observed_model_before_brief() {
+    real_acp_fixture(false, false);
+}
+
+#[test]
+fn continuous_native_frames_service_attach_and_strict_steer_before_batch_end() {
+    real_acp_fixture(true, false);
+}
+
+#[test]
+fn prelaunch_failed_request_is_terminal_and_does_not_block_one_slot_after_restart() {
+    real_acp_fixture(false, true);
+}
+
+fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
+    use crate::runtime_config::{
+        PinnedExecutable, ProgramConfig, RuntimeConfig, ServicePaths, WorkspaceConfig,
+    };
+    use sha2::{Digest, Sha256};
+    let f = fixture();
+    let mut runtime = fake_runtime(&f);
+    let python = runtime
+        .fixture
+        .as_ref()
+        .unwrap()
+        .python
+        .canonicalize()
+        .unwrap();
+    let pinned = PinnedExecutable {
+        sha256: hex::encode(Sha256::digest(fs::read(&python).unwrap())),
+        path: python,
+    };
+    let pin = crate::capability::builtin_pins()
+        .unwrap()
+        .pins
+        .remove(0)
+        .pin;
+    let trace = f.dir.path().join("native-wire.jsonl");
+    let barrier_path = f.dir.path().join("prompt-barrier");
+    let barrier = UnixListener::bind(&barrier_path).unwrap();
+    barrier.set_nonblocking(true).unwrap();
+    let buffer_path = f.dir.path().join("buffer-barrier");
+    let buffer_barrier = UnixListener::bind(&buffer_path).unwrap();
+    buffer_barrier.set_nonblocking(true).unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_runtime_acp.py");
+    let mut config = f.config.clone();
+    if fairness {
+        config.grants.push(Grant {
+            principal: "worker".into(),
+            verb: Verb::Steer,
+            target: GrantTarget::Session {
+                session_id: "session-1".into(),
+                generation: 1,
+            },
+        });
+    }
+    let resolved = &mut config.defaults[0].resolved;
+    resolved.qualification.pin_id = pin.id.clone();
+    resolved.qualification.adapter_version = pin.adapter_version;
+    resolved.qualification.runtime_version = pin.runtime_version;
+    resolved.qualification.native_mode = "default".into();
+    let model = resolved.model.clone();
+    let workspace = resolved.workspace.clone();
+    let root = f.dir.path();
+    let mut configuration = RuntimeConfig {
+        version: 1,
+        control: config,
+        paths: ServicePaths {
+            journal: root.join("real-acp-journal.db"),
+            lifecycle_socket: root.join("lifecycle"),
+            owner_socket: root.join("owner"),
+            human_socket: root.join("human"),
+            attribution_socket: root.join("attribution"),
+            runtime_root: runtime.root.clone(),
+            owner_credential_file: root.join("owner-proof"),
+            human_credential_file: root.join("human-proof"),
+        },
+        programs: vec![ProgramConfig {
+            pin_id: pin.id,
+            adapter: pinned.clone(),
+            native: pinned.clone(),
+            arguments: vec![
+                script.to_string_lossy().into_owned(),
+                trace.to_string_lossy().into_owned(),
+                barrier_path.to_string_lossy().into_owned(),
+            ],
+            native_mode: "default".into(),
+            model,
+            native_model_id: "fake-model".into(),
+        }],
+        workspaces: vec![WorkspaceConfig {
+            repo_id: workspace.repo_identity,
+            repository: root.join("repo"),
+            approved_root: root.join("worktrees"),
+            base_revision: workspace.base_revision,
+            destination_selector: workspace.destination_selector,
+        }],
+        launch_environment: crate::launch_environment::LaunchEnvironment {
+            search_path: vec![std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .find(|directory| directory.join("git").is_file())
+                .unwrap()],
+            account_home: None,
+        },
+    };
+    if fairness {
+        configuration.programs[0].arguments.extend([
+            "fairness".into(),
+            buffer_path.to_string_lossy().into_owned(),
+        ]);
+    }
+    if prelaunch_failure {
+        configuration.control.defaults[0]
+            .resolved
+            .budget
+            .worker_slots = 1;
+        let mut bad = configuration.control.defaults[0].clone();
+        bad.team_id = "bad-team".into();
+        bad.resolved.workspace.repo_identity = "bad-repo".into();
+        configuration.control.defaults.push(bad);
+        let mut bad_workspace = configuration.workspaces[0].clone();
+        bad_workspace.repo_id = "bad-repo".into();
+        bad_workspace.repository = root.join("absent-repository");
+        configuration.workspaces.push(bad_workspace);
+        configuration.control.grants.push(Grant {
+            principal: "worker".into(),
+            verb: Verb::Dispatch,
+            target: GrantTarget::Team {
+                team_id: "bad-team".into(),
+            },
+        });
+        for verb in [Verb::Status, Verb::Result] {
+            configuration.control.grants.push(Grant {
+                principal: "worker".into(),
+                verb,
+                target: GrantTarget::Session {
+                    session_id: "session-1".into(),
+                    generation: 1,
+                },
+            });
+        }
+    }
+    for index in 0..configuration.control.defaults.len() {
+        let digest = configuration
+            .effective_digest(&configuration.control.defaults[index].resolved)
+            .unwrap();
+        configuration.control.defaults[index]
+            .resolved
+            .qualification
+            .effective_config_digest = digest;
+    }
+    let executor = Arc::new(
+        crate::runtime_config::ExecutableArtifact::observe(&std::env::current_exe().unwrap())
+            .unwrap(),
+    );
+    let (host, kernel) = crate::runtime_policy::runtime_envelope().unwrap();
+    let now = crate::runtime_process::unix_now().unwrap();
+    let record = crate::eligibility::AdapterQualification {
+        key: configuration.control.defaults[0]
+            .resolved
+            .qualification
+            .clone(),
+        adapter_sha256: pinned.sha256.clone(),
+        native_sha256: pinned.sha256,
+        executor_sha256: executor.sha256.clone(),
+        capabilities: vec![crate::capability::Capability::StrictSteer],
+        host,
+        uid: xmsg::client::current_uid(),
+        operating_system: std::env::consts::OS.into(),
+        architecture: std::env::consts::ARCH.into(),
+        kernel,
+        policy_revision: 1,
+        expires_at: now + 60,
+        revoked: false,
+    };
+    let mut records = vec![record.clone()];
+    if prelaunch_failure {
+        let mut bad_record = record;
+        bad_record.key = configuration.control.defaults[1]
+            .resolved
+            .qualification
+            .clone();
+        records.push(bad_record);
+    }
+    let mut service = ControlService::open(
+        &configuration.paths.journal,
+        xmsg::client::current_uid(),
+        configuration.control.clone(),
+        ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
+    )
+    .unwrap()
+    .fixture_attributed("worker");
+    service.journal.lock().unwrap().runtime_policy = Some(Arc::new(
+        crate::runtime_policy::RuntimePolicy::fixture(configuration.clone(), records, executor),
+    ));
+    runtime.fixture.as_mut().unwrap().acp_configuration = Some(configuration.clone());
+    let mut repeated_outcome = None;
+    if prelaunch_failure {
+        let mut bad = ControlRequest::dispatch("bad-first".into(), "no process should run".into());
+        bad.target = Some(Target::Team {
+            team_id: "bad-team".into(),
+        });
+        let admitted = service.lifecycle(peer(), bad.clone(), now).unwrap();
+        let old_reply = serde_json::to_value(&admitted).unwrap();
+        assert!(old_reply.get("pre_launch_failure").is_none());
+        assert!(
+            serde_json::from_value::<crate::control::ControlReply>(old_reply)
+                .unwrap()
+                .pre_launch_failure
+                .is_none()
+        );
+        assert!(crate::operator::dispatch_once_inner(
+            &service,
+            &configuration,
+            runtime.fixture.clone()
+        )
+        .is_err());
+        let policy = service.journal.lock().unwrap().runtime_policy.clone();
+        drop(service);
+        service = ControlService::open(
+            &configuration.paths.journal,
+            xmsg::client::current_uid(),
+            configuration.control.clone(),
+            ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
+        )
+        .unwrap()
+        .fixture_attributed("worker");
+        service.journal.lock().unwrap().runtime_policy = policy;
+        assert!(matches!(
+            service.journal.lock().unwrap().reserve_launch(1, now),
+            Err(ErrorCode::PreLaunchFailed)
+        ));
+        assert!(matches!(
+            SupervisorController::new(runtime.clone()).start_admitted_at(
+                &service,
+                1,
+                &crate::runtime_process::unix_now
+            ),
+            Err(SupervisorError::Journal(ErrorCode::PreLaunchFailed))
+        ));
+        let effects: i64 = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            effects, 0,
+            "direct controller reopened a terminal failed admission"
+        );
+        assert!(
+            !trace.exists(),
+            "terminal failed admission reached the native process"
+        );
+        repeated_outcome = Some(crate::operator::dispatch_once_inner(
+            &service,
+            &configuration,
+            runtime.fixture.clone(),
+        ));
+        let replay = service.lifecycle(peer(), bad, now).unwrap();
+        assert!(replay.replayed && replay.historical);
+        assert_eq!(
+            replay.pre_launch_failure,
+            Some(crate::control::PreLaunchFailure::Failed {
+                admission_id: 1,
+                code: ErrorCode::InvalidConfiguration,
+                submission: crate::control::PreLaunchSubmission::NotAttempted
+            })
+        );
+        for (id, action) in [
+            (
+                "bad-status",
+                Action::Status(crate::protocol::ReadArgs {
+                    max_events: 1,
+                    max_text_bytes: 1024,
+                }),
+            ),
+            (
+                "bad-result",
+                Action::Result(crate::protocol::ReadArgs {
+                    max_events: 1,
+                    max_text_bytes: 1024,
+                }),
+            ),
+        ] {
+            let reply = service
+                .lifecycle(
+                    peer(),
+                    ControlRequest {
+                        version: 1,
+                        request_id: id.into(),
+                        target: Some(Target::Execution {
+                            session_id: "session-1".into(),
+                            generation: 1,
+                        }),
+                        action,
+                        deadline: None,
+                    },
+                    now,
+                )
+                .unwrap();
+            assert_eq!(reply.pre_launch_failure, replay.pre_launch_failure);
+        }
+    }
+    let mut good = ControlRequest::dispatch("real-acp".into(), "only fake brief".into());
+    if prelaunch_failure {
+        good.target = Some(Target::Team {
+            team_id: "team-a".into(),
+        });
+    }
+    service.lifecycle(peer(), good, now).unwrap();
+    let controller = SupervisorController::new(runtime.clone());
+    let started = if prelaunch_failure {
+        crate::operator::dispatch_once_inner(&service, &configuration, runtime.fixture.clone())
+            .map_err(SupervisorError::from)
+            .map(|r| r.expect("valid second admission never progressed"))
+    } else {
+        controller.start_admitted_at(&service, 1, &crate::runtime_process::unix_now)
+    };
+    if prelaunch_failure {
+        let executions: i64 = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM executions WHERE admission_id=4",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            executions, 1,
+            "terminal failed admission starved the valid single-slot request after restart"
+        );
+        assert!(
+            repeated_outcome.unwrap().unwrap().is_none(),
+            "failed prelaunch admission was selected again after restart"
+        );
+    }
+    let proof: serde_json::Value =
+        serde_json::from_slice(&fs::read(trace.with_extension("fd-proof")).unwrap()).unwrap();
+    assert_eq!(
+        proof["matching_startup_sockets"],
+        serde_json::json!([]),
+        "native child inherited the broker startup socket identity"
+    );
+    assert_eq!(
+        proof["inherited_sockets"],
+        serde_json::json!([]),
+        "native child inherited an unowned socket"
+    );
+    let started = started.unwrap();
+    if prelaunch_failure {
+        let mut journal = service.journal.lock().unwrap();
+        journal
+            .fail_before_launch(4, ErrorCode::Storage, now)
+            .unwrap();
+        assert!(
+            crate::execution::pre_launch_failure(&journal.db, &started.identity.session_id)
+                .unwrap()
+                .is_none(),
+            "post-spawn execution was reclassified as prelaunch failure"
+        );
+        let failures: i64 = journal
+            .db
+            .query_row("SELECT COUNT(*) FROM pre_launch_failures", [], |r| r.get(0))
+            .unwrap();
+        let audits: i64 = journal
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM audit WHERE event='pre_launch_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let executions: i64 = journal
+            .db
+            .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((failures,audits,executions),(1,1,1),"bad admission was retried or valid single-slot execution did not progress exactly once");
+        assert_eq!(started.identity.session_id, "session-4");
+    }
+    assert_eq!(started.state, ExecutionState::Running);
+    let mut prompt = accept_fixture(&barrier, "real ACP prompt effect").unwrap();
+    let mut reached = [0];
+    prompt.read_exact(&mut reached).unwrap();
+    assert_eq!(reached, [b'P']);
+    let frames: Vec<serde_json::Value> = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let methods: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| frame["method"].as_str())
+        .collect();
+    assert_eq!(
+        &methods[..4],
+        &[
+            "initialize",
+            "session/new",
+            "session/set_mode",
+            "session/set_config_option"
+        ]
+    );
+    assert_eq!(methods[4], "session/prompt");
+    assert_eq!(frames[4]["params"]["prompt"][0]["text"], "only fake brief");
+    prompt.write_all(b"R").unwrap();
+    if fairness {
+        let mut buffered = accept_fixture(&buffer_barrier, "buffered native fairness").unwrap();
+        let mut notice = [0];
+        buffered.read_exact(&mut notice).unwrap();
+        assert_eq!(notice, [b'B']);
+        let (turn, binding) = {
+            let journal = service.journal.lock().unwrap();
+            let turn: String = journal
+                .db
+                .query_row(
+                    "SELECT active_turn FROM sessions WHERE id='session-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (
+                turn,
+                crate::lifecycle::binding(&journal.db, "session-1", 1).unwrap(),
+            )
+        };
+        service
+            .lifecycle(
+                peer(),
+                ControlRequest {
+                    version: 1,
+                    request_id: "fair-steer".into(),
+                    target: Some(Target::Turn {
+                        session_id: "session-1".into(),
+                        generation: 1,
+                        turn_id: turn,
+                    }),
+                    action: Action::Steer(crate::protocol::SteerArgs {
+                        text: "strict fake steer".into(),
+                    }),
+                    deadline: None,
+                },
+                now,
+            )
+            .unwrap();
+        let admission: i64 = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT id FROM admissions WHERE request_id='fair-steer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let socket = controller
+            .config
+            .root
+            .join(component("session-1", 1))
+            .join("supervisor.sock");
+        let mut steer = blocking_fixture_stream(UnixStream::connect(&socket).unwrap()).unwrap();
+        frame(
+            &mut steer,
+            &SupervisorRequest::SubmitNative {
+                identity: started.identity.clone(),
+                admission_id: admission,
+                transport_epoch: binding.transport_epoch,
+            },
+        )
+        .unwrap();
+        let mut attach = blocking_fixture_stream(UnixStream::connect(&socket).unwrap()).unwrap();
+        frame(
+            &mut attach,
+            &SupervisorRequest::Attach {
+                identity: started.identity.clone(),
+            },
+        )
+        .unwrap();
+        buffered.write_all(b"R").unwrap();
+        let submitted: SupervisorHello = read_frame(&steer).unwrap();
+        let attached: SupervisorHello = read_frame(&attach).unwrap();
+        let mut notices = Vec::new();
+        for _ in 0..2 {
+            let mut end =
+                accept_fixture(&buffer_barrier, "native batch and strict steer receipts").unwrap();
+            end.read_exact(&mut notice).unwrap();
+            notices.push(notice[0]);
+        }
+        notices.sort();
+        assert_eq!(notices, vec![b'E', b'S']);
+        let journal = service.journal.lock().unwrap();
+        let end_cursor: i64 = journal
+            .db
+            .query_row(
+                "SELECT cursor FROM execution_events WHERE event LIKE '%batch-end%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let status: String = journal
+            .db
+            .query_row(
+                "SELECT state FROM native_operations WHERE admission_id=?1",
+                [admission],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            submitted.event_cursor < end_cursor as u64,
+            "strict steer was delayed until the native batch-end marker was processed"
+        );
+        assert!(
+            attached.event_cursor < end_cursor as u64,
+            "attach was delayed until the native batch-end marker was processed"
+        );
+        assert!(
+            matches!(status.as_str(), "submitted" | "observed"),
+            "strict steer produced no native command"
+        );
+        drop(journal);
+        let wire = fs::read_to_string(&trace).unwrap();
+        let steering: serde_json::Value = wire
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|f| f["method"] == "_session/steering")
+            .unwrap();
+        assert_eq!(steering["params"]["prompt"][0]["text"], "strict fake steer");
+        assert_eq!(
+            steering["params"]["_meta"]["steering"]["idleBehavior"],
+            "promptRequired"
+        );
+    }
+    service
+        .admin(
+            peer(),
+            OWNER,
+            crate::control::AdminCommand::DisableRuntime {
+                request_id: "disable-fake".into(),
+                expected_revision: 1,
+            },
+            now,
+        )
+        .unwrap();
+    let stopped = controller
+        .reconcile(&service, &started.identity.session_id, 1, now)
+        .unwrap();
+    assert_ne!(stopped.state, ExecutionState::Running);
 }
 fn stop(f: &Fixture, controller: &SupervisorController) -> ExecutionObservation {
     f.service
@@ -512,7 +1079,24 @@ fn fixture_process_entrypoint() {
             .unwrap();
         writeln!(starts, "{}", std::process::id()).unwrap();
         starts.sync_all().unwrap();
-        run_supervisor_process(manifest).unwrap();
+        if matches!(
+            manifest.backend,
+            crate::runtime_process::Backend::Acp { .. }
+        ) {
+            let crate::runtime_process::Backend::Acp { configuration, .. } = &manifest.backend
+            else {
+                unreachable!()
+            };
+            let trace = PathBuf::from(&configuration.programs[0].arguments[1]);
+            let held = unsafe { std::os::fd::BorrowedFd::borrow_raw(manifest.startup_fd) }
+                .try_clone_to_owned()
+                .unwrap();
+            let metadata = File::from(held).metadata().unwrap();
+            fs::write(trace.with_extension("fd-expected"), serde_json::to_vec(&serde_json::json!({"dev":metadata.dev(), "ino":metadata.ino(), "kind":metadata.mode() & 0o170000, "fd":manifest.startup_fd})).unwrap()).unwrap();
+            run_inherited(manifest.startup_fd, manifest.max_wall_ms).unwrap();
+        } else {
+            run_supervisor_process(manifest).unwrap();
+        }
     } else if role == "broker" {
         let data: BrokerFixture =
             serde_json::from_str(&std::env::var("XMSG_EXECUTOR_BROKER_FIXTURE").unwrap()).unwrap();
@@ -537,6 +1121,7 @@ fn fixture_process_entrypoint() {
             backend: data.backend,
             python: data.python,
             accept_probe: None,
+            acp_configuration: None,
         });
         runtime.barrier = Some(FixtureBarrier {
             point: data.point,

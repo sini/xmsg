@@ -720,11 +720,11 @@ fn bounded_command(
     mut command: Command,
     input: Option<&[u8]>,
 ) -> Result<GitOutput, WorkspaceError> {
-    let mut child = command
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = xmsg::client::caller_attribution::with_fd_inheritance_gate(|| command.spawn())
         .map_err(|_| WorkspaceError::Git)?;
     let mut stdout = child.stdout.take().ok_or(WorkspaceError::Git)?;
     let mut stderr = child.stderr.take().ok_or(WorkspaceError::Git)?;

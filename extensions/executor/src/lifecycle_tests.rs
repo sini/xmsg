@@ -161,6 +161,7 @@ fn fixture() -> Fixture {
     };
     let program_model = control.defaults[0].resolved.model.clone();
     let mut configuration = RuntimeConfig {
+        launch_environment: Default::default(),
         version: 1,
         control,
         paths: ServicePaths {
@@ -394,6 +395,34 @@ fn pending_decision(f: &mut Fixture) -> crate::approval::HumanDecisionCall {
     }
 }
 
+fn respond(
+    f: &mut Fixture,
+    approval: &str,
+    epoch: &str,
+    at: i64,
+) -> (Result<(), ErrorCode>, Vec<u8>) {
+    use std::io::Read;
+    let (mut writer, mut reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    let result = {
+        let mut io = crate::supervisor::DeadlineIo::new(
+            &mut writer,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        f.service.journal.lock().unwrap().submit_native_decision(
+            approval,
+            &mut f.driver,
+            epoch,
+            &|| Ok(at),
+            &mut io,
+        )
+    };
+    drop(writer);
+    let mut wire = vec![];
+    reader.read_to_end(&mut wire).unwrap();
+    (result, wire)
+}
+
 #[test]
 fn native_approval_requires_current_explicit_confirmation_and_one_use_option() {
     let mut f = fixture();
@@ -456,6 +485,22 @@ fn native_approval_requires_current_explicit_confirmation_and_one_use_option() {
         .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(decisions, 1, "human replay created another native decision");
+    let (sent, wire) = respond(
+        &mut f,
+        &replay.decision.as_ref().unwrap().approval_id,
+        EPOCH,
+        104,
+    );
+    sent.unwrap();
+    let response: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(response["id"], 77);
+    assert_eq!(response["result"]["outcome"]["optionId"], "once");
+    let (again, repeated) = respond(&mut f, &replay.decision.unwrap().approval_id, EPOCH, 105);
+    assert!(
+        repeated.is_empty(),
+        "recorded human decision emitted a second native approval response"
+    );
+    assert!(again.is_err());
 }
 
 #[test]
@@ -521,6 +566,39 @@ fn durable_interrupt_prevents_late_permission_from_reopening_human_approval() {
     assert!(
         matches!(response,Frame::Success(value) if value.result["outcome"]["outcome"]=="cancelled")
     );
+}
+
+#[test]
+fn recorded_human_decision_cannot_cross_transport_epoch_or_eligibility_loss() {
+    let mut f = fixture();
+    let call = pending_decision(&mut f);
+    let approval = call.confirmation.approval_id.clone();
+    f.service.native_human(peer(), HUMAN, call).unwrap();
+    let (wrong, wire) = respond(&mut f, &approval, "b", 104);
+    assert!(wire.is_empty(), "human decision crossed transport epoch");
+    assert!(wrong.is_err());
+    f.service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(
+        RuntimePolicy::reviewed(f.configuration.clone()).unwrap(),
+    ));
+    let (lost, wire) = respond(&mut f, &approval, EPOCH, 104);
+    assert!(
+        wire.is_empty(),
+        "lost eligibility emitted native human approval"
+    );
+    let state: String = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT state FROM native_pending WHERE approval_id=?1",
+            [approval],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "decision_recorded");
+    assert!(lost.is_err());
 }
 
 #[test]
@@ -596,6 +674,52 @@ fn qualified_fake_queue_submits_one_real_serialized_frame_once() {
     );
     assert_eq!(state(&f, id), "submitted");
     assert!(replay.is_err());
+}
+
+#[test]
+fn normal_completion_clears_turn_but_synthetic_cancel_keeps_unknown_fence() {
+    for cancelled in [false, true] {
+        let mut f = fixture();
+        let id = queue(&f);
+        let (_, wire) = submit(&mut f, id, EPOCH);
+        let Frame::Request(request) = serde_json::from_slice::<Frame>(&wire).unwrap() else {
+            panic!("expected prompt");
+        };
+        let frame = Frame::Success(Success {
+            jsonrpc: "2.0".into(),
+            id: request.id.clone(),
+            result: serde_json::json!({"stopReason":if cancelled {"cancelled"} else {"end_turn"}}),
+        });
+        let events = f.driver.observe(frame).unwrap();
+        let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+        for event in events {
+            f.service
+                .journal
+                .lock()
+                .unwrap()
+                .observe_native(&native, &f.driver, &event, Some(&request.id), &|| Ok(103))
+                .unwrap();
+        }
+        let (state, turn): (String, Option<String>) = f
+            .service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT state,active_turn FROM sessions WHERE id='session-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        if cancelled {
+            assert_eq!(state, "unknown");
+            assert_eq!(turn.as_deref(), Some("turn-2"));
+        } else {
+            assert_eq!(state, "background");
+            assert!(turn.is_none());
+        }
+    }
 }
 
 #[test]

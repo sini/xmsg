@@ -1,8 +1,12 @@
 # Optional executor contracts (planned)
 
-This standalone Rust library contains internal contracts, a fail-closed control journal and deterministic ACP fixtures for a future local executor. It has its own Cargo manifest and lockfile; it does not convert the root project into a workspace or add an executable. The bus default package, recipient shapes and six existing MCP tools are unchanged.
+This standalone Rust package contains internal contracts, a fail-closed control journal and a staged supervisor entrypoint. It has its own Cargo manifest and lockfile; it does not convert the root project into a workspace or change the bus default package, recipient shapes or existing MCP tools.
 
-There is no public launch producer, installed executable, real harness/backend, reviewer, model/provider invocation, service installation or credential provisioning here. The daemon-query attribution mechanism remains production-unqualified. A crate-private supervisor foundation owns real OS child/process-group handles and locks; only test helpers select a fake ACP process. Runtime activation still needs separately reviewed qualification evidence.
+Runtime activation is disabled: adapter qualification is empty and trusted caller qualification references remain unavailable. The staged entrypoint does not provide an activation switch. No executable is installed, and no real harness, reviewer, model/provider invocation, service installation or credential provisioning is qualified here. A crate-private supervisor owns real OS child/process-group handles and locks; only test helpers supply fake qualification facts and an ACP process.
+
+The startup channel is restored to close-on-exec before any adapter spawn. Native IO processes at most one frame per iteration before servicing control and queued effects. Definitely pre-launch failures are durable journal outcomes (`failed`, `not_attempted`), excluded from the broker and direct launch lease paths; they release only their unstarted journal slot. Unknown post-spawn executions retain their slot and reconciliation fence.
+
+Owner launch environment is a bounded fixed search path plus an optional real account home validated against the current UID's passwd entry. Preflight lookup occurs outside journal locks; native executable overrides come from pinned program paths. This launch description is not proof of native effective settings, account limits or capability qualification.
 
 ## Contracts
 
