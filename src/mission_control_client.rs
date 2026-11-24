@@ -791,6 +791,28 @@ mod tests {
             .state(now),
             Connection::Delayed,
         );
+
+        // Non-delivering delayed node + live eligible current node -> Live.
+        for status in [
+            codec::Status::Loading,
+            codec::Status::Denied,
+            codec::Status::UnsupportedOutboundOnly,
+            codec::Status::UnsupportedTransport,
+        ] {
+            assert_eq!(
+                synced_view(vec![
+                    test_node("non-delivering", status, Delivery::Delayed),
+                    test_node("current", codec::Status::Healthy, Delivery::Live),
+                ])
+                .state(now),
+                Connection::Live,
+            );
+        }
+
+        // Empty fleet, then 1006 (closed while synced, within stale_after) -> Reconnecting.
+        let mut closed_empty = synced_view(vec![]);
+        closed_empty.open = false;
+        assert_eq!(closed_empty.state(now), Connection::Reconnecting);
     }
     #[tokio::test]
     async fn proxy_refusal_stops_before_reconnecting() {
