@@ -155,6 +155,11 @@ let
           lib.filterAttrs (n: _: lib.hasPrefix "xmsg" n && lib.hasSuffix "StableExe" n)
             (hmEval system { programs.xmsg.server.stableExecutable = null; }).home.activation
         );
+        disabledServerStableExe = lib.attrNames (
+          lib.filterAttrs (n: _: lib.hasPrefix "xmsg" n && lib.hasSuffix "StableExe" n)
+            (hmEval system { programs.xmsg.server.enable = false; }).home.activation
+        );
+        darwinWarnings = (hmEval system { systemd.user.startServices = "suggest"; }).warnings;
         codexCollision = failedAssertions (
           hmEval system {
             programs.xmsg.server.stableExecutable = "/Users/alice/.local/share/xmsg/bin/xmsg";
@@ -201,6 +206,8 @@ let
           kicks = true;
         };
         nullActivation = [ ];
+        disabledServerStableExe = [ ];
+        darwinWarnings = [ ];
         codexCollision = [
           "programs.xmsg.server.stableExecutable: /Users/alice/.local/share/xmsg/bin/xmsg is the Codex harness's store link; pick another path."
         ];
@@ -1352,6 +1359,24 @@ in
             umask = linuxOc.systemd.user.services.xmsg-observe-collector.Service.UMask;
             wantedBy = linuxOc.systemd.user.services.xmsg-observe-collector.Install.WantedBy;
             launchd = linuxOc.launchd.agents ? xmsg-observe-collector;
+            warnSuggest =
+              (hmEval "x86_64-linux" {
+                systemd.user.startServices = "suggest";
+                programs.xmsg.server.enable = false;
+                programs.xmsg.observeCollector = {
+                  enable = true;
+                  config = ocCfg;
+                };
+              }).warnings;
+            warnSdSwitch =
+              (hmEval "x86_64-linux" {
+                systemd.user.startServices = "sd-switch";
+                programs.xmsg.server.enable = false;
+                programs.xmsg.observeCollector = {
+                  enable = true;
+                  config = ocCfg;
+                };
+              }).warnings;
             failed = failedAssertions linuxOc;
           };
           darwin = {
@@ -1361,6 +1386,15 @@ in
             stderr = darwinOc.launchd.agents.xmsg-observe-collector.config.StandardErrorPath;
             umask = darwinOc.launchd.agents.xmsg-observe-collector.config.Umask;
             systemd = darwinOc.systemd.user.services ? xmsg-observe-collector;
+            warnings =
+              (hmEval "aarch64-darwin" {
+                systemd.user.startServices = "suggest";
+                programs.xmsg.server.enable = false;
+                programs.xmsg.observeCollector = {
+                  enable = true;
+                  config = ocCfg;
+                };
+              }).warnings;
             failed = failedAssertions darwinOc;
           };
         };
@@ -1381,6 +1415,10 @@ in
             umask = "0077";
             wantedBy = [ "default.target" ];
             launchd = false;
+            warnSuggest = [
+              "programs.xmsg.observeCollector.enable: systemd.user.startServices is not \"sd-switch\", so a home-manager switch will not restart xmsg-observe-collector.service."
+            ];
+            warnSdSwitch = [ ];
             failed = [ ];
           };
           darwin = {
@@ -1397,6 +1435,7 @@ in
             stderr = "/Users/alice/Library/Logs/xmsg/observe-collector-stderr.log";
             umask = 63;
             systemd = false;
+            warnings = [ ];
             failed = [ ];
           };
         };
@@ -1595,6 +1634,45 @@ in
     # Oracle 3: darwin has the launchd agent and no systemd unit (evaluation only).
     # aarch64 only: nixpkgs 26.11 has dropped x86_64-darwin.
     test-darwin-aarch64 = darwinCells "aarch64-darwin";
+
+    # Darwin log-dir activation exists iff at least one of server, observeCollector, or execServices is enabled.
+    test-darwin-log-dir =
+      let
+        hasLogDir = system: extra: (hmEval system extra).home.activation ? xmsgLogDir;
+      in
+      {
+        expr = {
+          allOff = hasLogDir "aarch64-darwin" {
+            programs.xmsg.server.enable = false;
+          };
+          serveOnly = hasLogDir "aarch64-darwin" { };
+          collectorOnly = hasLogDir "aarch64-darwin" {
+            programs.xmsg.server.enable = false;
+            programs.xmsg.observeCollector = {
+              enable = true;
+              config = { };
+            };
+          };
+          execOnly = hasLogDir "aarch64-darwin" {
+            programs.xmsg.server.enable = false;
+            programs.xmsg.server.execServices.quota.command = "/opt/quota/bin/quota";
+          };
+          linuxAllOn = hasLogDir "x86_64-linux" {
+            programs.xmsg.observeCollector = {
+              enable = true;
+              config = { };
+            };
+            programs.xmsg.server.execServices.quota.command = "/opt/quota/bin/quota";
+          };
+        };
+        expected = {
+          allOff = false;
+          serveOnly = true;
+          collectorOnly = true;
+          execOnly = true;
+          linuxAllOn = false;
+        };
+      };
 
     # P1 (programs.xmsg.server.sockets.dir unset): every pin surface equals the render before the
     # option existed, recorded from that revision in fixtures/sockets-dir-unset-*.json.
