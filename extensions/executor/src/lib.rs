@@ -3,6 +3,7 @@
 pub mod capability;
 pub mod framing;
 pub mod protocol;
+pub mod runtime_config;
 
 pub mod auth;
 pub mod control;
