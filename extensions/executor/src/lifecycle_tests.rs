@@ -142,7 +142,13 @@ fn fixture() -> Fixture {
             team_id: "team".into(),
             profile_id: "safe".into(),
             resolved,
-            lifecycle_verbs: vec![Verb::Send, Verb::Steer, Verb::Interrupt, Verb::Resume],
+            lifecycle_verbs: vec![
+                Verb::Send,
+                Verb::Steer,
+                Verb::Interrupt,
+                Verb::Resume,
+                Verb::Status,
+            ],
         }],
     };
     let mut configuration = RuntimeConfig {
@@ -316,30 +322,43 @@ fn state(f: &Fixture, id: i64) -> String {
         .unwrap()
 }
 
+fn submit(f: &mut Fixture, id: i64, epoch: &str) -> (Result<bool, ErrorCode>, Vec<u8>) {
+    use std::io::Read;
+    let (mut writer, mut reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    let result = {
+        let mut io = crate::supervisor::DeadlineIo::new(
+            &mut writer,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        f.service.journal.lock().unwrap().submit_native(
+            id,
+            &mut f.driver,
+            epoch,
+            &|| Ok(102),
+            &mut io,
+        )
+    };
+    drop(writer);
+    let mut wire = vec![];
+    reader.read_to_end(&mut wire).unwrap();
+    (result, wire)
+}
+
 #[test]
 fn qualified_fake_queue_submits_one_real_serialized_frame_once() {
     let mut f = fixture();
     let id = queue(&f);
-    let mut wire = vec![];
-    assert!(f
-        .service
-        .journal
-        .lock()
-        .unwrap()
-        .submit_native(id, &mut f.driver, EPOCH, &|| Ok(102), &mut wire)
-        .unwrap());
+    let (result, wire) = submit(&mut f, id, EPOCH);
+    assert!(result.unwrap());
     let frame: serde_json::Value = serde_json::from_slice(&wire).unwrap();
     assert_eq!(frame["method"], "session/prompt");
     assert_eq!(frame["params"]["prompt"][0]["text"], "queued content");
-    let before = wire.clone();
-    let replay = f.service.journal.lock().unwrap().submit_native(
-        id,
-        &mut f.driver,
-        EPOCH,
-        &|| Ok(103),
-        &mut wire,
+    let (replay, repeated_wire) = submit(&mut f, id, EPOCH);
+    assert!(
+        repeated_wire.is_empty(),
+        "native submission replay wrote another frame"
     );
-    assert_eq!(wire, before, "native submission replay wrote another frame");
     assert_eq!(state(&f, id), "submitted");
     assert!(replay.is_err());
 }
@@ -351,14 +370,7 @@ fn losing_eligibility_after_queue_writes_no_native_frame_or_new_launch() {
     f.service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(
         RuntimePolicy::reviewed(f.configuration.clone()).unwrap(),
     ));
-    let mut wire = vec![];
-    let result = f.service.journal.lock().unwrap().submit_native(
-        id,
-        &mut f.driver,
-        EPOCH,
-        &|| Ok(102),
-        &mut wire,
-    );
+    let (result, wire) = submit(&mut f, id, EPOCH);
     assert!(
         wire.is_empty(),
         "lost eligibility submitted queued native content"
@@ -398,14 +410,7 @@ fn emergency_disable_blocks_queued_native_output_even_with_current_qualification
     f.service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(
         RuntimePolicy::fixture(f.configuration.clone(), vec![f.record.clone()]),
     ));
-    let mut wire = vec![];
-    let result = f.service.journal.lock().unwrap().submit_native(
-        id,
-        &mut f.driver,
-        EPOCH,
-        &|| Ok(103),
-        &mut wire,
-    );
+    let (result, wire) = submit(&mut f, id, EPOCH);
     assert!(
         wire.is_empty(),
         "emergency disable submitted queued native content"
@@ -418,18 +423,151 @@ fn emergency_disable_blocks_queued_native_output_even_with_current_qualification
 fn wrong_transport_epoch_cannot_consume_or_submit_queued_content() {
     let mut f = fixture();
     let id = queue(&f);
-    let mut wire = vec![];
-    let result = f.service.journal.lock().unwrap().submit_native(
-        id,
-        &mut f.driver,
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        &|| Ok(102),
-        &mut wire,
-    );
+    let (result, wire) = submit(&mut f, id, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     assert!(
         wire.is_empty(),
         "wrong transport epoch wrote native content"
     );
     assert_eq!(state(&f, id), "queued");
     assert!(result.is_err());
+}
+
+#[test]
+fn wedged_native_writer_releases_journal_for_owner_disable_and_status() {
+    use std::{
+        io::{Read, Write},
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+    let mut f = fixture();
+    let id = queue(&f);
+    let (mut writer, mut reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    writer.set_nonblocking(true).unwrap();
+    let mut blocked = false;
+    for _ in 0..1_000_000 {
+        match writer.write(&[0]) {
+            Ok(1) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                blocked = true;
+                break;
+            }
+            result => panic!("fixture socket fill failed: {result:?}"),
+        }
+    }
+    assert!(blocked, "fixture did not reach actual socket backpressure");
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let service = &f.service;
+    let driver = &mut f.driver;
+    std::thread::scope(|scope| {
+        let effect = scope.spawn(move || {
+            let mut io = crate::supervisor::DeadlineIo::new(
+                &mut writer,
+                Instant::now() + Duration::from_millis(100),
+            )
+            .unwrap();
+            io.fixture_before_poll(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            });
+            let result = service.journal.lock().unwrap().submit_native(
+                id,
+                driver,
+                EPOCH,
+                &|| Ok(102),
+                &mut io,
+            );
+            let _ = done_tx.send(result);
+            result
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            matches!(
+                service.journal.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ),
+            "writer fixture did not hold journal at effect boundary"
+        );
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let status_attempt = attempt_tx.clone();
+        let owner = scope.spawn(move || {
+            let _ = attempt_tx.send(());
+            service.admin(
+                peer(),
+                OWNER,
+                AdminCommand::DisableRuntime {
+                    request_id: "disable-wedged".into(),
+                    expected_revision: 1,
+                },
+                103,
+            )
+        });
+        let status = scope.spawn(move || {
+            let _ = status_attempt.send(());
+            service.lifecycle(
+                peer(),
+                ControlRequest {
+                    version: 1,
+                    request_id: "status-wedged".into(),
+                    target: Some(Target::Execution {
+                        session_id: "session-1".into(),
+                        generation: 1,
+                    }),
+                    action: Action::Status(crate::protocol::ReadArgs {
+                        max_events: 1,
+                        max_text_bytes: 1024,
+                    }),
+                    deadline: Some(170),
+                },
+                103,
+            )
+        });
+        attempt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        attempt_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        release_tx.send(()).unwrap();
+        if done_rx.recv_timeout(Duration::from_millis(200)).is_err() {
+            reader.set_nonblocking(true).unwrap();
+            let mut bytes = [0; 4096];
+            loop {
+                match reader.read(&mut bytes) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => panic!("fixture drain failed: {error}"),
+                }
+            }
+            let _completion = done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("fixture cleanup did not release native writer");
+        }
+        let result = effect.join().unwrap();
+        let disabled = owner.join().unwrap();
+        let inspected = status.join().unwrap();
+        assert_eq!(
+            disabled,
+            Ok(2),
+            "wedged native writer retained journal after deadline"
+        );
+        assert!(matches!(
+            inspected.unwrap().receipt.authorization,
+            crate::protocol::Authorization::Allowed { .. }
+        ));
+        let observed: String = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT state FROM native_operations WHERE admission_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            observed, "unknown",
+            "expired native write became a successful submission"
+        );
+        assert!(result.is_err());
+    });
 }
