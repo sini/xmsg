@@ -2020,9 +2020,16 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
     let fed_state = if let Some(peers_file) = args.peers_file {
         let mut peers = xmsg::fed::PeersMap::load_from_file_for(&peers_file, own.as_ref())
             .map_err(|e| format!("failed to load peers file: {e}"))?;
-        peers
-            .apply_pairing_authority(&db.lock().unwrap_or_else(|e| e.into_inner()), &cert_der)
-            .map_err(|e| format!("failed to apply pairing authority: {e}"))?;
+        {
+            let conn = db.lock().unwrap_or_else(|e| e.into_inner());
+            // No ceremony survives a restart, so no intent or capacity reservation does either.
+            if let Err(e) = xmsg::fed::cancel_pairing_intents(&conn) {
+                tracing::warn!("pairing: cancelling open intents at startup failed: {e}");
+            }
+            peers
+                .apply_pairing_authority(&conn, &cert_der)
+                .map_err(|e| format!("failed to apply pairing authority: {e}"))?;
+        }
         let peers_arc = Arc::new(peers);
 
         if !args.leaf {

@@ -165,6 +165,7 @@ fn send_ok(conn: &Connection, us: &Device, peer: &Device) -> bool {
 
 fn paired<'a>(conn: &Connection, us: &'a Device, peer: &'a Device) -> (Intent, Ceremony<'a>) {
     let intent = reserve_intent(conn, &request(peer, PairingProfile::Contact), NOW).unwrap();
+    reserve_capacity(conn, &intent.intent_id, NOW).unwrap();
     let ceremony = Ceremony {
         us,
         peer,
@@ -184,13 +185,12 @@ fn activation_is_idempotent_never_extends_and_survives_restart() {
         let (intent, ceremony) = paired(&conn, &us, &peer);
         assert!(!send_ok(&conn, &us, &peer), "a reserved grant authorized");
         let receipts = ceremony.receipts();
-        assert_eq!(
-            activate(&conn, &us.id, &intent.intent_id, &receipts, NOW).unwrap(),
-            Activated::New
-        );
+        let (new, revision) = activate(&conn, &us.id, &intent.intent_id, &receipts, NOW).unwrap();
+        assert_eq!(new, Activated::New);
         assert_eq!(
             activate(&conn, &us.id, &intent.intent_id, &receipts, NOW + 1).unwrap(),
-            Activated::AlreadyActive
+            (Activated::AlreadyActive, revision),
+            "an identical repeat moved the authority revision"
         );
         let altered = ceremony.receipts_with(|r| r.issued_utc += 1);
         assert!(
@@ -223,7 +223,7 @@ fn p6_removal_wins_over_retry_and_survives_restart() {
         let conn = file_db(&dir);
         let (intent, ceremony) = paired(&conn, &us, &peer);
         activate(&conn, &us.id, &intent.intent_id, &ceremony.receipts(), NOW).unwrap();
-        assert!(remove(&conn, &intent.grant_id, NOW).unwrap());
+        remove(&conn, &intent.grant_id, NOW).unwrap();
         (intent, ceremony)
     };
     let conn = file_db(&dir);
@@ -244,7 +244,7 @@ fn removal_before_activation_consumes_the_reservation() {
     let conn = file_db(&dir);
     let (us, peer) = (Device::new(), Device::new());
     let (intent, ceremony) = paired(&conn, &us, &peer);
-    assert!(remove(&conn, &intent.grant_id, NOW).unwrap());
+    remove(&conn, &intent.grant_id, NOW).unwrap();
     assert!(matches!(
         activate(&conn, &us.id, &intent.intent_id, &ceremony.receipts(), NOW),
         Err(StoreError::Removed)
@@ -325,7 +325,15 @@ fn p6_fresh_intent_after_removal_succeeds_unless_blocked() {
         reserve_intent(&conn, &request(&peer, PairingProfile::Contact), NOW),
         Err(StoreError::Blocked)
     ));
-    assert!(unblock_device(&conn, &peer.id).unwrap());
+    assert!(
+        matches!(
+            unblock_device(&conn, &peer.id, &PeersMap::empty()),
+            Err(StoreError::WouldRestore(_))
+        ),
+        "unblock lifted a block over an unremoved manual grant"
+    );
+    remove(&conn, &fresh.grant_id, NOW).unwrap();
+    unblock_device(&conn, &peer.id, &PeersMap::empty()).unwrap();
     let (pending, ceremony) = paired(&conn, &us, &peer);
     block_device(&conn, &peer.id, NOW).unwrap();
     assert!(matches!(
@@ -440,7 +448,7 @@ fn p11_legacy_import_is_exact_unchanged_and_never_revives_a_removal() {
     let (us, peer) = (Device::new(), Device::new());
     let config = legacy_config(&peer.id, &["send"]);
     let before = format!("{:?}", config.get("laptop"));
-    assert_eq!(import_legacy(&conn, &us.id, &config, NOW).unwrap(), 1);
+    assert_eq!(import_legacy(&conn, &us.id, &config, NOW).unwrap().0, 1);
     assert_eq!(
         format!("{:?}", config.get("laptop")),
         before,
@@ -457,20 +465,20 @@ fn p11_legacy_import_is_exact_unchanged_and_never_revives_a_removal() {
         "imported predicates differ from the entry"
     );
     assert_eq!(grants[0].not_after, None);
-    assert_eq!(import_legacy(&conn, &us.id, &config, NOW).unwrap(), 0);
+    assert_eq!(import_legacy(&conn, &us.id, &config, NOW).unwrap().0, 0);
 
     remove(&conn, &grants[0].grant_id, NOW).unwrap();
     drop(conn);
     let conn = file_db(&dir);
     assert_eq!(
-        import_legacy(&conn, &us.id, &config, NOW).unwrap(),
+        import_legacy(&conn, &us.id, &config, NOW).unwrap().0,
         0,
         "a reload revived a removed legacy grant"
     );
     assert!(grants_for(&conn, &us.id, &peer.id).unwrap().is_empty());
 
     let restated = legacy_config(&peer.id, &["send", "reply"]);
-    assert_eq!(import_legacy(&conn, &us.id, &restated, NOW).unwrap(), 1);
+    assert_eq!(import_legacy(&conn, &us.id, &restated, NOW).unwrap().0, 1);
 }
 
 #[test]
@@ -506,6 +514,7 @@ fn replace_legacy_is_atomic_and_cancelled_by_removing_the_legacy_grant() {
     let legacy = grants_for(&conn, &us.id, &peer.id).unwrap()[0].grant_id;
     req.replaces = Some(legacy);
     let intent = reserve_intent(&conn, &req, NOW).unwrap();
+    reserve_capacity(&conn, &intent.intent_id, NOW).unwrap();
     let ceremony = Ceremony {
         grant_id: intent.grant_id,
         ..ceremony
@@ -573,4 +582,346 @@ fn durable_block_reaches_every_deny_check_of_the_next_policy_generation() {
         "a reload imported the pin twice"
     );
     assert!(open.deny.spkis.is_empty(), "an older generation changed");
+}
+
+#[test]
+fn a_pre_pairing_schema_3_database_opens_unchanged_with_the_additive_tables() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("xmsg.db");
+    {
+        let conn = Connection::open(&path).unwrap();
+        crate::storage::init_db(&conn).unwrap();
+        // The database a schema-3 build without the pairing store leaves behind.
+        conn.execute_batch(
+            "DROP TABLE pairing_intents; DROP TABLE pairing_grants; DROP TABLE pairing_removed_grants;
+             DROP TABLE pairing_device_blocks; DROP TABLE pairing_meta;
+             INSERT INTO location_cache (id, node, cached_at) VALUES ('kept', 'node', 7);",
+        )
+        .unwrap();
+    }
+    let names = |conn: &Connection| -> std::collections::BTreeSet<String> {
+        conn.prepare("SELECT name FROM sqlite_master")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let before = names(&Connection::open(&path).unwrap());
+    assert!(!before.contains("pairing_meta"));
+    let conn = Connection::open(&path).unwrap();
+    crate::storage::init_db(&conn).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, crate::storage::SCHEMA_VERSION);
+    assert_eq!(version, 3, "the pairing store changed the schema version");
+    let after = names(&conn);
+    assert!(
+        after.is_superset(&before),
+        "an existing table or index was lost"
+    );
+    let kept: i64 = conn
+        .query_row(
+            "SELECT cached_at FROM location_cache WHERE id = 'kept'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 7, "an existing row changed");
+    assert_eq!(authority_revision(&conn).unwrap(), 0);
+    crate::storage::init_db(&conn).unwrap();
+    assert_eq!(
+        authority_revision(&conn).unwrap(),
+        0,
+        "reopening reset or moved the revision"
+    );
+}
+
+#[test]
+fn every_authority_transaction_moves_the_revision_and_nothing_else_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = file_db(&dir);
+    let (us, peer, other) = (Device::new(), Device::new(), Device::new());
+    let rev = |conn: &Connection| authority_revision(conn).unwrap();
+    assert_eq!(rev(&conn), 0);
+    let config = legacy_config(&other.id, &["send"]);
+    let (_, r1) = import_legacy(&conn, &us.id, &config, NOW).unwrap();
+    assert_eq!((r1, rev(&conn)), (1, 1), "import did not commit a revision");
+    assert_eq!(
+        import_legacy(&conn, &us.id, &config, NOW).unwrap(),
+        (0, 1),
+        "an idempotent import moved the revision"
+    );
+    let (intent, ceremony) = paired(&conn, &us, &peer);
+    assert_eq!(
+        rev(&conn),
+        1,
+        "reserving an intent or capacity is not an authority change"
+    );
+    let receipts = ceremony.receipts();
+    let (_, r2) = activate(&conn, &us.id, &intent.intent_id, &receipts, NOW).unwrap();
+    assert_eq!(
+        (r2, rev(&conn)),
+        (2, 2),
+        "activate did not commit a revision"
+    );
+    assert_eq!(remove(&conn, &intent.grant_id, NOW).unwrap(), 3, "remove");
+    assert_eq!(block_device(&conn, &peer.id, NOW).unwrap(), 4, "block");
+    assert_eq!(
+        unblock_device(&conn, &peer.id, &PeersMap::empty()).unwrap(),
+        5,
+        "unblock"
+    );
+    assert!(cancel_open_intents(&conn).is_ok());
+    assert_eq!(rev(&conn), 5);
+    drop(conn);
+    assert_eq!(
+        rev(&file_db(&dir)),
+        5,
+        "the revision did not survive a restart"
+    );
+}
+
+#[test]
+fn a_refused_unblock_changes_nothing_and_the_file_deny_excuses_file_rights() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = file_db(&dir);
+    let peer = Device::new();
+    block_device(&conn, &peer.id, NOW).unwrap();
+    let before = authority_revision(&conn).unwrap();
+    let pinned = legacy_config(&peer.id, &["send"]);
+    let Err(StoreError::WouldRestore(reasons)) = unblock_device(&conn, &peer.id, &pinned) else {
+        panic!("unblock lifted a block over a peers-file pin");
+    };
+    assert!(
+        reasons.iter().any(|r| r.contains("'laptop'")),
+        "{reasons:?}"
+    );
+    let mut with_ca = PeersMap::empty();
+    with_ca
+        .insert(crate::fed::PeerConfig {
+            name: "owner.n".into(),
+            ca: Some("root.pem".into()),
+            identities: Some(vec!["spiffe://example.test/host/n/user/owner".into()]),
+            allow: vec!["send".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            unblock_device(&conn, &peer.id, &with_ca),
+            Err(StoreError::WouldRestore(_))
+        ),
+        "unblock lifted a block on a node with a CA entry"
+    );
+    assert_eq!(
+        authority_revision(&conn).unwrap(),
+        before,
+        "a refusal committed"
+    );
+    assert!(blocked_devices(&conn).unwrap().contains(&peer.id));
+
+    let denied = PeersMap::load_from_json(
+        &serde_json::json!({"peers": {"laptop": {
+            "address": "192.0.2.9:7788",
+            "pin": format!("sha256:{}", hex::encode(peer.id)), "allow": ["send"]
+        }}, "deny": {"spkis": [hex::encode(peer.id)]}})
+        .to_string(),
+    )
+    .unwrap();
+    unblock_device(&conn, &peer.id, &denied).unwrap();
+    assert!(!blocked_devices(&conn).unwrap().contains(&peer.id));
+}
+
+/// Fills `n` manual grant slots with minimal rows.
+fn fill_manual_slots(conn: &Connection, n: i64) {
+    let exposure = exposure(PairingProfile::Contact).encode_cbor().unwrap();
+    for i in 0..n {
+        let id = (i as u128).to_be_bytes();
+        conn.execute(
+            "INSERT INTO pairing_grants (grant_id, issuer, subject, provenance, profile, exposure,
+                 transaction_id, exporter, receipt_local, receipt_remote, ceremony_created,
+                 ceremony_expires, activated_at, active)
+             VALUES (?1, ?2, ?2, 'manual_authenticated_oob', 'contact', ?3, ?2, ?2, x'01', x'01',
+                 0, 0, 0, 1)",
+            params![&id[..], &[9u8; 32][..], exposure],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn capacity_is_reserved_before_a_receipt_and_never_exceeds_the_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = file_db(&dir);
+    let (us, peer) = (Device::new(), Device::new());
+    let intent = reserve_intent(&conn, &request(&peer, PairingProfile::Contact), NOW).unwrap();
+    let ceremony = Ceremony {
+        us: &us,
+        peer: &peer,
+        grant_id: intent.grant_id,
+        profile: PairingProfile::Contact,
+        exporter: [3; 32],
+    };
+    assert!(
+        matches!(
+            activate(&conn, &us.id, &intent.intent_id, &ceremony.receipts(), NOW),
+            Err(StoreError::NoReservation)
+        ),
+        "activation took a slot it never reserved"
+    );
+    fill_manual_slots(&conn, MAX_MANUAL_GRANTS - 2);
+    reserve_capacity(&conn, &intent.intent_id, NOW).unwrap();
+    reserve_capacity(&conn, &intent.intent_id, NOW).unwrap();
+    let second = reserve_intent(
+        &conn,
+        &request(&Device::new(), PairingProfile::Contact),
+        NOW,
+    )
+    .unwrap();
+    // A reservation keeps counting while its intent is open, whatever the clock says.
+    reserve_capacity(&conn, &second.intent_id, NOW).unwrap();
+    let third = reserve_intent(
+        &conn,
+        &request(&Device::new(), PairingProfile::Contact),
+        NOW,
+    );
+    assert!(matches!(third, Err(StoreError::GrantsFull)), "{third:?}");
+    // Past every intent's expiry the slots are still held: no clock term releases them.
+    let mut late = request(&Device::new(), PairingProfile::Contact);
+    late.expires_at = NOW + 400;
+    assert!(matches!(
+        reserve_intent(&conn, &late, NOW + 300),
+        Err(StoreError::GrantsFull)
+    ));
+    // The enforcing check: an intent created before the cap filled is refused terminally.
+    remove(&conn, &(0u128).to_be_bytes(), NOW).unwrap();
+    let fourth = reserve_intent(
+        &conn,
+        &request(&Device::new(), PairingProfile::Contact),
+        NOW,
+    )
+    .unwrap();
+    fill_manual_slots_from(&conn, MAX_MANUAL_GRANTS);
+    assert!(matches!(
+        reserve_capacity(&conn, &fourth.intent_id, NOW),
+        Err(StoreError::GrantsFull)
+    ));
+    let state: String = conn
+        .query_row(
+            "SELECT state FROM pairing_intents WHERE intent_id = ?1",
+            [&fourth.intent_id[..]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "refused_cap");
+    assert!(matches!(
+        reserve_capacity(&conn, &fourth.intent_id, NOW),
+        Err(StoreError::IntentUnavailable)
+    ));
+    let used: i64 = slots_used(&conn, None).unwrap();
+    assert!(used <= MAX_MANUAL_GRANTS, "{used} slots used");
+
+    // Startup cancellation ends every reservation.
+    assert_eq!(cancel_open_intents(&conn).unwrap(), 2);
+    assert_eq!(slots_used(&conn, None).unwrap(), used - 2);
+    assert!(matches!(
+        activate(&conn, &us.id, &intent.intent_id, &ceremony.receipts(), NOW),
+        Err(StoreError::IntentUnavailable)
+    ));
+}
+
+/// Adds one more manual grant row with an ID outside `fill_manual_slots`'s range.
+fn fill_manual_slots_from(conn: &Connection, start: i64) {
+    let exposure = exposure(PairingProfile::Contact).encode_cbor().unwrap();
+    let id = (start as u128).to_be_bytes();
+    conn.execute(
+        "INSERT INTO pairing_grants (grant_id, issuer, subject, provenance, profile, exposure,
+             transaction_id, exporter, receipt_local, receipt_remote, ceremony_created,
+             ceremony_expires, activated_at, active)
+         VALUES (?1, ?2, ?2, 'manual_authenticated_oob', 'contact', ?3, ?2, ?2, x'01', x'01',
+             0, 0, 0, 1)",
+        params![&id[..], &[9u8; 32][..], exposure],
+    )
+    .unwrap();
+}
+
+#[test]
+fn legacy_import_is_idempotent_and_a_changed_pin_reimports_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = file_db(&dir);
+    let (us, old_key, new_key) = (Device::new(), Device::new(), Device::new());
+    let config = legacy_config(&old_key.id, &["send"]);
+    import_legacy(&conn, &us.id, &config, NOW).unwrap();
+    let rows = |conn: &Connection| -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM pairing_grants", [], |r| r.get(0))
+            .unwrap()
+    };
+    let (count, revision) = (rows(&conn), authority_revision(&conn).unwrap());
+    for _ in 0..3 {
+        assert_eq!(import_legacy(&conn, &us.id, &config, NOW + 5).unwrap().0, 0);
+    }
+    assert_eq!(
+        (rows(&conn), authority_revision(&conn).unwrap()),
+        (count, revision),
+        "a repeated import changed the store"
+    );
+    // The entry now pins another key: one exact new record, and the old one stops authorizing.
+    let changed = legacy_config(&new_key.id, &["send"]);
+    assert_eq!(import_legacy(&conn, &us.id, &changed, NOW).unwrap().0, 1);
+    let new_grants = grants_for(&conn, &us.id, &new_key.id).unwrap();
+    assert_eq!(
+        new_grants[0].authority,
+        Authority::Legacy {
+            predicates: LegacyPredicates::from_peer(changed.get("laptop").unwrap())
+        }
+    );
+    let blocked = HashSet::new();
+    let removed = HashSet::new();
+    let ctx = Context {
+        now: NOW,
+        blocked: &blocked,
+        removed: &removed,
+        config: &changed,
+    };
+    let send = Resource {
+        target: Some("inbox"),
+        principal: Some("alice"),
+        ..Default::default()
+    };
+    let old_grants = grants_for(&conn, &us.id, &old_key.id).unwrap();
+    assert!(
+        authorize(
+            &old_grants,
+            &us.id,
+            &old_key.id,
+            Operation::Send,
+            &send,
+            &ctx
+        )
+        .is_none(),
+        "the replaced pin kept authority"
+    );
+    assert!(authorize(
+        &new_grants,
+        &us.id,
+        &new_key.id,
+        Operation::Send,
+        &send,
+        &ctx
+    )
+    .is_some());
+    // A narrowed entry never widens: the wider old record no longer matches the file.
+    let narrowed = legacy_config(&new_key.id, &[]);
+    import_legacy(&conn, &us.id, &narrowed, NOW).unwrap();
+    let ctx = Context {
+        config: &narrowed,
+        ..ctx
+    };
+    let all = grants_for(&conn, &us.id, &new_key.id).unwrap();
+    assert!(
+        authorize(&all, &us.id, &new_key.id, Operation::Send, &send, &ctx).is_none(),
+        "an older, wider legacy record outlived a narrowed entry"
+    );
 }

@@ -282,6 +282,9 @@ async fn health(report: &mut Report, path: &Path) {
             if let Some(mdns) = value["discovery"]["mdns"].as_object() {
                 discovery(report, mdns);
             }
+            if value["pairing"].is_object() {
+                pairing_authority(report, &value["pairing"]);
+            }
             let good = value["sessions_dir"] == "ok";
             report.add("daemon.sessions_directory",if good {Status::Pass}else{Status::Warn},if good {"A configured sessions directory exists."}else{"Sessions directory is missing or this daemon does not report it."},if good {None}else{Some("Check --sessions-dir if using a harness; a service-only node may not need one.")});
         }
@@ -293,6 +296,36 @@ async fn health(report: &mut Report, path: &Path) {
         ),
     }
 }
+fn pairing_authority(report: &mut Report, pairing: &Value) {
+    let installed = pairing["installed_revision"].as_u64().unwrap_or(0);
+    let (status, message, hint) = match pairing["committed_revision"].as_u64() {
+        Some(committed) if committed == installed => (
+            Status::Pass,
+            format!("Pairing authority revision {installed} is installed."),
+            None,
+        ),
+        Some(committed) if committed > installed => (
+            Status::Warn,
+            format!("Pairing authority revision {committed} is committed but revision {installed} is installed; the previous generation stays in effect until a publication succeeds."),
+            Some("Check the node log for the reload error; each watcher tick retries the publication."),
+        ),
+        Some(committed) => (
+            Status::Warn,
+            format!("The pairing store is at revision {committed}, below the installed revision {installed}; it was restored or replaced."),
+            Some("Restart the node so it installs the store it now has."),
+        ),
+        None => (
+            Status::Warn,
+            format!(
+                "The pairing store is unreadable ({}); the previous generation at revision {installed} stays installed.",
+                pairing["error"].as_str().unwrap_or("unknown error")
+            ),
+            Some("Check the node database; each watcher tick retries the publication."),
+        ),
+    };
+    report.add("pairing.authority", status, message, hint);
+}
+
 fn discovery(report: &mut Report, mdns: &serde_json::Map<String, Value>) {
     let state = mdns
         .get("state")

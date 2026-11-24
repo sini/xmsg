@@ -273,6 +273,14 @@ whenever `discovery.announce` is loosened to `"always"`):
 Serving continues in every state; federation, `agent.sock` and `http.sock` never block on
 LAN discovery.
 
+`xmsg doctor` also reports `pairing.authority` on a federating node
+<Status id="xmsg.pairing-authority" />. It passes when the installed
+[authority generation](/concepts/trust-model/#authority-generations) is at the committed
+store revision. It warns when a committed change is not installed yet, when the store reads
+below the installed revision (a restored or replaced database: restart the node), or when the
+store cannot be read. In each warning the previous generation stays in effect; the reload
+watcher retries the publication on every tick, so check the node log for the error.
+
 On macOS, open **System Settings › Privacy & Security › Local Network** and enable the entry
 for xmsg. When a LaunchAgent-run binary first sends multicast, macOS may prompt for Local
 Network access; until you allow it, outbound LAN multicast can be dropped silently. The

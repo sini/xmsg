@@ -247,6 +247,30 @@ addresses. These rules hold once the pairing ceremony and its local controls arr
 Until the ceremony lands, no command creates, removes or blocks a pairing grant: pinned and CA
 entries in the peers file, and its `deny` list, remain the whole of federation admission.
 
+### Authority generations
+
+<Status id="xmsg.pairing-authority" />
+
+Federation checks run against one installed *policy generation*: the last successfully parsed
+peers file, certificate and CA bundles, merged with one snapshot of the pairing store. Every
+store change that alters authority (an activation, a removal, a block, an unblock, or a pin
+import) advances a store revision, and each generation records the revision it was built
+from. Device blocks in the store join the generation's `deny` list, so every existing deny
+check enforces them.
+
+- **One publication at a time.** File rebuilds (the reload watcher and `SIGHUP`) and store
+  publications run under one lock, and a generation built from an older store snapshot is
+  never installed over a newer one.
+- **Store changes do not wait on files.** On each watcher tick, a store revision ahead of the
+  installed one is published from the last-good file inputs, without re-reading any file and
+  without a systemd reload notification. An invalid peers file therefore delays only its own
+  change, never a block.
+- **An unreadable store keeps the previous generation installed.** The reload fails and the
+  node keeps serving the last installed generation; at startup the daemon refuses to start.
+- `xmsg doctor` reports `pairing.authority`: a pass when the installed revision equals the
+  committed one, and a warning naming both revisions when a committed change is not yet
+  installed or the store cannot be read.
+
 ## Observation boundary
 
 <Status id="fleet-observer.collector" />

@@ -372,37 +372,103 @@ fn p11_legacy_view_preserves_the_config_predicates_exactly() {
     assert_eq!(predicates.principals, peer.principals);
     assert_eq!(predicates.from, peer.from);
     assert_eq!(predicates.leaf, peer.leaf);
+    assert_eq!(predicates.observe_labels, peer.observe_labels);
     assert_eq!(g.provenance(), PROVENANCE_LEGACY);
-    let ctx = world.ctx();
-    for (op, right) in [
-        (Operation::Send, "send"),
-        (Operation::Reply, "reply"),
-        (Operation::SessionList, "list"),
-        (Operation::Forward, "forward"),
-        (Operation::Observe, "observe"),
-    ] {
-        for target in ["inbox", "other"] {
-            for principal in ["alice", "bob"] {
-                let resource = Resource {
-                    target: Some(target),
-                    principal: Some(principal),
-                    ..Default::default()
-                };
-                let fed_rs = peer.allow.iter().any(|r| r == right)
-                    && peer.principals.iter().any(|p| p == principal)
-                    && crate::fed::target_ref_could_match(target, peer.targets.as_ref().unwrap());
-                assert_eq!(
-                    eligible(&g, &ISSUER, &PEER, op, &resource, &ctx),
-                    fed_rs,
-                    "{op:?} to {target} from {principal}"
-                );
+}
+
+/// Today's federation handler decision for a pinned entry, read from the handlers:
+/// send (`receive_federated_message`: `send`, then `principals`, then `targets`), relayed
+/// (also `relayed` or `relay`), forward (also `forward`; the destination's `targets`),
+/// reply (`reply` only), list (`list` only), observe (`observe_fed`: `observe` only).
+fn handler_decision(
+    peer: &crate::fed::PeerConfig,
+    op: Operation,
+    target: &str,
+    principal: &str,
+) -> bool {
+    let has = |r: &str| peer.allow.iter().any(|a| a == r);
+    let principal_ok = peer.principals.is_empty()
+        || crate::fed::principal_allowed(
+            &crate::storage::Origin::service(principal, "node"),
+            &peer.principals,
+        );
+    let target_ok = peer
+        .targets
+        .as_ref()
+        .is_none_or(|t| crate::fed::target_ref_could_match(target, t));
+    match op {
+        Operation::Send => has("send") && principal_ok && target_ok,
+        Operation::Relayed => {
+            has("send") && (has("relayed") || has("relay")) && principal_ok && target_ok
+        }
+        Operation::Forward => has("send") && has("forward") && principal_ok,
+        Operation::Reply => has("reply"),
+        Operation::SessionList => has("list"),
+        Operation::Observe => has("observe"),
+        Operation::Handoff => false,
+    }
+}
+
+#[test]
+fn legacy_view_equals_the_federation_handlers_for_every_peer_shape() {
+    let pin = format!("sha256:{}", pin_hex(&PEER));
+    let shapes = [
+        serde_json::json!({"allow": ["send"]}),
+        serde_json::json!({"allow": ["send", "reply", "list"]}),
+        serde_json::json!({"allow": ["send", "forward"]}),
+        serde_json::json!({"allow": ["forward"]}),
+        serde_json::json!({"allow": ["send", "relayed"]}),
+        serde_json::json!({"allow": ["relay"]}),
+        serde_json::json!({"allow": ["observe"]}),
+        serde_json::json!({"allow": ["list", "observe"], "observe_labels": true}),
+        serde_json::json!({"allow": ["send", "reply"], "principals": ["alice"]}),
+        serde_json::json!({"allow": ["send", "reply"], "targets": ["inbox"]}),
+        serde_json::json!({"allow": ["send", "list"], "targets": []}),
+        serde_json::json!({"allow": ["send", "forward", "relayed"], "principals": ["alice"], "targets": ["inbox"]}),
+        serde_json::json!({"allow": ["send"], "from": ["192.0.2.0/24"]}),
+        serde_json::json!({"allow": ["send", "reply"], "leaf": true}),
+        serde_json::json!({"allow": []}),
+    ];
+    let ops = [
+        Operation::Send,
+        Operation::Reply,
+        Operation::SessionList,
+        Operation::Forward,
+        Operation::Relayed,
+        Operation::Observe,
+        Operation::Handoff,
+    ];
+    let mut compared = 0;
+    for shape in shapes {
+        let mut entry = shape.clone();
+        entry["pin"] = serde_json::json!(pin);
+        if entry.get("leaf").is_none() {
+            entry["address"] = serde_json::json!("192.0.2.9:7788");
+        }
+        let mut world = World::new();
+        world.config = config(entry);
+        let peer = world.config.get("laptop").unwrap().clone();
+        let g = legacy(&world.config);
+        let ctx = world.ctx();
+        for op in ops {
+            for target in ["inbox", "other"] {
+                for principal in ["alice", "bob"] {
+                    let resource = Resource {
+                        target: Some(target),
+                        principal: Some(principal),
+                        ..Default::default()
+                    };
+                    assert_eq!(
+                        eligible(&g, &ISSUER, &PEER, op, &resource, &ctx),
+                        handler_decision(&peer, op, target, principal),
+                        "{shape}: {op:?} to {target} from {principal}"
+                    );
+                    compared += 1;
+                }
             }
         }
     }
-    assert!(
-        !eligible(&g, &ISSUER, &PEER, Operation::Handoff, &to("inbox"), &ctx),
-        "a legacy pin gained handoff from a grant"
-    );
+    assert_eq!(compared, 15 * 7 * 4, "the table lost rows");
 }
 
 #[test]

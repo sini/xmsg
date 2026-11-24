@@ -217,6 +217,12 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [{ path: 'src/discovery/dial.rs', anchor: 'pub(crate) fn exact_identity' }],
 	},
+	'xmsg.pairing-authority': {
+		id: 'xmsg.pairing-authority',
+		title: 'Pairing store revisions and serialized authority generations',
+		owner: 'sini',
+		evidence: [{ path: 'src/pairing/store.rs', anchor: 'pub fn merge_snapshot' }],
+	},
 	'xmsg.pairing': {
 		id: 'xmsg.pairing',
 		title: 'Manual exact-SPKI pairing grants',

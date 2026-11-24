@@ -556,6 +556,8 @@ pub struct PeersMap {
     pub default_route_peer: Option<String>,
     pub reverse_observe: crate::observe_relay::Config,
     pub discovery: crate::discovery::Config,
+    /// The pairing store revision this generation's authority was merged from.
+    pub authority_revision: u64,
 }
 
 /// This node's own identity, for the peers loader's namespace checks.
@@ -1718,7 +1720,7 @@ impl PeersMap {
         &mut self,
         conn: &rusqlite::Connection,
         own_cert_der: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         crate::pairing::store::apply_to_policy(
             conn,
             own_cert_der,
@@ -1963,6 +1965,11 @@ pub fn split_peer_ref(r: &str) -> Option<(&str, &str)> {
 // -----------------------------------------------------------------------------
 // Pin Extraction & Normalization
 // -----------------------------------------------------------------------------
+
+/// Startup: cancels every open pairing intent, ending its capacity reservation.
+pub fn cancel_pairing_intents(conn: &rusqlite::Connection) -> Result<usize, String> {
+    crate::pairing::store::cancel_open_intents(conn).map_err(|e| e.to_string())
+}
 
 pub fn normalize_pin(pin: &str) -> String {
     let s = pin.trim();
@@ -7514,6 +7521,22 @@ pub struct CredentialReloader {
     fed_state: Option<Arc<FedState>>,
     pub active_pull_loops: Arc<Mutex<std::collections::HashSet<String>>>,
     pub initialized: std::sync::atomic::AtomicBool,
+    publication: Mutex<()>,
+    last_good: Mutex<Option<FileInputs>>,
+    #[cfg(test)]
+    after_snapshot: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+/// The parsed file inputs of the installed generation, kept so a policy-only rebuild reads
+/// no file.
+#[derive(Clone)]
+struct FileInputs {
+    /// The parsed peers file, before any store merge.
+    peers: PeersMap,
+    certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key_pem: Vec<u8>,
+    ca_pems: Vec<(String, Vec<u8>)>,
+    hub_pems: Vec<(PathBuf, Vec<u8>)>,
 }
 
 impl CredentialReloader {
@@ -7599,6 +7622,10 @@ impl CredentialReloader {
             fed_state,
             active_pull_loops,
             initialized: std::sync::atomic::AtomicBool::new(false),
+            publication: Mutex::new(()),
+            last_good: Mutex::new(None),
+            #[cfg(test)]
+            after_snapshot: Mutex::new(None),
         };
 
         // Populate initial configuration and hashes
@@ -7624,6 +7651,19 @@ impl CredentialReloader {
     }
 
     fn check_and_reload_inner(&self, force: bool) -> Result<bool, AppError> {
+        // One publication at a time: snapshot, build and install never interleave.
+        let _publication = self.publication.lock().unwrap_or_else(|e| e.into_inner());
+        let file = self.file_rebuild_locked(force);
+        // A committed store revision ahead of the installed one is published from the
+        // last-good file inputs, whether or not the files changed or still parse.
+        let store = self.publish_store_locked();
+        match (file, store) {
+            (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+            (Ok(file), Ok(store)) => Ok(file || store.is_some()),
+        }
+    }
+
+    fn file_rebuild_locked(&self, force: bool) -> Result<bool, AppError> {
         let initialized = self.initialized.load(std::sync::atomic::Ordering::Acquire);
         let mut notified_reloading = false;
         let ensure_reloading = |notified: &mut bool| {
@@ -7712,35 +7752,9 @@ impl CredentialReloader {
         ensure_reloading(&mut notified_reloading);
 
         // If peers file is configured, reload it
-        let new_peers_map = if let Some(ref peers_path) = self.peers_path {
+        let mut file_peers = if let Some(ref peers_path) = self.peers_path {
             match PeersMap::load_from_file_for(peers_path, self.own.as_ref()) {
-                Ok(mut pm) => {
-                    // Preserve admitted_clients Arc across reload swap!
-                    let current_pm = self.peers.lock().unwrap().clone();
-                    pm.admitted_clients = current_pm.admitted_clients.clone();
-                    if let Some(fs) = &self.fed_state {
-                        // The credential being loaded is the issuer, not the startup one.
-                        let applied =
-                            self.read_certs()
-                                .map_err(|e| e.to_string())
-                                .and_then(|certs| {
-                                    let conn = fs.db.lock().unwrap_or_else(|e| e.into_inner());
-                                    pm.apply_pairing_authority(&conn, &certs[0])
-                                });
-                        if let Err(e) = applied {
-                            if initialized {
-                                crate::systemd::notify_reload_failed(
-                                    "pairing authority unreadable",
-                                );
-                            }
-                            tracing::error!(
-                                "pairing authority unreadable during reload; keeping previous configuration: {e}"
-                            );
-                            return Err(AppError::Internal(format!("pairing authority: {e}")));
-                        }
-                    }
-                    pm
-                }
+                Ok(pm) => pm,
                 Err(e) => {
                     if initialized {
                         crate::systemd::notify_reload_failed("invalid peers file");
@@ -7756,11 +7770,41 @@ impl CredentialReloader {
                 }
             }
         } else {
-            (*self.peers.lock().unwrap()).as_ref().clone()
+            match self.last_good() {
+                Some(inputs) => inputs.peers,
+                None => (*self.peers.lock().unwrap()).as_ref().clone(),
+            }
         };
+        // Preserve admitted_clients Arc across reload swap!
+        file_peers.admitted_clients = self.peers.lock().unwrap().admitted_clients.clone();
 
-        match self.build_tls_config(&new_peers_map) {
-            Ok(new_dyn_tls) => {
+        let built = self.read_inputs(file_peers).and_then(|inputs| {
+            let mut merged = inputs.peers.clone();
+            if let Some(fs) = &self.fed_state {
+                // The credential being loaded is the issuer, not the startup one.
+                let conn = fs.db.lock().unwrap_or_else(|e| e.into_inner());
+                merged
+                    .apply_pairing_authority(&conn, &inputs.certs[0])
+                    .map_err(|e| AppError::Internal(format!("pairing authority: {e}")))?;
+            }
+            #[cfg(test)]
+            self.test_after_snapshot();
+            let dyn_tls = self.build_from_inputs(&inputs, &merged)?;
+            Ok((inputs, merged, dyn_tls))
+        });
+        match built {
+            Ok((inputs, new_peers_map, new_dyn_tls)) => {
+                if !self.install(
+                    &new_peers_map,
+                    new_dyn_tls,
+                    Some(current_hashes),
+                    Some(inputs),
+                ) {
+                    if initialized {
+                        crate::systemd::notify_reload_failed("stale pairing authority");
+                    }
+                    return Ok(false);
+                }
                 let mut new_ca_paths = HashMap::new();
                 for peer in new_peers_map.ca_peers() {
                     if let Some(ref ca_path) = peer.ca {
@@ -7769,14 +7813,6 @@ impl CredentialReloader {
                 }
                 new_ca_paths.extend(new_peers_map.hub_ca_paths());
                 *self.ca_paths.lock().unwrap() = new_ca_paths;
-
-                *self.peers.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Arc::new(new_peers_map.clone());
-                *self.dynamic_tls.write().unwrap_or_else(|e| e.into_inner()) = Some(new_dyn_tls);
-                if let Some(ref fs) = self.fed_state {
-                    fs.clear_initial_peers();
-                }
-                *self.file_hashes.lock().unwrap_or_else(|e| e.into_inner()) = current_hashes;
                 new_peers_map.log_ambiguous_alias_classes();
 
                 // Reconcile outbound pull loops (non-leaf nodes; `--leaf` runs `run_leaf_inbox_task`)
@@ -7806,13 +7842,127 @@ impl CredentialReloader {
             }
             Err(e) => {
                 if initialized {
-                    crate::systemd::notify_reload_failed("invalid tls credentials");
+                    crate::systemd::notify_reload_failed(
+                        "invalid tls credentials or pairing authority",
+                    );
                 }
                 tracing::error!(
-                    "invalid TLS credentials during reload; keeping previous configuration: {e}"
+                    "invalid TLS credentials or unreadable pairing authority during reload; keeping previous configuration: {e}"
                 );
                 Err(e)
             }
+        }
+    }
+
+    fn last_good(&self) -> Option<FileInputs> {
+        self.last_good
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The authority revision of the installed generation.
+    pub fn installed_revision(&self) -> u64 {
+        self.peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .authority_revision
+    }
+
+    /// Installs a generation unless its store snapshot is older than the installed one; a
+    /// refused install records nothing, so a file change behind it is retried.
+    fn install(
+        &self,
+        merged: &PeersMap,
+        dyn_tls: DynamicTls,
+        hashes: Option<HashMap<PathBuf, Vec<u8>>>,
+        inputs: Option<FileInputs>,
+    ) -> bool {
+        let installed = self.installed_revision();
+        if merged.authority_revision < installed {
+            tracing::warn!(
+                "refused a policy generation at authority revision {} below the installed {installed}",
+                merged.authority_revision
+            );
+            return false;
+        }
+        *self.peers.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(merged.clone());
+        *self.dynamic_tls.write().unwrap_or_else(|e| e.into_inner()) = Some(dyn_tls);
+        if let Some(ref fs) = self.fed_state {
+            fs.clear_initial_peers();
+        }
+        if let Some(hashes) = hashes {
+            *self.file_hashes.lock().unwrap_or_else(|e| e.into_inner()) = hashes;
+        }
+        if let Some(inputs) = inputs {
+            *self.last_good.lock().unwrap_or_else(|e| e.into_inner()) = Some(inputs);
+        }
+        true
+    }
+
+    /// Publishes a policy-only generation when the committed store revision is ahead of the
+    /// installed one: the last-good file inputs plus one fresh store snapshot. It reads no file
+    /// and sends no systemd reload notification. Returns the installed revision when it
+    /// published.
+    pub fn publish_store(&self) -> Result<Option<u64>, AppError> {
+        let _publication = self.publication.lock().unwrap_or_else(|e| e.into_inner());
+        self.publish_store_locked()
+    }
+
+    fn publish_store_locked(&self) -> Result<Option<u64>, AppError> {
+        let (Some(fs), Some(inputs)) = (&self.fed_state, self.last_good()) else {
+            return Ok(None);
+        };
+        let mut merged = inputs.peers.clone();
+        merged.admitted_clients = self.peers.lock().unwrap().admitted_clients.clone();
+        {
+            let conn = fs.db.lock().unwrap_or_else(|e| e.into_inner());
+            let committed = crate::pairing::store::authority_revision(&conn)
+                .map_err(|e| AppError::Internal(format!("pairing authority: {e}")))?;
+            if committed <= self.installed_revision() {
+                return Ok(None);
+            }
+            crate::pairing::store::merge_snapshot(&conn, &mut merged)
+                .map_err(|e| AppError::Internal(format!("pairing authority: {e}")))?;
+        }
+        let dyn_tls = self.build_from_inputs(&inputs, &merged)?;
+        if !self.install(&merged, dyn_tls, None, None) {
+            return Ok(None);
+        }
+        tracing::info!(
+            "published pairing authority revision {}",
+            merged.authority_revision
+        );
+        Ok(Some(merged.authority_revision))
+    }
+
+    /// Lifts a device block under the publication mutex, proving against the installed
+    /// generation's parsed peers file that nothing is restored, then publishes the result.
+    pub fn unblock_device(&self, device: &crate::pairing::auth::DeviceId) -> Result<u64, AppError> {
+        let _publication = self.publication.lock().unwrap_or_else(|e| e.into_inner());
+        let (Some(fs), Some(inputs)) = (&self.fed_state, self.last_good()) else {
+            return Err(AppError::Internal(
+                "no installed generation to prove an unblock against".into(),
+            ));
+        };
+        let revision = {
+            let conn = fs.db.lock().unwrap_or_else(|e| e.into_inner());
+            crate::pairing::store::unblock_device(&conn, device, &inputs.peers)
+                .map_err(|e| AppError::OpDenied(e.to_string()))?
+        };
+        self.publish_store_locked()?;
+        Ok(revision)
+    }
+
+    #[cfg(test)]
+    fn test_after_snapshot(&self) {
+        let hook = self
+            .after_snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook();
         }
     }
 
@@ -7836,7 +7986,8 @@ impl CredentialReloader {
         Ok(certs)
     }
 
-    fn build_tls_config(&self, peers: &PeersMap) -> Result<DynamicTls, AppError> {
+    /// Reads every credential and CA file a generation needs.
+    fn read_inputs(&self, peers: PeersMap) -> Result<FileInputs, AppError> {
         let certs = self.read_certs()?;
         let key_pem = std::fs::read(&self.key_path).map_err(|e| {
             AppError::Internal(format!(
@@ -7844,9 +7995,43 @@ impl CredentialReloader {
                 self.key_path.display()
             ))
         })?;
+        let mut ca_pems = Vec::new();
+        for peer in peers.ca_peers() {
+            if let Some(ca_path) = &peer.ca {
+                let pem = std::fs::read(ca_path).map_err(|e| {
+                    AppError::Internal(format!("failed to read CA file {}: {e}", ca_path.display()))
+                })?;
+                ca_pems.push((peer.name.clone(), pem));
+            }
+        }
+        let mut hub_pems = Vec::new();
+        if let Some(hub) = &peers.hub {
+            for bundle in hub.pattern_cas.values() {
+                let pem = std::fs::read(bundle)
+                    .map_err(|_| AppError::Internal("cannot read hub CA bundle".into()))?;
+                hub_pems.push((bundle.clone(), pem));
+            }
+        }
+        Ok(FileInputs {
+            peers,
+            certs,
+            key_pem,
+            ca_pems,
+            hub_pems,
+        })
+    }
+
+    /// Builds a generation's TLS state from retained file inputs and a store-merged policy.
+    fn build_from_inputs(
+        &self,
+        inputs: &FileInputs,
+        peers: &PeersMap,
+    ) -> Result<DynamicTls, AppError> {
+        let certs = inputs.certs.clone();
+        let key_pem = &inputs.key_pem;
 
         use rustls::pki_types::pem::PemObject;
-        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+        let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem)
             .map_err(|e| AppError::Internal(format!("failed to parse key pem: {e}")))?;
 
         let cert_der = certs[0].to_vec();
@@ -7868,17 +8053,9 @@ impl CredentialReloader {
         let mut ca_anchors = HashMap::new();
         let mut new_peers = peers.clone();
 
-        let ca_peer_configs: Vec<(String, PathBuf)> = peers
-            .ca_peers()
-            .into_iter()
-            .filter_map(|p| p.ca.as_ref().map(|ca| (p.name.clone(), ca.clone())))
-            .collect();
-
-        for (peer_name, ca_path) in ca_peer_configs {
-            let ca_pem = std::fs::read(&ca_path).map_err(|e| {
-                AppError::Internal(format!("failed to read CA file {}: {e}", ca_path.display()))
-            })?;
-            let anchors = parse_ca_bundle_pem(&ca_pem).map_err(|e| {
+        for (peer_name, ca_pem) in &inputs.ca_pems {
+            let peer_name = peer_name.clone();
+            let anchors = parse_ca_bundle_pem(ca_pem).map_err(|e| {
                 AppError::Internal(format!(
                     "failed to parse CA bundle for peer '{peer_name}': {e}"
                 ))
@@ -7891,16 +8068,14 @@ impl CredentialReloader {
             new_peers.update_ca_anchors(&peer_name, anchors.clone());
             new_peers.discovery_roots.insert(
                 peer_name.clone(),
-                ca_root_fingerprints(&ca_pem).map_err(AppError::Internal)?,
+                ca_root_fingerprints(ca_pem).map_err(AppError::Internal)?,
             );
             ca_anchors.insert(peer_name, anchors);
         }
 
-        if let Some(hub) = &new_peers.hub {
-            for bundle in hub.pattern_cas.values() {
-                let pem = std::fs::read(bundle)
-                    .map_err(|_| AppError::Internal("cannot read hub CA bundle".into()))?;
-                let anchors = parse_ca_bundle_pem(&pem).map_err(AppError::Internal)?;
+        if new_peers.hub.is_some() {
+            for (bundle, pem) in &inputs.hub_pems {
+                let anchors = parse_ca_bundle_pem(pem).map_err(AppError::Internal)?;
                 if anchors.is_empty() {
                     return Err(AppError::Internal("empty hub CA bundle".into()));
                 }
@@ -8898,3 +9073,7 @@ mod locator_readonly_tests {
         known_leaf_is_located_through_its_mailbox(peers, "person.desktop").await;
     }
 }
+
+#[cfg(test)]
+#[path = "pairing/publish_tests.rs"]
+mod pairing_publish_tests;

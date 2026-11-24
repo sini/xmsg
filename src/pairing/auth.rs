@@ -75,31 +75,54 @@ impl LegacyPredicates {
         Sha256::digest(self.to_json().as_bytes()).into()
     }
 
-    fn allows(&self, op: Operation, resource: &Resource<'_>) -> bool {
-        // The rights the loader accepts (src/fed.rs). Handoff has no `allow` right: its legacy
-        // conditions stay where they are, and no grant supplies them.
-        let rights: &[&str] = match op {
-            Operation::Send => &["send"],
-            Operation::Reply => &["reply"],
-            Operation::SessionList => &["list"],
-            Operation::Forward => &["forward"],
-            Operation::Relayed => &["relayed", "relay"],
-            Operation::Observe => &["observe"],
-            Operation::Handoff => &[],
-        };
+    fn has(&self, rights: &[&str]) -> bool {
         self.allow
             .iter()
             .any(|right| rights.contains(&right.as_str()))
-            && (self.principals.is_empty()
-                || resource
-                    .principal
-                    .is_some_and(|p| self.principals.iter().any(|allowed| allowed == p)))
-            && match (&self.targets, resource.target) {
-                (None, _) | (Some(_), None) => true,
-                (Some(targets), Some(target)) => {
-                    crate::fed::target_ref_could_match(target, targets)
-                }
+    }
+
+    fn principal_admitted(&self, resource: &Resource<'_>) -> bool {
+        self.principals.is_empty()
+            || resource
+                .principal
+                .is_some_and(|p| self.principals.iter().any(|allowed| allowed == p))
+    }
+
+    fn target_admitted(&self, resource: &Resource<'_>) -> bool {
+        match (&self.targets, resource.target) {
+            (None, _) | (Some(_), None) => true,
+            (Some(targets), Some(target)) => crate::fed::target_ref_could_match(target, targets),
+        }
+    }
+
+    /// The decision the federation handlers make for this entry today. Source CIDRs (`from`)
+    /// are an admission check of their own and stay there.
+    fn allows(&self, op: Operation, resource: &Resource<'_>) -> bool {
+        match op {
+            // receive_federated_message: `send`, then `principals`, then this entry's `targets`.
+            Operation::Send => {
+                self.has(&["send"])
+                    && self.principal_admitted(resource)
+                    && self.target_admitted(resource)
             }
+            // A relayed message is a send that also needs `relayed` (or `relay`).
+            Operation::Relayed => {
+                self.has(&["send"])
+                    && self.has(&["relayed", "relay"])
+                    && self.principal_admitted(resource)
+                    && self.target_admitted(resource)
+            }
+            // A hub forwards a send that also needs `forward`; the destination's own `targets`
+            // apply, not the sender's.
+            Operation::Forward => {
+                self.has(&["send"]) && self.has(&["forward"]) && self.principal_admitted(resource)
+            }
+            Operation::Reply => self.has(&["reply"]),
+            Operation::SessionList => self.has(&["list"]),
+            Operation::Observe => self.has(&["observe"]),
+            // Handoff has no `allow` right: its legacy conditions stay where they are.
+            Operation::Handoff => false,
+        }
     }
 }
 

@@ -2,6 +2,10 @@
 //! blocks, in the node's primary database. Reservation, activation, removal and legacy import
 //! each run in one `BEGIN IMMEDIATE` transaction, so removal and activation serialize: once
 //! `remove` commits, no activation can recreate that grant.
+//!
+//! Every transaction that changes authority increments one monotonic `authority_revision`
+//! inside that transaction and returns it. A policy generation records the revision of the
+//! store snapshot it was built from, so a publication can refuse an older snapshot.
 
 use std::collections::HashSet;
 
@@ -20,6 +24,9 @@ use crate::fed::PeersMap;
 
 /// Pending local intents retained at once.
 pub const MAX_PENDING_INTENTS: usize = 32;
+/// Manual grant slots: manual grants not removed (blocked and expired included) plus the
+/// capacity reservations of open intents.
+pub const MAX_MANUAL_GRANTS: i64 = 1024;
 
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS pairing_intents (
@@ -32,7 +39,8 @@ CREATE TABLE IF NOT EXISTS pairing_intents (
     revision INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     replaces BLOB,
-    state TEXT NOT NULL CHECK (state IN ('open', 'consumed', 'cancelled')),
+    state TEXT NOT NULL CHECK (state IN ('open', 'consumed', 'cancelled', 'refused_cap')),
+    cap_reserved INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pairing_grants (
@@ -66,6 +74,11 @@ CREATE TABLE IF NOT EXISTS pairing_device_blocks (
     device_id BLOB PRIMARY KEY CHECK (length(device_id) = 32),
     blocked_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pairing_meta (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    authority_revision INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO pairing_meta (singleton, authority_revision) VALUES (1, 0);
 ";
 
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +99,12 @@ pub enum StoreError {
     PendingFull,
     #[error("invalid intent: {0}")]
     Invalid(&'static str),
+    #[error("manual grant capacity reached")]
+    GrantsFull,
+    #[error("intent holds no capacity reservation")]
+    NoReservation,
+    #[error("unblock would restore authority: {}", .0.join("; "))]
+    WouldRestore(Vec<String>),
 }
 
 /// A local OOB intent: the expected peer ID and directional profile, fixed before dialing.
@@ -152,6 +171,38 @@ fn immediate(conn: &Connection) -> Result<Transaction<'_>, StoreError> {
     Ok(Transaction::new_unchecked(
         conn,
         TransactionBehavior::Immediate,
+    )?)
+}
+
+/// Increments the authority revision inside the caller's transaction and returns it.
+fn bump(tx: &Connection) -> Result<u64, StoreError> {
+    Ok(tx.query_row(
+        "UPDATE pairing_meta SET authority_revision = authority_revision + 1
+         WHERE singleton = 1 RETURNING authority_revision",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? as u64)
+}
+
+/// The committed authority revision.
+pub fn authority_revision(conn: &Connection) -> Result<u64, StoreError> {
+    Ok(conn.query_row(
+        "SELECT authority_revision FROM pairing_meta WHERE singleton = 1",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? as u64)
+}
+
+/// Slots in use: manual grants not removed plus reservations of open intents, optionally
+/// excluding one intent. No clock term: only a terminal transaction releases a slot.
+fn slots_used(tx: &Connection, except: Option<&[u8; 16]>) -> Result<i64, StoreError> {
+    Ok(tx.query_row(
+        "SELECT (SELECT COUNT(*) FROM pairing_grants g WHERE g.provenance = 'manual_authenticated_oob'
+                    AND NOT EXISTS (SELECT 1 FROM pairing_removed_grants r WHERE r.grant_id = g.grant_id))
+              + (SELECT COUNT(*) FROM pairing_intents WHERE state = 'open' AND cap_reserved = 1
+                    AND intent_id IS NOT ?1)",
+        [except.map(|id| id.to_vec())],
+        |r| r.get(0),
     )?)
 }
 
@@ -225,6 +276,10 @@ pub fn reserve_intent(
     if pending.len() >= MAX_PENDING_INTENTS {
         return Err(StoreError::PendingFull);
     }
+    // Convenience only; reserve_capacity enforces the cap.
+    if slots_used(&tx, None)? >= MAX_MANUAL_GRANTS {
+        return Err(StoreError::GrantsFull);
+    }
     if let Some(legacy) = &req.replaces {
         let subject: Option<Vec<u8>> = tx
             .query_row(
@@ -278,21 +333,75 @@ struct IntentRow {
     expires_at: i64,
     replaces: Option<Vec<u8>>,
     state: String,
+    cap_reserved: bool,
 }
 
-/// Activates the locally issued grant of `intent` from both verified receipts.
+/// Reserves one manual grant slot for an open intent, before this side signs its receipt.
+/// At the cap the intent becomes `refused_cap`, a terminal state, and `GrantsFull` returns.
+/// A repeat on an intent that already holds its reservation is a no-op.
+pub fn reserve_capacity(
+    conn: &Connection,
+    intent_id: &[u8; 16],
+    now: i64,
+) -> Result<(), StoreError> {
+    let tx = immediate(conn)?;
+    let row: Option<(String, i64, bool)> = tx
+        .query_row(
+            "SELECT state, expires_at, cap_reserved FROM pairing_intents WHERE intent_id = ?1",
+            [&intent_id[..]],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((state, expires_at, reserved)) = row else {
+        return Err(StoreError::IntentUnavailable);
+    };
+    if state != "open" || expires_at <= now {
+        return Err(StoreError::IntentUnavailable);
+    }
+    if reserved {
+        return Ok(());
+    }
+    if slots_used(&tx, Some(intent_id))? + 1 > MAX_MANUAL_GRANTS {
+        tx.execute(
+            "UPDATE pairing_intents SET state = 'refused_cap' WHERE intent_id = ?1",
+            [&intent_id[..]],
+        )?;
+        tx.commit()?;
+        return Err(StoreError::GrantsFull);
+    }
+    tx.execute(
+        "UPDATE pairing_intents SET cap_reserved = 1 WHERE intent_id = ?1",
+        [&intent_id[..]],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Startup: every open intent and its reservation ends, since no ceremony survives a restart.
+pub fn cancel_open_intents(conn: &Connection) -> Result<usize, StoreError> {
+    let tx = immediate(conn)?;
+    let n = tx.execute(
+        "UPDATE pairing_intents SET state = 'cancelled' WHERE state = 'open'",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(n)
+}
+
+/// Activates the locally issued grant of `intent` from both verified receipts, and returns
+/// the authority revision it committed (the current one for an identical repeat).
 pub fn activate(
     conn: &Connection,
     issuer: &DeviceId,
     intent_id: &[u8; 16],
     receipts: &VerifiedReceipts,
     now: i64,
-) -> Result<Activated, StoreError> {
+) -> Result<(Activated, u64), StoreError> {
     let tx = immediate(conn)?;
     let row = tx
         .query_row(
             "SELECT grant_id, peer_id, exposure, grant_not_after, revision, expires_at,
-                    replaces, state
+                    replaces, state, cap_reserved
              FROM pairing_intents WHERE intent_id = ?1",
             [&intent_id[..]],
             |r| {
@@ -305,6 +414,7 @@ pub fn activate(
                     expires_at: r.get(5)?,
                     replaces: r.get(6)?,
                     state: r.get(7)?,
+                    cap_reserved: r.get(8)?,
                 })
             },
         )
@@ -384,7 +494,7 @@ pub fn activate(
                     && old.receipt_local == evidence.receipt_local
                     && old.receipt_remote == evidence.receipt_remote);
         return if same {
-            Ok(Activated::AlreadyActive)
+            Ok((Activated::AlreadyActive, authority_revision(&tx)?))
         } else {
             Err(StoreError::Binding(
                 "a different record holds this grant_id",
@@ -393,6 +503,9 @@ pub fn activate(
     }
     if row.state != "open" || row.expires_at <= now {
         return Err(StoreError::IntentUnavailable);
+    }
+    if !row.cap_reserved {
+        return Err(StoreError::NoReservation);
     }
     if let Some(legacy) = &row.replaces {
         let retired = tx.execute(
@@ -436,37 +549,40 @@ pub fn activate(
         "UPDATE pairing_intents SET state = 'consumed' WHERE intent_id = ?1",
         [&intent_id[..]],
     )?;
+    let revision = bump(&tx)?;
     tx.commit()?;
-    Ok(Activated::New)
+    Ok((Activated::New, revision))
 }
 
 /// Removes one grant (active or only reserved): tombstones its ID, consumes the intent that
-/// reserved it, and cancels any replacement intent depending on it. True when anything changed.
-pub fn remove(conn: &Connection, grant_id: &GrantId, now: i64) -> Result<bool, StoreError> {
+/// reserved it, and cancels any replacement intent depending on it. Returns the committed
+/// authority revision; a repeat commits a new revision with no other change.
+pub fn remove(conn: &Connection, grant_id: &GrantId, now: i64) -> Result<u64, StoreError> {
     let tx = immediate(conn)?;
-    let mut changed = tx.execute(
+    tx.execute(
         "UPDATE pairing_grants SET active = 0 WHERE grant_id = ?1 AND active = 1",
         [&grant_id[..]],
     )?;
-    changed += tx.execute(
+    tx.execute(
         "UPDATE pairing_intents SET state = 'consumed' WHERE grant_id = ?1 AND state = 'open'",
         [&grant_id[..]],
     )?;
-    changed += tx.execute(
+    tx.execute(
         "UPDATE pairing_intents SET state = 'cancelled' WHERE replaces = ?1 AND state = 'open'",
         [&grant_id[..]],
     )?;
-    changed += tx.execute(
+    tx.execute(
         "INSERT OR IGNORE INTO pairing_removed_grants (grant_id, removed_at) VALUES (?1, ?2)",
         params![&grant_id[..], now],
     )?;
+    let revision = bump(&tx)?;
     tx.commit()?;
-    Ok(changed > 0)
+    Ok(revision)
 }
 
 /// A durable full-ID block, above every grant and legacy rule. It also cancels the device's
 /// open intents; its grants stay recorded but no longer authorize.
-pub fn block_device(conn: &Connection, device: &DeviceId, now: i64) -> Result<(), StoreError> {
+pub fn block_device(conn: &Connection, device: &DeviceId, now: i64) -> Result<u64, StoreError> {
     let tx = immediate(conn)?;
     tx.execute(
         "INSERT OR IGNORE INTO pairing_device_blocks (device_id, blocked_at) VALUES (?1, ?2)",
@@ -476,15 +592,58 @@ pub fn block_device(conn: &Connection, device: &DeviceId, now: i64) -> Result<()
         "UPDATE pairing_intents SET state = 'cancelled' WHERE peer_id = ?1 AND state = 'open'",
         [&device[..]],
     )?;
+    let revision = bump(&tx)?;
     tx.commit()?;
-    Ok(())
+    Ok(revision)
 }
 
-pub fn unblock_device(conn: &Connection, device: &DeviceId) -> Result<bool, StoreError> {
-    Ok(conn.execute(
+/// Lifts a block only when lifting it provably restores nothing (the interim rule while
+/// restoration is unspecified). `installed_file_policy` is the parsed peers file of the
+/// installed generation, before any store merge; the caller holds the publication mutex.
+/// Refuses with every reason and changes nothing; otherwise returns the committed revision.
+pub fn unblock_device(
+    conn: &Connection,
+    device: &DeviceId,
+    installed_file_policy: &PeersMap,
+) -> Result<u64, StoreError> {
+    let tx = immediate(conn)?;
+    let mut reasons = Vec::new();
+    let unremoved_manual: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pairing_grants g WHERE g.subject = ?1
+             AND g.provenance = 'manual_authenticated_oob'
+             AND NOT EXISTS (SELECT 1 FROM pairing_removed_grants r WHERE r.grant_id = g.grant_id)",
+        [&device[..]],
+        |r| r.get(0),
+    )?;
+    if unremoved_manual > 0 {
+        reasons.push(format!("{unremoved_manual} manual grant(s) not removed"));
+    }
+    // The peers file's own deny dominates every file-derived right for this device.
+    let hex_id = hex::encode(device);
+    if !installed_file_policy.deny.spkis.contains(&hex_id) {
+        let mut pins: Vec<&str> = installed_file_policy
+            .values()
+            .filter(|p| p.pin.as_deref().and_then(device_id_from_pin) == Some(*device))
+            .map(|p| p.name.as_str())
+            .collect();
+        pins.sort();
+        for name in pins {
+            reasons.push(format!("peers-file pin entry '{name}'"));
+        }
+        if !installed_file_policy.ca_peers().is_empty() || installed_file_policy.hub.is_some() {
+            reasons.push("a CA entry or CA-anchored hub pattern may admit this key".into());
+        }
+    }
+    if !reasons.is_empty() {
+        return Err(StoreError::WouldRestore(reasons));
+    }
+    tx.execute(
         "DELETE FROM pairing_device_blocks WHERE device_id = ?1",
         [&device[..]],
-    )? > 0)
+    )?;
+    let revision = bump(&tx)?;
+    tx.commit()?;
+    Ok(revision)
 }
 
 pub fn blocked_devices(conn: &Connection) -> Result<HashSet<DeviceId>, StoreError> {
@@ -592,13 +751,14 @@ pub fn grants_for(
 /// Imports each pinned peers-file entry as a `legacy_unilateral` grant with its exact
 /// predicates. An entry already recorded with the same predicates, active or removed, is not
 /// imported again, so a removal survives reloads; a changed entry is a new explicit record.
-/// Returns the number of grants created.
+/// Returns the number of grants created and the authority revision, which moves only when
+/// something was created.
 pub fn import_legacy(
     conn: &Connection,
     issuer: &DeviceId,
     config: &PeersMap,
     now: i64,
-) -> Result<usize, StoreError> {
+) -> Result<(usize, u64), StoreError> {
     let tx = immediate(conn)?;
     let mut created = 0;
     let mut peers: Vec<_> = config.values().filter(|p| p.pin.is_some()).collect();
@@ -633,33 +793,79 @@ pub fn import_legacy(
         )?;
         created += 1;
     }
+    let revision = if created > 0 {
+        bump(&tx)?
+    } else {
+        authority_revision(&tx)?
+    };
     tx.commit()?;
-    Ok(created)
+    Ok((created, revision))
 }
 
-/// Applies the durable authority to a freshly loaded policy generation: records its pins as
-/// legacy grants, then adds every durable device block to its `deny.spkis`, so each existing
-/// deny check (TLS verifiers, leaf authority rechecks, discovery publication) enforces it.
-pub fn apply_to_policy(
+/// Records a freshly parsed peers file's pins as legacy grants (a file rebuild only).
+pub fn import_file_policy(
     conn: &Connection,
     own_cert_der: &[u8],
-    peers: &mut PeersMap,
+    peers: &PeersMap,
     now: i64,
-) -> Result<(), StoreError> {
+) -> Result<u64, StoreError> {
     let issuer = crate::fed::spki_sha256_from_der(own_cert_der)
         .ok()
         .as_deref()
         .and_then(device_id_from_pin)
         .ok_or(StoreError::Invalid("own certificate SPKI"))?;
-    import_legacy(conn, &issuer, peers, now)?;
-    let mut blocked: Vec<String> = blocked_devices(conn)?.iter().map(hex::encode).collect();
+    Ok(import_legacy(conn, &issuer, peers, now)?.1)
+}
+
+/// Merges one store snapshot, read in a single read transaction, into a policy generation:
+/// every durable device block joins its `deny.spkis`, so each existing deny check (TLS
+/// verifiers, leaf authority rechecks, discovery publication) enforces it, and the
+/// generation records the snapshot's revision.
+pub fn merge_snapshot(conn: &Connection, peers: &mut PeersMap) -> Result<u64, StoreError> {
+    let tx = conn.unchecked_transaction()?;
+    let revision = authority_revision(&tx)?;
+    let mut blocked: Vec<String> = blocked_devices(&tx)?.iter().map(hex::encode).collect();
+    tx.commit()?;
     blocked.sort();
     for pin in blocked {
         if !peers.deny.spkis.contains(&pin) {
             peers.deny.spkis.push(pin);
         }
     }
-    Ok(())
+    peers.authority_revision = revision;
+    Ok(revision)
+}
+
+/// A file rebuild's store step: legacy import, then one snapshot merge.
+pub fn apply_to_policy(
+    conn: &Connection,
+    own_cert_der: &[u8],
+    peers: &mut PeersMap,
+    now: i64,
+) -> Result<u64, StoreError> {
+    import_file_policy(conn, own_cert_der, peers, now)?;
+    merge_snapshot(conn, peers)
+}
+
+/// The `pairing` health field: the committed store revision against the installed one. A
+/// store that cannot be read is reported, and the installed generation stays in effect.
+pub fn health(fed: Option<&crate::fed::FedState>) -> serde_json::Value {
+    let Some(fs) = fed else {
+        return serde_json::Value::Null;
+    };
+    let installed = fs.current_peers().authority_revision;
+    let committed = authority_revision(&fs.db.lock().unwrap_or_else(|e| e.into_inner()));
+    match committed {
+        Ok(committed) => serde_json::json!({
+            "committed_revision": committed,
+            "installed_revision": installed,
+        }),
+        Err(e) => serde_json::json!({
+            "committed_revision": null,
+            "installed_revision": installed,
+            "error": e.to_string(),
+        }),
+    }
 }
 
 #[cfg(test)]

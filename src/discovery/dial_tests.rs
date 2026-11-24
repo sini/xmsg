@@ -1328,3 +1328,45 @@ fn stale_metadata_read_cannot_prune_new_generation_presence() {
         "stale metadata read entered the effect"
     );
 }
+
+#[tokio::test]
+async fn pin_rule_dials_only_the_candidate_whose_spki_matches_past_a_decoy() {
+    let ca = Ca::new();
+    let (identity, pin) = pinned_identity();
+    let (decoy_identity, _) = pinned_identity();
+    let fixture = Fixture::with_pins(&ca, &[], &[("laptop", &pin)]);
+    let genuine = Server::start(identity, &fixture.client_pin).await;
+    let decoy = Server::start(decoy_identity, &fixture.client_pin).await;
+    fixture.inject(&genuine, "opaque");
+    std::thread::sleep(Duration::from_millis(5));
+    // Newer, so probed first.
+    fixture.inject(&decoy, "opaque-decoy");
+    let peer = fixture.peer("laptop");
+    let dial = resolve_dial(&fixture.fs, &peer)
+        .await
+        .unwrap()
+        .into_direct()
+        .expect("the genuine candidate was not dialled");
+    let actual =
+        crate::fed::spki_sha256_from_der(dial.get_ref().1.peer_certificates().unwrap()[0].as_ref())
+            .unwrap();
+    assert_eq!(
+        actual, pin,
+        "a candidate with another SPKI became the pinned peer"
+    );
+    assert_eq!(
+        decoy.accepted.load(Ordering::SeqCst),
+        1,
+        "the decoy was never probed"
+    );
+    assert_eq!(
+        decoy.requests.load(Ordering::SeqCst),
+        0,
+        "the decoy received a request"
+    );
+    let policy = fixture.fs.current_peers();
+    assert!(fixture
+        .fs
+        .discovery
+        .is_negative(decoy.address, "laptop", &policy, Instant::now()));
+}

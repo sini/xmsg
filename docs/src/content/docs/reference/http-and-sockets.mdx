@@ -106,6 +106,23 @@ On `http.sock`, `GET /healthz` also includes the detector state and announce pos
 
 Like `build_revision`, `discovery` is omitted from the optional TCP health response.
 
+### Pairing authority health
+
+<Status id="xmsg.pairing-authority" />
+
+On `http.sock`, a federating node's `GET /healthz` also reports its
+[authority generation](/concepts/trust-model/#authority-generations):
+
+```json
+{"pairing":{"committed_revision":4,"installed_revision":4}}
+```
+
+`committed_revision` is the pairing store's revision; `installed_revision` is the revision of
+the generation federation checks run against. A committed revision ahead of the installed one
+means a change is not yet in effect. When the store cannot be read, `committed_revision` is
+`null` and `error` names the failure; the installed generation stays in effect. `pairing` is
+`null` on a node without federation and is omitted from the optional TCP health response.
+
 ### Read-only local recipient snapshot
 
 <Status id="xmsg.recipient-snapshot" />
