@@ -51,6 +51,8 @@ impl Journal {
           CREATE TABLE IF NOT EXISTS decisions(approval_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,session_id TEXT NOT NULL,generation INTEGER NOT NULL,turn_id TEXT NOT NULL,decision TEXT NOT NULL,payload TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,principal TEXT,request_id TEXT NOT NULL,event TEXT NOT NULL,at INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,generation INTEGER NOT NULL,turn_id TEXT NOT NULL,operation_digest TEXT NOT NULL,policy_revision TEXT NOT NULL,expires_at INTEGER NOT NULL,option_id TEXT NOT NULL,consumed INTEGER NOT NULL DEFAULT 0);").map_err(storage)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS runtime_control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),disabled INTEGER NOT NULL CHECK(disabled IN(0,1))); INSERT OR IGNORE INTO runtime_control VALUES(1,0);").map_err(storage)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS session_delegations(principal TEXT NOT NULL,session_id TEXT NOT NULL,generation INTEGER NOT NULL,verb TEXT NOT NULL,team_id TEXT NOT NULL,profile_id TEXT NOT NULL,policy_revision INTEGER NOT NULL,dispatch_admission INTEGER NOT NULL,PRIMARY KEY(principal,session_id,generation,verb));").map_err(storage)?;
         db.execute(
             "INSERT OR IGNORE INTO configuration VALUES(1,?1,?2)",
             params![
@@ -143,9 +145,25 @@ impl Journal {
                     params![session_id, id],
                 )
                 .map_err(storage)?;
+                for verb in &template.lifecycle_verbs {
+                    tx.execute(
+                        "INSERT INTO session_delegations VALUES(?1,?2,1,?3,?4,?5,?6,?7)",
+                        params![
+                            principal,
+                            session_id,
+                            serde_json::to_string(verb).map_err(storage)?,
+                            template.team_id,
+                            template.profile_id,
+                            sql_u64(configuration.revision)?,
+                            id,
+                        ],
+                    )
+                    .map_err(storage)?;
+                }
                 dispatch = Some(AdmittedDispatch {
                     session_id,
                     resolved: serde_json::from_str(&resolved).map_err(storage)?,
+                    delegated_verbs: template.lifecycle_verbs.clone(),
                 });
             }
             Admission::Durable {
@@ -210,7 +228,11 @@ impl Journal {
             .map_err(storage)?;
         let mut configuration = config(&tx)?;
         let (id, expected) = match &command {
-            AdminCommand::ReplacePolicy {
+            AdminCommand::DisableRuntime {
+                request_id,
+                expected_revision,
+            }
+            | AdminCommand::ReplacePolicy {
                 request_id,
                 expected_revision,
                 ..
@@ -225,6 +247,15 @@ impl Journal {
             return Err(ErrorCode::RequestConflict);
         }
         match command {
+            AdminCommand::DisableRuntime { .. } => {
+                tx.execute(
+                    "UPDATE runtime_control SET disabled=1 WHERE singleton=1",
+                    [],
+                )
+                .map_err(storage)?;
+                audit(&tx, "owner-admin", &id, "runtime_disabled", now)?;
+                configuration.revision += 1;
+            }
             AdminCommand::ReplacePolicy {
                 configuration: new, ..
             } => {
@@ -286,6 +317,9 @@ impl Journal {
         let Action::Approve(args) = &request.action else {
             return Err(ErrorCode::HumanRequired);
         };
+        if runtime_disabled(&tx)? {
+            return Err(ErrorCode::ProfileDenied);
+        }
         let Some(Target::Turn {
             session_id,
             generation,
@@ -381,6 +415,69 @@ impl Journal {
         Ok(reply)
     }
 }
+pub(crate) fn runtime_disabled(db: &Connection) -> Result<bool, ErrorCode> {
+    db.query_row(
+        "SELECT disabled FROM runtime_control WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(storage)
+}
+
+pub(crate) fn has_current_grant(
+    tx: &Transaction<'_>,
+    configuration: &OwnerConfig,
+    principal: &str,
+    verb: crate::protocol::Verb,
+    target: &Target,
+) -> Result<bool, ErrorCode> {
+    if configuration
+        .grants
+        .iter()
+        .any(|g| g.principal == principal && g.verb == verb && g.target.matches(target))
+    {
+        return Ok(true);
+    }
+    let (session_id, generation) = match target {
+        Target::Execution {
+            session_id,
+            generation,
+        }
+        | Target::Turn {
+            session_id,
+            generation,
+            ..
+        } => (session_id, *generation),
+        _ => return Ok(false),
+    };
+    let mut query = tx.prepare("SELECT d.principal,d.generation,d.team_id,d.profile_id FROM session_delegations d JOIN sessions s ON s.id=d.session_id WHERE d.session_id=?1 AND d.verb=?2 AND s.team_id=d.team_id AND s.profile_id=d.profile_id").map_err(storage)?;
+    let rows = query
+        .query_map(
+            params![session_id, serde_json::to_string(&verb).map_err(storage)?],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .map_err(storage)?;
+    for row in rows {
+        let (holder, delegated_generation, team, profile) = row.map_err(storage)?;
+        if holder == principal
+            && delegated_generation == sql_u64(generation)?
+            && configuration.defaults.iter().any(|d| {
+                d.team_id == team && d.profile_id == profile && d.lifecycle_verbs.contains(&verb)
+            })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn config(tx: &Transaction<'_>) -> Result<OwnerConfig, ErrorCode> {
     let body: String = tx
         .query_row(
@@ -596,10 +693,15 @@ fn admit_new(
             String::new(),
         )
     };
-    if !config.grants.iter().any(|g| {
-        g.principal == principal && g.verb == request.action.verb() && g.target.matches(&target)
-    }) {
+    if !has_current_grant(tx, config, principal, request.action.verb(), &target)? {
         return Err(ErrorCode::GrantDenied);
+    }
+    if !matches!(
+        request.action,
+        Action::Status(_) | Action::Result(_) | Action::Stop(_)
+    ) && runtime_disabled(tx)?
+    {
+        return Err(ErrorCode::ProfileDenied);
     }
     Ok((target, resolved))
 }

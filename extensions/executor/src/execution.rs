@@ -431,11 +431,7 @@ impl Journal {
             .map_err(storage)?;
         let cfg = journal::config(&tx)?;
         journal::profile(&cfg, &profile_id.ok_or(ErrorCode::StaleGeneration)?)?;
-        if !cfg
-            .grants
-            .iter()
-            .any(|g| g.principal == principal && g.verb == Verb::Stop && g.target.matches(&target))
-        {
+        if !journal::has_current_grant(&tx, &cfg, &principal, Verb::Stop, &target)? {
             return Err(ErrorCode::GrantDenied);
         }
         let identity:String=tx.query_row("SELECT identity FROM executions WHERE session_id=?1 AND generation=?2 AND state IN('running','unknown','spawn_intent')",params![session_id,integer(*generation)?],|r|r.get(0)).optional().map_err(storage)?.ok_or(ErrorCode::UnknownTarget)?;
