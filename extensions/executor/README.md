@@ -6,6 +6,8 @@ There is no public launch producer, installed executable, host-attestation bridg
 
 ## Contracts
 
+`runtime_config::RuntimeConfig` describes owner-selected program paths and SHA256 pins, native modes, workspace bindings, service paths and separate credential-file references. Its bounded private-file reader and artifact verification do not execute programs or qualify runtime capabilities. Caller requests cannot replace those settings. Runtime activation remains unavailable until separately reviewed qualification records exist.
+
 `protocol::ControlRequest` uses a strict versioned `{version, request_id, verb, target, args, deadline}` envelope. Dispatch can supply only its brief and request ID, leaving owner defaults unresolved. The uniform verbs are dispatch, send, steer, interrupt, resume, stop, status, result and approve. Steer and interrupt require an addressed generation and turn; resume distinguishes reconnect from loading a stored conversation. Typed requested/resolved fields keep harness and model separate, carry an executor/host/environment descriptor, immutable workspace references, required capabilities and budget. No raw executable, native flags, workspace path or caller authority is accepted in the request.
 
 Lifecycle calls require peer UID plus an owner-configured verb/target grant bound to the per-call attested principal. The sealed production attestor is unavailable, so production calls return `attestation_unavailable`; only unit tests can install the fake attestor. No per-agent credentials are minted or assumed. Owner administration and synthetic human decisions use separate role credentials, which do not substitute for lifecycle attribution. A label, content message, claimed parent or caller boolean supplies no authority.
