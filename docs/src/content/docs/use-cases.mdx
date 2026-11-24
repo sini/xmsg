@@ -123,6 +123,17 @@ services. It can escalate to a stronger expert model. To start, read the
 [Matrix bridge](/extensions/matrix/) and the [Rust service client](/reference/service-client/)
 pages.
 
+## Isolate system-user daemons on NixOS
+
+When a host runs dedicated workers or service tiers that should not share your personal user
+bus or state directory, declare `services.xmsg.instances.<name>` with `nixosModules.xmsg`. Each
+instance runs `xmsg-<name>.service` under its own system user with `0700` runtime and state
+directories, pinned sockets, `ProtectProc = "invisible"`, and no TCP listener unless
+`allowTcpListen = true` is explicitly set. See
+[NixOS system-service instances](/operations/runtime-and-systemd/#nixos-system-service-instances)
+for a working configuration and
+[the module option reference](/operations/nixos-and-home-manager/#nixos-system-services).
+
 ## Turn your agents into a swarm
 
 Give one hard problem to a dozen sessions and let them divide it. One session maps the code.
