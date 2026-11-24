@@ -417,7 +417,9 @@ async fn start_pair() -> Pair {
             exited = Some(status);
             break;
         }
+        // http.sock binds after register.sock, and k4 reads node_b's records over it.
         if std::os::unix::net::UnixStream::connect(&register_sock_b).is_ok()
+            && std::os::unix::net::UnixStream::connect(&http_sock_b).is_ok()
             && tokio::net::TcpStream::connect(("127.0.0.1", port_b))
                 .await
                 .is_ok()

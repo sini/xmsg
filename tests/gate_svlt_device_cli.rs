@@ -1,5 +1,7 @@
 #![cfg(feature = "daemon")]
 
+mod notify_ready;
+
 use base64::Engine;
 use openidconnect::{
     core::{CoreJwsSigningAlgorithm, CoreRsaPrivateSigningKey},
@@ -302,6 +304,7 @@ impl Context {
             .env_clear()
             .env("HOME", self.directory.path().join("home"))
             .env("XDG_RUNTIME_DIR", self.directory.path().join("runtime"))
+            .env("NOTIFY_SOCKET", self.directory.path().join("notify.sock"))
             .env("SSL_CERT_FILE", &self.root)
             .env("RUST_LOG", "info")
             .env("NO_COLOR", "1")
@@ -429,7 +432,11 @@ fn cert(directory: &Path) -> (String, String, Vec<String>) {
     )
 }
 
-async fn exercise(context: Arc<Context>, idp: Arc<Mutex<IdpState>>) {
+async fn exercise(
+    context: Arc<Context>,
+    idp: Arc<Mutex<IdpState>>,
+    notify: tokio::net::UnixDatagram,
+) {
     let directory = context.directory.path();
     let init = context
         .run(&strings(&[
@@ -503,6 +510,15 @@ async fn exercise(context: Arc<Context>, idp: Arc<Mutex<IdpState>>) {
     ]));
     let address = bound(&server, "bound enrollment https listener").await;
     let tcp_address = bound(&server, "bound tcp http server").await;
+    let serve = &server;
+    assert!(
+        notify_ready::ready(&notify, WAIT, move || async move {
+            serve.status().await.is_none()
+        })
+        .await,
+        "serve never sent READY=1: {}",
+        server.text(true)
+    );
     let url = format!("https://{address}");
     let http = reqwest::Client::builder()
         .no_proxy()
@@ -763,6 +779,7 @@ async fn actual_device_binary_requires_operator_approval_then_renews_and_denies(
     for name in ["home", "runtime", "sessions", "codex"] {
         xmsg::enroll_client::private_directory(&directory.path().join(name)).unwrap();
     }
+    let notify = tokio::net::UnixDatagram::bind(directory.path().join("notify.sock")).unwrap();
     let idp = Idp::new(directory.path()).await;
     let context = Arc::new(Context {
         directory,
@@ -771,7 +788,7 @@ async fn actual_device_binary_requires_operator_approval_then_renews_and_denies(
     });
     let inner_context = context.clone();
     let shared = idp.shared.clone();
-    let mut task = tokio::spawn(async move { exercise(inner_context, shared).await });
+    let mut task = tokio::spawn(async move { exercise(inner_context, shared, notify).await });
     let result = tokio::time::timeout(Duration::from_secs(110), &mut task).await;
     if result.is_err() {
         task.abort();

@@ -1,5 +1,7 @@
 #![cfg(feature = "daemon")]
 
+mod notify_ready;
+
 use base64::Engine;
 use openidconnect::{
     core::{CoreJwsSigningAlgorithm, CoreRsaPrivateSigningKey},
@@ -404,29 +406,6 @@ async fn bound(process: &Process, message: &str) -> String {
         )
     })
 }
-/// Waits for serve's READY=1, which it sends only once every listener, http.sock included, is bound.
-async fn ready(process: &Process, notify: &tokio::net::UnixDatagram) {
-    let mut buffer = [0; 512];
-    tokio::time::timeout(WAIT, async {
-        loop {
-            tokio::select! {
-                received = notify.recv(&mut buffer) => {
-                    let received = received.unwrap();
-                    if String::from_utf8_lossy(&buffer[..received]).lines().any(|line| line == "READY=1") {
-                        return;
-                    }
-                }
-                () = tokio::time::sleep(Duration::from_millis(100)) => assert!(
-                    process.status().await.is_none(),
-                    "serve exited before READY=1: {}",
-                    process.text(true)
-                ),
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("serve never sent READY=1; stderr: {}", process.text(true)))
-}
 fn effects(db: &Path) -> Vec<i64> {
     let connection = rusqlite::Connection::open(db).unwrap();
     ["enroll_bindings", "enroll_rates", "enroll_certs"]
@@ -564,7 +543,15 @@ async fn standalone_enrollment(
             std::fs::remove_file(hold_file).unwrap();
         })
     });
-    ready(&server, &notify).await;
+    let serve = &server;
+    assert!(
+        notify_ready::ready(&notify, WAIT, move || async move {
+            serve.status().await.is_none()
+        })
+        .await,
+        "serve never sent READY=1: {}",
+        server.text(true)
+    );
     let url = format!("https://{address}");
     let client = context.spawn(&strings(&[
         "enroll",
