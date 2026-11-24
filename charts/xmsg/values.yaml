@@ -2,6 +2,13 @@
 # sidecar beside your application containers (Deployment); see `leaf` below.
 mode: node
 
+# Optional override for the generated resource name prefix (defaults to <release>-xmsg).
+fullnameOverride: ""
+
+serviceAccount:
+  # Optional ServiceAccount name override (defaults to xmsg.fullname).
+  name: ""
+
 image:
   repository: ghcr.io/sini/xmsg
   # Use an immutable published tag for upgrades.

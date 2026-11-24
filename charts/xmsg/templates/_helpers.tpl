@@ -1,5 +1,16 @@
 {{- define "xmsg.fullname" -}}
+{{- if .Values.fullnameOverride -}}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
 {{- printf "%s-xmsg" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- define "xmsg.serviceAccountName" -}}
+{{- if and .Values.serviceAccount .Values.serviceAccount.name -}}
+{{- .Values.serviceAccount.name -}}
+{{- else -}}
+{{- include "xmsg.fullname" . -}}
+{{- end -}}
 {{- end -}}
 {{- define "xmsg.selectorLabels" -}}
 app.kubernetes.io/name: xmsg

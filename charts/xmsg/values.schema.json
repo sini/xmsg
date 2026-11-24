@@ -22,6 +22,20 @@
         "leaf"
       ]
     },
+    "fullnameOverride": {
+      "type": "string",
+      "maxLength": 63
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 253
+        }
+      }
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,

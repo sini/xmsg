@@ -7,7 +7,7 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "xmsg.fullname" . }}
+  name: {{ include "xmsg.serviceAccountName" . }}
   labels:
     {{- include "xmsg.labels" . | nindent 4 }}
 automountServiceAccountToken: false
@@ -33,7 +33,7 @@ spec:
       annotations:
         checksum/peers: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
-      serviceAccountName: {{ include "xmsg.fullname" . }}
+      serviceAccountName: {{ include "xmsg.serviceAccountName" . }}
       automountServiceAccountToken: false
       enableServiceLinks: false
       securityContext:

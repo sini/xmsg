@@ -27,11 +27,51 @@ def under(p, d):
     return p is not None and posixpath.commonpath([p, d]) == d and p != d
 
 
+def render(chart, values, extra_sets=()):
+    cmd = ["helm", "template", "t", chart, "-f", values]
+    for s in extra_sets:
+        cmd.extend(["--set", s])
+    out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    return [d for d in yaml.safe_load_all(out) if d]
+
+
+def check_naming(docs, label, expected_full, expected_sa):
+    deps = [d for d in docs if d["kind"] == "Deployment"]
+    sas = [d for d in docs if d["kind"] == "ServiceAccount"]
+    cms = [d for d in docs if d["kind"] == "ConfigMap"]
+    pod = deps[0]["spec"]["template"]["spec"] if len(deps) == 1 else {}
+    vols = {v["name"]: v for v in pod.get("volumes", [])}
+    peers_cm_ref = vols.get("peers", {}).get("configMap", {}).get("name")
+    check(
+        f"{label}: Deployment name == {expected_full}",
+        len(deps) == 1 and deps[0]["metadata"]["name"] == expected_full,
+        str([d["metadata"]["name"] for d in deps]),
+    )
+    check(
+        f"{label}: ConfigMap name == {expected_full}-peers",
+        len(cms) == 1 and cms[0]["metadata"]["name"] == f"{expected_full}-peers",
+        str([c["metadata"]["name"] for c in cms]),
+    )
+    check(
+        f"{label}: peers volume references {expected_full}-peers",
+        peers_cm_ref == f"{expected_full}-peers",
+        str(peers_cm_ref),
+    )
+    check(
+        f"{label}: ServiceAccount name == {expected_sa}",
+        len(sas) == 1 and sas[0]["metadata"]["name"] == expected_sa,
+        str([s["metadata"]["name"] for s in sas]),
+    )
+    check(
+        f"{label}: pod.serviceAccountName == {expected_sa}",
+        pod.get("serviceAccountName") == expected_sa,
+        str(pod.get("serviceAccountName")),
+    )
+
+
 def main():
     chart, values = sys.argv[1:3]
-    out = subprocess.run(["helm", "template", "t", chart, "-f", values],
-                         check=True, capture_output=True, text=True).stdout
-    docs = [d for d in yaml.safe_load_all(out) if d]
+    docs = render(chart, values)
     deps = [d for d in docs if d["kind"] == "Deployment"]
     if len(deps) != 1:
         sys.exit(f"FAIL expected one Deployment, got {len(deps)}")
@@ -108,6 +148,26 @@ def main():
                       for c in containers for e in c.get("env", []))
           and not any(d["kind"] == "Service" for d in docs),
           f"listen={listen}")
+
+    check_naming(docs, "default naming", "t-xmsg", "t-xmsg")
+    check_naming(
+        render(chart, values, ["fullnameOverride=custom-leaf"]),
+        "fullnameOverride",
+        "custom-leaf",
+        "custom-leaf",
+    )
+    check_naming(
+        render(chart, values, ["fullnameOverride=custom-leaf", "serviceAccount.name=custom-sa"]),
+        "fullnameOverride + serviceAccount.name",
+        "custom-leaf",
+        "custom-sa",
+    )
+    check_naming(
+        render(chart, values, ["serviceAccount.name=only-sa"]),
+        "serviceAccount.name only",
+        "t-xmsg",
+        "only-sa",
+    )
 
     if failures:
         sys.exit(f"{len(failures)} leaf-sidecar invariant(s) failed: {failures}")

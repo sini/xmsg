@@ -64,6 +64,8 @@ correlated reply. Its success line is
 | Value | Purpose |
 | --- | --- |
 | `canonicalNodeName` | Required certificate-derived name for local probes; not a nickname |
+| `fullnameOverride` | Optional override for the generated resource name prefix (defaults to `<release>-xmsg`) |
+| `serviceAccount.name` | Optional ServiceAccount name override in `leaf` mode (defaults to `xmsg.fullname`) |
 | `tls.existingSecret` | Existing `kubernetes.io/tls` Secret with `tls.crt` and `tls.key` |
 | `peers` | Peer entries written inside the `{"peers": ...}` JSON configuration |
 | `ca.existingConfigMap` | Optional public CA bundle files mounted under `/etc/xmsg/ca` |
