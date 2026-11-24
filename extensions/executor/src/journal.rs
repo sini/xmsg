@@ -94,6 +94,7 @@ impl Journal {
         .map_err(storage)?;
         crate::execution::initialize(&db)?;
         crate::lifecycle::initialize(&db)?;
+        crate::content_delivery::initialize(&db)?;
         crate::approval::initialize(&db)?;
         Ok(Self {
             db,

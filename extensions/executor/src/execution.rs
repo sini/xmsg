@@ -500,7 +500,17 @@ impl ContentStore for &crate::control::ControlService {
         content: &ContentRecord,
     ) -> Result<CommitOutcome, MembershipError> {
         let mut journal = self.journal.lock().map_err(|_| MembershipError::Storage)?;
-        let tx = journal
+        journal.commit(binding, content)
+    }
+}
+
+impl ContentStore for Journal {
+    fn commit(
+        &mut self,
+        binding: &ProxyBinding,
+        content: &ContentRecord,
+    ) -> Result<CommitOutcome, MembershipError> {
+        let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| MembershipError::Storage)?;

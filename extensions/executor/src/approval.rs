@@ -418,7 +418,7 @@ impl crate::journal::Journal {
         {
             return Err(ErrorCode::StaleTurn);
         }
-        let admission:i64=tx.query_row("SELECT admission_id FROM native_operations WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state='submitted' AND json_extract(command,'$.command')='prompt' AND json_extract(command,'$.turn_id')=?4 ORDER BY admission_id DESC LIMIT 1",params![native.identity.session_id,generation,native.transport_epoch,turn_id],|r|r.get(0)).optional().map_err(|_|ErrorCode::Storage)?.ok_or(ErrorCode::PendingMismatch)?;
+        let admission = crate::content_delivery::prompt_admission(&tx, native, &turn_id)?;
         let (principal, original, target) = crate::lifecycle::effect_request(&tx, admission)?;
         let mut selected = crate::journal::Journal::require_native_effect(
             policy.as_deref(),
