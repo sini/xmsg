@@ -423,11 +423,17 @@ enum AcpScenario {
     Fairness,
     PrelaunchFailure,
     Reconnect,
+    UnsupportedRequest,
+}
+#[test]
+fn unsupported_native_request_gets_bounded_failure_without_human_or_terminal_execution() {
+    real_acp_fixture(AcpScenario::UnsupportedRequest);
 }
 fn real_acp_fixture(scenario: AcpScenario) {
     let fairness = matches!(scenario, AcpScenario::Fairness);
     let prelaunch_failure = matches!(scenario, AcpScenario::PrelaunchFailure);
     let reconnect = matches!(scenario, AcpScenario::Reconnect);
+    let unsupported = matches!(scenario, AcpScenario::UnsupportedRequest);
     use crate::runtime_config::{
         PinnedExecutable, ProgramConfig, RuntimeConfig, ServicePaths, WorkspaceConfig,
     };
@@ -531,6 +537,12 @@ fn real_acp_fixture(scenario: AcpScenario) {
     if fairness {
         configuration.programs[0].arguments.extend([
             "fairness".into(),
+            buffer_path.to_string_lossy().into_owned(),
+        ]);
+    }
+    if unsupported {
+        configuration.programs[0].arguments.extend([
+            "unsupported".into(),
             buffer_path.to_string_lossy().into_owned(),
         ]);
     }
@@ -904,6 +916,37 @@ fn real_acp_fixture(scenario: AcpScenario) {
     );
     assert_eq!(frames[4]["params"]["prompt"][0]["text"], "only fake brief");
     prompt.write_all(b"R").unwrap();
+    if unsupported {
+        let mut denied =
+            accept_fixture(&buffer_barrier, "actual native method-not-found response").unwrap();
+        let mut notice = [0];
+        denied.read_exact(&mut notice).unwrap();
+        assert_eq!(notice, [b'D']);
+        let (pending, decisions): (i64, i64) = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM native_pending),(SELECT COUNT(*) FROM decisions)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (pending, decisions),
+            (0, 0),
+            "unsupported native method became human review"
+        );
+        let trace = fs::read_to_string(&trace).unwrap();
+        let response: serde_json::Value = trace
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|frame| frame["id"] == 900)
+            .unwrap();
+        assert_eq!(response["error"]["code"], -32601);
+        assert!(response.get("result").is_none());
+    }
     if fairness {
         let mut buffered = accept_fixture(&buffer_barrier, "buffered native fairness").unwrap();
         let mut notice = [0];

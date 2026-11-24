@@ -52,6 +52,8 @@ Status and result replies identify journal provenance. A finished ACP turn becom
 
 Qualified `resume(kind: reconnect)` attaches only to the same owned supervisor, generation, native session and transport epoch. It records the observation separately from native submission, rechecks current caller/adapter eligibility after the probe, and never initializes or launches a replacement. Unknown state is not cleared by seeing a live process. An interrupted probe is not automatically replayed. `load_stored_conversation` remains unavailable while safe retirement of the prior owned execution is unproven; the ACP load mapping alone is not a resume qualification.
 
+Required confirmed-interrupt, human-mandatory-provenance and stored-resume effects have no qualified producer in this release and are rejected before admission/spawn. Ordinary cancellation submission retains its unknown quiescence fence. Background silence and native child observations create no review records, prompts or managed grants. Unknown native RPCs receive a bounded method-not-found response; there is no shell/terminal execution fallback.
+
 Authorization, durable admission, native submission and observed effect are separate receipt layers. An SDK `Origin` describes content provenance only. Result/status fields retain generation, turn, provenance, freshness and unfinished work; a model saying “done” is not a completed execution receipt.
 
 `capability::QualificationKey` includes the adapter/native runtime, ACP/schema identity, native mode, review mode, trust profile, model and effective config digest. `matches_pinned_metadata` only compares already-trusted record metadata; it does not verify artifacts or evidence provenance and is not an authorization API.

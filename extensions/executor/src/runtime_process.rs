@@ -499,6 +499,24 @@ fn write_native(
     .map_err(|_| SupervisorError::Protocol)
 }
 
+fn negative_native_reply(event: &Event) -> Option<Frame> {
+    match event {
+        Event::PermissionAutoCancelled { response, .. } => Some(response.clone()),
+        Event::UnsupportedRequest { request_id, .. } => {
+            Some(Frame::Failure(crate::framing::Failure {
+                jsonrpc: "2.0".into(),
+                id: request_id.clone(),
+                error: crate::framing::RpcError {
+                    code: -32601,
+                    message: "unsupported native request".into(),
+                    data: None,
+                },
+            }))
+        }
+        _ => None,
+    }
+}
+
 fn initialize_command(
     journal: &mut Journal,
     manifest: &ChildManifest,
@@ -556,13 +574,14 @@ fn finish_initialization(
             .observe(frame)
             .map_err(|_| SupervisorError::Protocol)?;
         for event in events {
+            if let Some(response) = negative_native_reply(&event) {
+                write_native(input, &response, expires)?;
+                continue;
+            }
             match event {
-                Event::PermissionAutoCancelled { response, .. } => {
-                    write_native(input, &response, expires)?
+                Event::RequestFailed { .. } | Event::PendingPermission { .. } => {
+                    return Err(SupervisorError::Protocol)
                 }
-                Event::RequestFailed { .. }
-                | Event::UnsupportedRequest { .. }
-                | Event::PendingPermission { .. } => return Err(SupervisorError::Protocol),
                 _ => {}
             }
         }
@@ -707,8 +726,8 @@ impl Session {
             }
         };
         for event in events {
-            if let Event::PermissionAutoCancelled { response, .. } = &event {
-                write_native(&mut self.input, response, self.expires)?;
+            if let Some(response) = negative_native_reply(&event) {
+                write_native(&mut self.input, &response, self.expires)?;
                 continue;
             }
             let pending = matches!(event, Event::PendingPermission { .. });

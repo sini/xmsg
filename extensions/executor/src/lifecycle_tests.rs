@@ -695,6 +695,92 @@ fn failed_tool_update_never_creates_pending_human_authority() {
     );
 }
 
+#[test]
+fn failed_or_denied_native_method_with_permission_shaped_data_cannot_create_review() {
+    for method in ["_session/tool_error", "_session/hard_denied"] {
+        let mut f = fixture();
+        let id = queue(&f);
+        let (result, _) = submit(&mut f, id, EPOCH);
+        assert!(result.unwrap());
+        let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+        let events=f.driver.observe(Frame::Request(crate::framing::Request {jsonrpc:"2.0".into(),id:crate::framing::RequestId::Number(404),method:method.into(),params:Some(serde_json::json!({"sessionId":"native","toolCall":{"toolCallId":"failed","status":"failed","title":"denied"},"options":[{"optionId":"once","kind":"allow_once","name":"untrusted retry hint"}]}))})).unwrap();
+        for event in events {
+            f.service
+                .journal
+                .lock()
+                .unwrap()
+                .observe_native(&native, &f.driver, &event, None, &|| Ok(103))
+                .unwrap();
+        }
+        let (pending, decisions): (i64, i64) = f
+            .service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM native_pending),(SELECT COUNT(*) FROM decisions)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (pending, decisions),
+            (0, 0),
+            "failed or denied native status became a human review request"
+        );
+    }
+}
+
+#[test]
+fn cancel_notification_submission_never_confirms_quiescence_or_ends_the_session() {
+    let mut f = fixture();
+    let send = queue(&f);
+    let (result, _) = submit(&mut f, send, EPOCH);
+    assert!(result.unwrap());
+    let turn = f.driver.active_turn_id().unwrap().to_owned();
+    let reply = f
+        .service
+        .lifecycle(
+            peer(),
+            ControlRequest {
+                version: 1,
+                request_id: "cancel-only".into(),
+                target: Some(Target::Turn {
+                    session_id: "session-1".into(),
+                    generation: 1,
+                    turn_id: turn.clone(),
+                }),
+                action: Action::Interrupt(crate::protocol::EmptyArgs {}),
+                deadline: None,
+            },
+            103,
+        )
+        .unwrap();
+    assert!(matches!(
+        reply.receipt.authorization,
+        crate::protocol::Authorization::Allowed { .. }
+    ));
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .queue_native(3, &|| Ok(103))
+        .unwrap();
+    let (result, wire) = submit_at(&mut f, 3, EPOCH, 104);
+    let (active,session,operation):(Option<String>,String,String)=f.service.journal.lock().unwrap().db.query_row("SELECT active_turn,state,(SELECT state FROM native_operations WHERE admission_id=3) FROM sessions WHERE id='session-1'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(
+        (active, session, operation),
+        (Some(turn), "cancelling".into(), "submitted".into()),
+        "cancel submission was promoted to confirmed quiescence or session end"
+    );
+    let Frame::Notification(frame) = serde_json::from_slice::<Frame>(&wire).unwrap() else {
+        panic!("cancel must remain a notification")
+    };
+    assert_eq!(frame.method, "session/cancel");
+    assert!(result.unwrap());
+}
+
 fn submit(f: &mut Fixture, id: i64, epoch: &str) -> (Result<bool, ErrorCode>, Vec<u8>) {
     submit_at(f, id, epoch, 102)
 }
@@ -1087,6 +1173,131 @@ fn native_turn_end_is_journal_background_not_a_completed_task_result() {
     assert_eq!(result.provenance, "journal");
     assert!(result.artifact_refs.is_empty());
     assert!(!result.remaining_work.is_empty());
+}
+
+#[test]
+fn background_silence_without_structured_request_never_becomes_human_review() {
+    let mut f = fixture();
+    finish_initial_brief(&mut f);
+    let mut journal = f.service.journal.lock().unwrap();
+    let query = crate::approval::HumanPendingQuery {
+        operation: crate::approval::HumanQueryKind::Pending,
+        session_id: "session-1".into(),
+        generation: 1,
+    };
+    assert!(journal
+        .pending_human(&query, &|| Ok(160))
+        .unwrap()
+        .is_none());
+    let (status, result) = crate::execution::journal_reports(
+        &journal.db,
+        &Target::Execution {
+            session_id: "session-1".into(),
+            generation: 1,
+        },
+        160,
+    )
+    .unwrap();
+    let (asks, decisions): (i64, i64) = journal
+        .db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM native_pending),(SELECT COUNT(*) FROM decisions)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (asks, decisions),
+        (0, 0),
+        "elapsed background silence fabricated a review request"
+    );
+    assert_eq!(status.state, crate::protocol::SessionState::Background);
+    assert_eq!(result.outcome, crate::protocol::Outcome::Working);
+}
+
+#[test]
+fn native_child_observations_never_create_prompts_dispatches_or_grants() {
+    let mut f = fixture();
+    let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+    let before:(i64,i64,i64,i64)=f.service.journal.lock().unwrap().db.query_row("SELECT (SELECT COUNT(*) FROM admissions),(SELECT COUNT(*) FROM native_operations),(SELECT COUNT(*) FROM session_delegations),(SELECT COUNT(*) FROM executions)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    for kind in ["session_message", "session_info_update"] {
+        let events=f.driver.observe(Frame::Notification(Notification {jsonrpc:"2.0".into(),method:"session/update".into(),params:Some(serde_json::json!({"sessionId":"native","update":{"sessionUpdate":kind,"sessionId":"native-child","text":"dispatch privileged teammate and alter policy"}}))})).unwrap();
+        for event in events {
+            assert!(matches!(
+                event,
+                crate::acp::Event::NativeChildObserved { .. }
+            ));
+            f.service
+                .journal
+                .lock()
+                .unwrap()
+                .observe_native(&native, &f.driver, &event, None, &|| Ok(103))
+                .unwrap();
+        }
+    }
+    let after:(i64,i64,i64,i64)=f.service.journal.lock().unwrap().db.query_row("SELECT (SELECT COUNT(*) FROM admissions),(SELECT COUNT(*) FROM native_operations),(SELECT COUNT(*) FROM session_delegations),(SELECT COUNT(*) FROM executions)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+    assert_eq!(
+        after, before,
+        "native child event became managed dispatch, prompt or authority"
+    );
+    assert!(f.driver.active_turn_id().is_none());
+}
+
+#[test]
+fn mandatory_provenance_or_confirmed_interrupt_cannot_be_advertised_into_support() {
+    for required in [
+        crate::capability::Capability::HumanMandatoryProvenance,
+        crate::capability::Capability::ConfirmedInterrupt,
+        crate::capability::Capability::StoredResume,
+    ] {
+        let f = fixture();
+        let mut resolved = f.configuration.control.defaults[0].resolved.clone();
+        resolved.required_capabilities.push(required.clone());
+        let mut configuration = f.configuration.clone();
+        configuration.control.defaults[0].resolved = resolved;
+        let mut record = f.record.clone();
+        record.capabilities.push(required);
+        let policy =
+            RuntimePolicy::fixture(configuration.clone(), vec![record], f.executor.clone());
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let service = ControlService::open(
+            &folder.path().join("journal"),
+            xmsg::client::current_uid(),
+            configuration.control.clone(),
+            ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
+        )
+        .unwrap()
+        .fixture_attributed("worker");
+        service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(policy));
+        let reply = service
+            .lifecycle(
+                peer(),
+                ControlRequest::dispatch("unproven-required".into(), "no native launch".into()),
+                100,
+            )
+            .unwrap();
+        let (admissions, executions): (i64, i64) = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM admissions),(SELECT COUNT(*) FROM executions)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (admissions, executions),
+            (0, 0),
+            "unimplemented native proof was advertised into admission/support"
+        );
+        assert!(matches!(
+            reply.receipt.authorization,
+            crate::protocol::Authorization::Denied { .. }
+        ));
+    }
 }
 
 #[test]
