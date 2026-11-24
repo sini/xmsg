@@ -40,6 +40,8 @@ Lifecycle calls require peer UID plus an owner-configured verb/target grant boun
 
 The planned `human --config <file> --session <id> --generation <N>` operator queries only genuine current native asks on the human channel. It requires a controlling terminal and an exact per-request typed confirmation; it has no `--yes` or persistent-allow path. The service independently rechecks the approval ID, digest, expiry, generation, turn and current eligibility before recording a decision, then the native actor rechecks before responding. Same-UID code is not physically isolated from the operator. Querying an ask does not consume or confirm it.
 
+The separate `owner-disable --config <file> --expected-revision <N>` command uses the owner credential channel and persists the emergency fence independently of qualification. Human credentials cannot invoke it. There is no restore/enable command; a successful disable does not claim that native processes have already stopped.
+
 Status and result replies identify journal provenance. A finished ACP turn becomes background work with an unverified task outcome, not a completed-task or artifact claim. Failed pre-launch work reports journal `Failed`/`NotAttempted`; uncertain execution remains unknown and consumes its slot.
 
 Authorization, durable admission, native submission and observed effect are separate receipt layers. An SDK `Origin` describes content provenance only. Result/status fields retain generation, turn, provenance, freshness and unfinished work; a model saying “done” is not a completed execution receipt.
