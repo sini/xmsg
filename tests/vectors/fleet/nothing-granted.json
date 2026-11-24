@@ -1,1 +1,1 @@
-{"carol.x":{"address":"x.example.net:7788","allow":[],"ca":"/etc/xmsg/tls/ca.crt","identities":["spiffe://example.org/host/x/user/carol"],"targets":[]}}
+{"carol.x":{"address":"x.example.net:7788","allow":[],"ca":"/etc/xmsg/ca/root.crt","identities":["spiffe://example.org/host/x/user/carol"],"targets":[]}}

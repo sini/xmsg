@@ -2,6 +2,17 @@
 { lib }:
 let
   inherit (lib) mkOption types;
+  xmsgLib = import ./_lib.nix { inherit lib; };
+
+  allowEnumType = types.enum [
+    "send"
+    "reply"
+    "list"
+    "observe"
+    "forward"
+    "relayed"
+    "relay"
+  ];
 
   allowOrder = [
     "send"
@@ -75,9 +86,9 @@ let
       false
     else
       let
-        mV6Raw = builtins.match "^\\[([^/]+)]:([0-9]+)$" addr;
+        mV6Raw = builtins.match "^\\[([^/]+)]:([0-9]{1,5})$" addr;
         mV6 = if mV6Raw != null && !(lib.hasInfix "]" (builtins.elemAt mV6Raw 0)) then mV6Raw else null;
-        mHost = builtins.match "^([^:@/]+):([0-9]+)$" addr;
+        mHost = builtins.match "^([^:@/]+):([0-9]{1,5})$" addr;
         portStr =
           if mV6 != null then
             builtins.elemAt mV6 1
@@ -95,7 +106,8 @@ let
     allow = orderAllow p.allow;
     targets = if p.targets == null then null else lib.sort builtins.lessThan (lib.unique p.targets);
     principals = lib.sort builtins.lessThan (lib.unique p.principals);
-    inherit (p) observeLabels mailbox;
+    inherit (p) observeLabels;
+    mailbox = p.mailbox or false;
   };
 
   nodeType = types.submodule {
@@ -154,7 +166,7 @@ let
         default = [ ];
       };
       allow = mkOption {
-        type = types.listOf types.str;
+        type = types.listOf allowEnumType;
         default = [ ];
       };
       targets = mkOption {
@@ -169,17 +181,13 @@ let
         type = types.bool;
         default = false;
       };
-      mailbox = mkOption {
-        type = types.bool;
-        default = false;
-      };
     };
   };
 
   grantType = types.submodule {
     options = {
       allow = mkOption {
-        type = types.listOf types.str;
+        type = types.listOf allowEnumType;
         default = [ ];
       };
       targets = mkOption {
@@ -285,8 +293,8 @@ let
               targets
               principals
               observeLabels
-              mailbox
               ;
+            mailbox = false;
           }
         else
           null;
@@ -448,7 +456,7 @@ let
           ) fleet.grants
         );
 
-      # F5: observe rules and collector restrictions.
+      # F5: observe rules and collector restrictions (spec F5 erratum).
       f5Msgs =
         lib.concatLists (
           lib.mapAttrsToList (
@@ -456,17 +464,30 @@ let
             lib.concatLists (
               lib.mapAttrsToList (
                 e: gr:
-                lib.optional (
-                  builtins.elem "observe" gr.allow
-                  && (
-                    !(isDeclared e && nodes.${e}.kind == "collector")
-                    || !(isDeclared g && nodes.${g}.kind == "node")
-                    || userOf g != userOf e
-                    || gr.allow != [ "observe" ]
-                    || gr.targets != null
-                    || gr.principals != [ ]
-                  )
-                ) "F5: invalid observe grant '${g}' -> '${e}'"
+                let
+                  eIsCollector = isDeclared e && nodes.${e}.kind == "collector";
+                  gIsNode = isDeclared g && nodes.${g}.kind == "node";
+                  extraOps = lib.filter (op: op != "observe") gr.allow;
+                  badRights =
+                    if gr.allow == [ ] then
+                      "none"
+                    else if extraOps != [ ] then
+                      lib.concatStringsSep ", " extraOps
+                    else
+                      "";
+                in
+                if eIsCollector then
+                  lib.optional (
+                    !gIsNode || userOf g != userOf e
+                  ) "F5: grant '${g}' -> collector '${e}' must be from a node of '${userOf e}'"
+                  ++
+                    lib.optional (!(builtins.elem "observe" gr.allow) || extraOps != [ ])
+                      "F5: grant '${g}' -> collector '${e}' must have allow = [ \"observe\" ] (offending rights: ${badRights})"
+                  ++ lib.optional (
+                    gr.targets != null || gr.principals != [ ]
+                  ) "F5: grant '${g}' -> collector '${e}' must omit targets and principals"
+                else
+                  lib.optional (builtins.elem "observe" gr.allow) "F5: grant '${g}' -> '${e}' cannot grant observe to non-collector"
               ) gs
             )
           ) fleet.grants
@@ -713,10 +734,20 @@ let
     else
       builtins.throw (lib.concatMapStringsSep "\n" (c: c.message) res);
 
+  portOf =
+    viewer:
+    if viewer.listenPort != null then
+      toString viewer.listenPort
+    else
+      let
+        m = builtins.match "^.*:([0-9]{1,5})$" (if viewer.address == null then "" else viewer.address);
+      in
+      if m != null then builtins.elemAt m 0 else "7788";
+
   addressFor =
     viewer: nName: n:
     if n.kind != "node" then
-      "${nName}.invalid:7788"
+      "${nName}.invalid:${portOf viewer}"
     else if viewer.network != null && builtins.hasAttr viewer.network n.addresses then
       n.addresses.${viewer.network}
     else
@@ -777,26 +808,7 @@ let
     in
     lib.filterAttrs (_: v: v != null) (lib.genAttrs others mkEntry);
 
-  renderFleetPeer =
-    _: p:
-    lib.filterAttrs (_: v: v != null) {
-      inherit (p)
-        address
-        pin
-        ca
-        identities
-        allow
-        from
-        targets
-        dial
-        ;
-    }
-    // lib.optionalAttrs p.leaf { leaf = true; }
-    // lib.optionalAttrs p.observeLabels { observe_labels = true; }
-    // lib.optionalAttrs p.defaultRoute { default_route = true; }
-    // lib.optionalAttrs (p.principals != [ ]) { inherit (p) principals; };
-
-  peersRenderedFor = args: lib.mapAttrs renderFleetPeer (peersFor args);
+  peersRenderedFor = args: lib.mapAttrs xmsgLib.renderPeer (peersFor args);
 
   peersJsonFor = args: builtins.toJSON (peersRenderedFor args);
 
@@ -806,6 +818,7 @@ let
       self,
     }:
     let
+      # N8 equivalence (counting any grant to self) holds only because assertFleet runs check and throws on any F5 violation first.
       f = assertFleet fleet;
       viewer = f.nodes.${self};
       viewerCa = caFor f viewer;
@@ -836,7 +849,7 @@ let
         let
           g = effectiveGrant f nName self;
         in
-        g != null && builtins.elem "send" g.allow
+        nName != self && g != null && builtins.elem "send" g.allow
       ) (lib.sort builtins.lessThan (builtins.attrNames f.nodes));
       relayed =
         if builtins.hasAttr self f.relays then

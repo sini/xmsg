@@ -6,7 +6,7 @@
 let
   baseFleet = {
     trustDomain = "example.org";
-    ca = "/etc/xmsg/tls/ca.crt";
+    ca = "/etc/xmsg/ca/root.crt";
     nodes = {
       "alice.hub" = {
         address = "hub.example.net:7788";
@@ -94,7 +94,7 @@ let
 
   nothingGrantedFleet = {
     trustDomain = "example.org";
-    ca = "/etc/xmsg/tls/ca.crt";
+    ca = "/etc/xmsg/ca/root.crt";
     nodes = {
       "alice.hub" = {
         address = "hub.example.net:7788";
@@ -192,13 +192,13 @@ let
             node = "alice.hub";
             address = "hub.example.net:7788";
             identity = "spiffe://example.org/host/hub/user/alice";
-            ca = "/etc/xmsg/tls/ca.crt";
+            ca = "/etc/xmsg/ca/root.crt";
           }
           {
             node = "alice.laptop";
             address = "laptop.example.net:7788";
             identity = "spiffe://example.org/host/laptop/user/alice";
-            ca = "/etc/xmsg/tls/ca.crt";
+            ca = "/etc/xmsg/ca/root.crt";
           }
         ];
     }
@@ -225,6 +225,130 @@ let
     {
       name = "ipv6 literal [::1]:7788 passes F4a";
       ok = fleet.check v6Fleet == [ ];
+    }
+    {
+      name = "B2 leaf/collector invalid address uses viewer listenPort/address port";
+      ok =
+        let
+          f9000 = baseFleet // {
+            nodes = baseFleet.nodes // {
+              "alice.hub" = baseFleet.nodes."alice.hub" // {
+                address = "hub.example.net:9000";
+              };
+            };
+          };
+          f7000 = baseFleet // {
+            nodes = baseFleet.nodes // {
+              "alice.hub" = baseFleet.nodes."alice.hub" // {
+                listenPort = 7000;
+              };
+            };
+          };
+          p9000 = fleet.peersRenderedFor {
+            fleet = f9000;
+            self = "alice.hub";
+          };
+          p7000 = fleet.peersRenderedFor {
+            fleet = f7000;
+            self = "alice.hub";
+          };
+        in
+        p9000."gateway.mcp".address == "gateway.mcp.invalid:9000"
+        && p9000."alice.collector".address == "alice.collector.invalid:9000"
+        && p7000."gateway.mcp".address == "gateway.mcp.invalid:7000";
+    }
+    {
+      name = "N3/N4/N7 second-hub non-relay grant has no forward, no default_route, not in reachableFor.direct";
+      ok =
+        let
+          twoHub = baseFleet // {
+            grants = baseFleet.grants // {
+              "bob.desk" = (baseFleet.grants."bob.desk" or { }) // {
+                "gateway.mcp" = {
+                  mailbox = true;
+                  allow = [ "list" ];
+                };
+              };
+              "gateway.mcp" = baseFleet.grants."gateway.mcp" // {
+                "bob.desk".allow = [ "list" ];
+              };
+            };
+          };
+          bobPeers = fleet.peersRenderedFor {
+            fleet = twoHub;
+            self = "bob.desk";
+          };
+          gwPeers = fleet.peersRenderedFor {
+            fleet = twoHub;
+            self = "gateway.mcp";
+          };
+          gwReach = fleet.reachableFor {
+            fleet = twoHub;
+            self = "gateway.mcp";
+          };
+        in
+        !(builtins.elem "forward" bobPeers."gateway.mcp".allow)
+        && (gwPeers."alice.hub".default_route or false)
+        && !(gwPeers."bob.desk".default_route or false)
+        && gwReach.direct == [ "alice.hub" ];
+    }
+    {
+      name = "N10 unnormalised allow renders deduplicated in enum order";
+      ok =
+        let
+          fUnnorm = baseFleet // {
+            grants = baseFleet.grants // {
+              "bob.desk" = (baseFleet.grants."bob.desk" or { }) // {
+                "alice.laptop" = {
+                  replace = true;
+                  allow = [
+                    "list"
+                    "send"
+                    "reply"
+                    "send"
+                  ];
+                };
+              };
+            };
+          };
+          p = fleet.peersRenderedFor {
+            fleet = fUnnorm;
+            self = "bob.desk";
+          };
+        in
+        p."alice.laptop".allow == [
+          "send"
+          "reply"
+          "list"
+        ];
+    }
+    {
+      name = "N4 reachableFor on mesh node excludes self";
+      ok =
+        let
+          r = fleet.reachableFor {
+            fleet = baseFleet;
+            self = "alice.hub";
+          };
+        in
+        !(builtins.elem "alice.hub" r.direct);
+    }
+    {
+      name = "F5 positive control: observeLabels = true on collector observe grant passes";
+      ok =
+        fleet.check (
+          baseFleet
+          // {
+            grants = baseFleet.grants // {
+              "alice.hub" = baseFleet.grants."alice.hub" // {
+                "alice.collector" = {
+                  allow = [ "observe" ];
+                  observeLabels = true;
+                };
+              };
+            };
+          }
+        ) == [ ];
     }
   ];
 
@@ -392,8 +516,11 @@ let
       // {
         grants = baseFleet.grants // {
           "gateway.mcp" = baseFleet.grants."gateway.mcp" // {
-            "alice.collector".allow = [ "send" ];
+            "zed.collector".allow = [ "send" ];
           };
+        };
+        nodes = baseFleet.nodes // {
+          "zed.collector".kind = "collector";
         };
       }
     ))
@@ -426,6 +553,11 @@ let
       trustDomain = "example.org";
       ca = "/etc/xmsg/tls/ca.crt";
       nodes."alice.hub".address = "h:65536";
+    })
+    (expectFault "F4a oversized port (totality)" "F4a:" {
+      trustDomain = "example.org";
+      ca = "/etc/xmsg/tls/ca.crt";
+      nodes."alice.hub".address = "h:99999999999999999999";
     })
     (expectFault "F4a non-numeric port" "F4a:" {
       trustDomain = "example.org";
@@ -574,6 +706,126 @@ let
         };
       }
     ))
+    (expectFault "F5 same-user send-only to collector" "F5:" (
+      baseFleet
+      // {
+        grants = baseFleet.grants // {
+          "alice.hub" = baseFleet.grants."alice.hub" // {
+            "alice.collector".allow = [ "send" ];
+          };
+        };
+      }
+    ))
+    (expectFault "F5 same-user list-only to collector" "F5:" (
+      baseFleet
+      // {
+        grants = baseFleet.grants // {
+          "alice.hub" = baseFleet.grants."alice.hub" // {
+            "alice.collector".allow = [ "list" ];
+          };
+        };
+      }
+    ))
+    (expectFault "F5 same-user observe+list to collector" "F5:" (
+      baseFleet
+      // {
+        grants = baseFleet.grants // {
+          "alice.hub" = baseFleet.grants."alice.hub" // {
+            "alice.collector".allow = [
+              "observe"
+              "list"
+            ];
+          };
+        };
+      }
+    ))
+    (expectFault "F5 same-user observe+reply to collector" "F5:" (
+      baseFleet
+      // {
+        grants = baseFleet.grants // {
+          "alice.hub" = baseFleet.grants."alice.hub" // {
+            "alice.collector".allow = [
+              "observe"
+              "reply"
+            ];
+          };
+        };
+      }
+    ))
+    (expectFault "F5 same-user empty allow to collector" "F5:" (
+      baseFleet
+      // {
+        grants = baseFleet.grants // {
+          "alice.hub" = baseFleet.grants."alice.hub" // {
+            "alice.collector".allow = [ ];
+          };
+        };
+      }
+    ))
+    {
+      name = "F5 cross-user send to collector names bob.desk, alice.collector and send";
+      ok =
+        let
+          res = fleet.check (
+            baseFleet
+            // {
+              grants = baseFleet.grants // {
+                "bob.desk" = (baseFleet.grants."bob.desk" or { }) // {
+                  "alice.collector".allow = [ "send" ];
+                };
+              };
+            }
+          );
+          msgs = map (c: c.message) (lib.filter (c: !c.assertion) res);
+        in
+        lib.any (
+          m:
+          lib.hasPrefix "F5:" m
+          && lib.hasInfix "bob.desk" m
+          && lib.hasInfix "alice.collector" m
+          && lib.hasInfix "send" m
+        ) msgs;
+    }
+    {
+      name = "D2/B3 unknown op sned in allow is an eval error";
+      ok =
+        !(builtins.tryEval (
+          builtins.deepSeq (fleet.check (
+            baseFleet
+            // {
+              grants = baseFleet.grants // {
+                "gateway.mcp" = baseFleet.grants."gateway.mcp" // {
+                  "alice.hub".allow = [
+                    "sned"
+                    "reply"
+                  ];
+                };
+              };
+            }
+          )) true
+        )).success;
+    }
+    {
+      name = "N3 mesh mailbox = true is rejected";
+      ok =
+        !(builtins.tryEval (
+          builtins.deepSeq (fleet.check (
+            baseFleet
+            // {
+              meshes = [
+                {
+                  members = [
+                    "alice.hub"
+                    "alice.laptop"
+                  ];
+                  allow = [ "send" ];
+                  mailbox = true;
+                }
+              ];
+            }
+          )) true
+        )).success;
+    }
     (expectFault "F5 collector grants something" "F5:" (
       baseFleet
       // {
@@ -647,12 +899,16 @@ let
     ))
 
     # F7
-    (expectFault "F7(i) relay without recipient consent" "F7(i):" (
+    (expectFault "F7(i) relay without recipient consent (two recipients, bad second)" "F7(i):" (
       baseFleet
       // {
-        nodes = baseFleet.nodes // {
-          "alice.laptop" = baseFleet.nodes."alice.laptop" // {
-            acceptRelayed = [ ];
+        relays = {
+          "gateway.mcp" = {
+            via = "alice.hub";
+            to = [
+              "alice.laptop"
+              "bob.desk"
+            ];
           };
         };
       }
@@ -709,30 +965,37 @@ let
         };
       }
     ))
-    (expectFault "F7(iii) G(H,R) none" "F7(iii):" {
-      trustDomain = "example.org";
-      ca = "/etc/xmsg/tls/ca.crt";
-      nodes = {
-        "alice.hub".address = "hub.example.net:7788";
-        "bob.desk" = {
-          address = "desk.example.net:7788";
-          acceptRelayed = [ "alice.hub" ];
+    (expectFault "F7(iii) G(H,R) none (two recipients, bad second)" "F7(iii):" (
+      baseFleet
+      // {
+        nodes = baseFleet.nodes // {
+          "bob.desk" = baseFleet.nodes."bob.desk" // {
+            acceptRelayed = [ "alice.hub" ];
+          };
         };
-        "gateway.mcp".kind = "leaf";
-      };
-      grants = {
-        "alice.hub"."gateway.mcp" = {
-          mailbox = true;
-          allow = [ "send" ];
+        grants = baseFleet.grants // {
+          "alice.hub" = baseFleet.grants."alice.hub" // {
+            "bob.desk" = {
+              replace = true;
+              allow = [ "send" ];
+              targets = [ ];
+            };
+          };
+          "bob.desk" = (baseFleet.grants."bob.desk" or { }) // {
+            "alice.hub".allow = [ "send" ];
+          };
         };
-        "gateway.mcp"."alice.hub".allow = [ "send" ];
-        "bob.desk"."alice.hub".allow = [ "send" ];
-      };
-      relays."gateway.mcp" = {
-        via = "alice.hub";
-        to = [ "bob.desk" ];
-      };
-    })
+        relays = {
+          "gateway.mcp" = {
+            via = "alice.hub";
+            to = [
+              "alice.laptop"
+              "bob.desk"
+            ];
+          };
+        };
+      }
+    ))
     (expectFault "F7(iii) G(H,R) targets=[]" "F7(iii):" (
       baseFleet
       // {
