@@ -1951,7 +1951,8 @@ async fn r2a_direct_404_recovers_on_valid_response_and_403_stays_denied() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
-    run_three_transports_share_the_snapshot_and_cursor(None, None, Duration::from_secs(30)).await;
+    run_three_transports_share_the_snapshot_and_cursor(None, None, Duration::from_secs(30), None)
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1960,6 +1961,7 @@ async fn forced_control_three_transports_slow_snapshot_delivery() {
         Some(Duration::from_millis(5200)),
         None,
         Duration::from_secs(30),
+        Some(15_000),
     )
     .await;
 }
@@ -1968,6 +1970,7 @@ async fn run_three_transports_share_the_snapshot_and_cursor(
     snapshot_hold: Option<Duration>,
     client_timeout: Option<Duration>,
     ws_timeout: Duration,
+    handshake_timeout_ms: Option<u64>,
 ) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
@@ -1975,9 +1978,13 @@ async fn run_three_transports_share_the_snapshot_and_cursor(
     let oidc =
         crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
     let directory = tempfile::tempdir().unwrap();
-    let (issuer, issued) =
-        crate::mission_control::tests::transport_with_handshake_timeout(&oidc, &directory, 15_000)
-            .await;
+    let (issuer, issued) = match handshake_timeout_ms {
+        Some(ms) => {
+            crate::mission_control::tests::transport_with_handshake_timeout(&oidc, &directory, ms)
+                .await
+        }
+        None => crate::mission_control::tests::transport_fixture(&oidc, &directory).await,
+    };
     let f = Fixture::with_issuer(false, true, Some(issuer.clone()), None).await;
     f.state.read_hub.as_ref().unwrap().fill_snapshot_for_test();
     if let Some(delay) = snapshot_hold {
@@ -2139,7 +2146,7 @@ async fn run_three_transports_share_the_snapshot_and_cursor(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_control_blocked_writes_end_by_audited_cutoff() {
-    run_blocked_writes_end_by_audited_cutoff(4_000, 5, None).await;
+    run_blocked_writes_end_by_audited_cutoff(1_000, 20, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
