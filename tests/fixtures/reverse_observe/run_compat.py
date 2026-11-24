@@ -87,6 +87,8 @@ def build(source, output, variant, seed, candidate, vendor_dir=None):
         shutil.copytree(source/name,tree/name,ignore=shutil.ignore_patterns("__pycache__","*.pyc"))
     if (source / "assets").exists():
         shutil.copytree(source / "assets", tree / "assets")
+    if (source / "web/mc-roster/assets").exists():
+        shutil.copytree(source / "web/mc-roster/assets", tree / "web/mc-roster/assets")
     expected_assets = {str(f.relative_to(source)):digest(f) for f in (source/"assets").rglob("*") if f.is_file()}
     assert {str(f.relative_to(tree)):digest(f) for f in (tree/"assets").rglob("*") if f.is_file()} == expected_assets, "compile assets differ after source copy"
     for directory in tree.rglob("*"):

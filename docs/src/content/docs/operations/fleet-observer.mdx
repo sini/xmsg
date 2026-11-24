@@ -401,6 +401,17 @@ local credentials. Network errors and upstream outages leave local credentials
 valid and trigger another attempt on the next admission. The daily interval is
 a target while the upstream is reachable and issued a refresh token.
 
+### Web roster shell and login bridge
+
+<Status id="mission-control.web" />
+
+`GET /` serves a static Sign-in shell whenever no valid `__Host-mc_session`
+cookie is present (without auto-redirecting to `/login`), and serves a static
+no-data shell on cross-site arrivals even while signed in. `GET /login/callback`
+answers `200` with a same-origin `<meta http-equiv="refresh" content="0;url=/">`
+and link so the `SameSite=Strict` session cookie attaches on the hop to `/`.
+`POST /logout` revokes the session record, clears the cookie, and redirects to `/`.
+
 ### Native and machine access
 
 The TUI uses Mission Control's device grant. The owner reviews and approves the

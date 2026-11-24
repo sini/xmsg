@@ -382,7 +382,7 @@ async fn flow_cookie_and_callback_are_bound_single_use_and_expiring() {
     );
 
     let accepted = login(&issuer, &oidc).await;
-    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    assert_eq!(accepted.status(), StatusCode::OK);
     let session = set_cookie_header(&accepted, SESSION_COOKIE);
     assert!(session.starts_with("__Host-mc_session="));
     assert!(session.contains("; Secure; HttpOnly; Path=/; SameSite=Strict;"));
@@ -692,7 +692,7 @@ async fn upstream_refresh_is_encrypted_rotates_and_rechecks_entitlement() {
     let accepted = issuer
         .callback(Some(&format!("code={code}&state={state}")), &flow_headers)
         .await;
-    assert_eq!(accepted.status(), StatusCode::SEE_OTHER);
+    assert_eq!(accepted.status(), StatusCode::OK);
     let issued_files = state_files(&directory);
     let headers = request_cookie(&accepted, SESSION_COOKIE);
     let handle = cookie(&headers, SESSION_COOKIE).unwrap();
@@ -770,4 +770,138 @@ fn state_files(directory: &TempDir) -> Vec<Vec<u8>> {
         .filter(|file| file.file_type().unwrap().is_file())
         .map(|file| std::fs::read(file.path()).unwrap())
         .collect()
+}
+
+async fn send_to_issuer(
+    issuer: &Arc<Issuer>,
+    hub: Option<&upstream::ReadHub>,
+    method: Method,
+    uri: &str,
+    headers: Vec<(&str, &str)>,
+    body: &[u8],
+) -> (StatusCode, hyper::header::HeaderMap, String) {
+    let (client_io, server_io) = tokio::io::duplex(65536);
+    let issuer_srv = issuer.clone();
+    let hub_ptr = hub.map(|h| h as *const upstream::ReadHub as usize);
+    let srv = tokio::spawn(async move {
+        let io = hyper_util::rt::TokioIo::new(server_io);
+        let service = hyper::service::service_fn(move |req| {
+            let issuer = issuer_srv.clone();
+            async move {
+                let hub_ref = hub_ptr.map(|p| unsafe { &*(p as *const upstream::ReadHub) });
+                Ok::<_, std::convert::Infallible>(issuer.handle_with_hub(req, hub_ref).await)
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(io, service)
+            .await;
+    });
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(client_io))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let mut req = Request::builder().method(method).uri(uri);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    let req = req.body(Full::new(Bytes::copy_from_slice(body))).unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    let status = resp.status();
+    let resp_headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    drop(sender);
+    let _ = srv.await;
+    (status, resp_headers, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn callback_bridge_and_root_fetch_metadata_shells() {
+    let oidc = Fixture::new_at(now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let issuer = issuer(&oidc, &directory, false).await;
+    let hub = upstream::ReadHub::new(&issuer.config().session_limits).unwrap();
+
+    // 1. finish_login returns 200 bridge (never 303 /) with canonical CSP and no credentials
+    let cb = login(&issuer, &oidc).await;
+    assert_eq!(cb.status(), StatusCode::OK);
+    assert_eq!(cb.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(cb.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(cb.headers()["referrer-policy"], "no-referrer");
+    let csp = cb.headers()["content-security-policy"].to_str().unwrap();
+    assert!(!csp.contains("unsafe-inline"), "CSP must not allow unsafe-inline: {csp}");
+    assert_eq!(
+        csp,
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; require-trusted-types-for 'script'"
+    );
+    let session_cookie = set_cookie_header(&cb, SESSION_COOKIE);
+    assert!(session_cookie.contains("SameSite=Strict"));
+    let cb_body = String::from_utf8_lossy(&cb.into_body().collect().await.unwrap().to_bytes()).into_owned();
+    assert!(cb_body.contains("<meta http-equiv=\"refresh\" content=\"0;url=/\">"));
+    assert!(cb_body.contains("<a href=\"/\">Continue</a>"));
+    assert!(!cb_body.contains("alice@example.org"));
+
+    // 2. GET / with no cookie NEVER 303s to /login regardless of Sec-Fetch-Site, and omits logout form/bundle
+    for sfs in [None, Some("same-origin"), Some("none"), Some("cross-site")] {
+        let hdrs = sfs.map(|v| vec![("sec-fetch-site", v)]).unwrap_or_default();
+        let (status, _, body) = send_to_issuer(&issuer, Some(&hub), Method::GET, "/", hdrs, b"").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<a class=\"mc-btn\" href=\"/login\">Sign in</a>"));
+        assert!(!body.contains("action=\"/logout\""));
+        assert!(!body.contains(assets::JS_PATH));
+    }
+
+    // 3. GET / with valid cookie + cross-site / same-site / missing Sec-Fetch-Site gets 200 no-data shell
+    let cookie_val = session_cookie.split(';').next().unwrap();
+    for hdrs in [
+        vec![("cookie", cookie_val), ("sec-fetch-site", "cross-site")],
+        vec![("cookie", cookie_val), ("sec-fetch-site", "same-site")],
+        vec![("cookie", cookie_val)],
+    ] {
+        let (status, _, body) = send_to_issuer(&issuer, Some(&hub), Method::GET, "/", hdrs, b"").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("<a class=\"mc-btn\" href=\"/\">Open Mission Control</a>"));
+        assert!(!body.contains("action=\"/logout\""));
+        assert!(!body.contains("mc-ssr"));
+        assert!(!body.contains(assets::JS_PATH));
+    }
+
+    // 4. GET / with valid cookie + Sec-Fetch-Site: same-origin renders authenticated shell + SSR + bundle
+    let (status, _, body) = send_to_issuer(
+        &issuer,
+        Some(&hub),
+        Method::GET,
+        "/",
+        vec![("cookie", cookie_val), ("sec-fetch-site", "same-origin")],
+        b"",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("action=\"/logout\""));
+    assert!(body.contains("href=\"/device\""));
+    assert!(body.contains("id=\"mc-ssr\""));
+    assert!(body.contains(assets::JS_PATH));
+
+    // 5. POST /logout returns 303 Location: /, Max-Age=0, and revokes the record
+    let csrf_val = body.split("name=\"csrf\" value=\"").nth(1).unwrap().split('"').next().unwrap();
+    let form_body = format!("csrf={csrf_val}");
+    let (out_status, out_hdrs, _) = send_to_issuer(
+        &issuer,
+        Some(&hub),
+        Method::POST,
+        "/logout",
+        vec![
+            ("cookie", cookie_val),
+            ("origin", "https://collector.example"),
+            ("content-type", "application/x-www-form-urlencoded"),
+        ],
+        form_body.as_bytes(),
+    )
+    .await;
+    assert_eq!(out_status, StatusCode::SEE_OTHER);
+    assert_eq!(out_hdrs[header::LOCATION], "/");
+    let cleared = out_hdrs.get_all(header::SET_COOKIE).iter().map(|v| v.to_str().unwrap()).collect::<Vec<_>>().join(";");
+    assert!(cleared.contains("Max-Age=0"));
+    assert_eq!(issuer.authority.list().unwrap().iter().filter(|r| r.revoked).count(), 1);
 }

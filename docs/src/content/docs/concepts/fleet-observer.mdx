@@ -178,6 +178,20 @@ events are omitted, and `ExportSnapshot.activity.status` is `disabled`.
 <Status id="mission-control.session" />
 
 Mission Control is an optional collector extension. A browser owner signs in
+through an OIDC provider once, and the collector issues its own revocable
+session cookie.
+
+### Web roster and node detail
+
+<Status id="mission-control.web" />
+
+The Mission Control web view is an inspect-only client of `xmsg.mission-control.v1`
+(`capabilities: ["observe", "activity"]`). It renders a node-grouped roster and
+node-detail panel over the WebSocket `fleet`, `attention`, and `node` scopes,
+keeps `Live`/`Delayed`/`Reconnecting`/`Stale`/`Unknown` connection states separate
+from per-node freshness, and deletes masked or removed rows immediately rather
+than retaining them as stale. Manage controls stay disabled in inspect-only
+rollouts.
 through a configured OIDC provider. The issuer turns that verified identity
 into a revocable local session. A native client obtains its own credential
 through a browser-approved device grant. Both use the same owner principal

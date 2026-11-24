@@ -13,6 +13,8 @@ def prepare(source, destination, newer):
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     if (source / "assets").exists():
         shutil.copytree(source / "assets", destination / "assets")
+    if (source / "web/mc-roster/assets").exists():
+        shutil.copytree(source / "web/mc-roster/assets", destination / "web/mc-roster/assets")
     if newer:
         file = destination / "src/observe_export.rs"
         text = file.read_text()

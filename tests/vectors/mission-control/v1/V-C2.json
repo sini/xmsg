@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "type": "prepared",
+  "re": 6,
+  "request_id": "6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+  "intent": "int_01",
+  "expires_at": 1795000061000,
+  "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "presentation": {
+    "verb": "<verb>",
+    "node": "laptop",
+    "endpoint": "claude-1@laptop",
+    "incarnation": 3,
+    "params": []
+  }
+}

@@ -658,9 +658,16 @@ daemon and client upgrade.
 ## Mission Control issuer routes
 
 <Status id="mission-control.session" />
+<Status id="mission-control.web" />
 
 The optional Mission Control issuer uses the collector's configured HTTPS origin.
 A non-loopback collector listener requires configured server TLS.
+`GET /` serves the Sign-in shell when unauthenticated, a no-data shell when
+`Sec-Fetch-Site` is not `same-origin` or `none`, and the authenticated SSR
+roster plus hash-pinned `/assets/mc-roster.<hash>.{js,css}` on same-origin or
+`none` navigations under a strict `'self'` CSP with
+`require-trusted-types-for 'script'`. `GET /login/callback` returns `200` with
+a same-origin refresh to `/`, and `POST /logout` redirects to `/`.
 
 | Route | Credential or flow |
 | --- | --- |

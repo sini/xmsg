@@ -83,6 +83,13 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		evidence: [{ path: 'src/mission_control/websocket.rs', anchor: 'pub(crate) async fn upgrade(' }],
 		plannedSince: '2026-11-21',
 	},
+	'mission-control.web': {
+		id: 'mission-control.web',
+		title: 'Mission Control web roster and node detail (inspect-only)',
+		owner: 'sini',
+		evidence: [{ path: 'src/mission_control/web_shell.rs', anchor: 'pub(super) fn authenticated_shell(' }],
+		plannedSince: '2026-11-24',
+	},
 	'mission-control.machine-tokens': {
 		id: 'mission-control.machine-tokens',
 		title: 'Mission Control read-only machine tokens',

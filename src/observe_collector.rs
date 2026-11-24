@@ -577,7 +577,10 @@ async fn serve_stream_with_socket<I>(
                             .map(BodyExt::boxed_unsync);
                         }
                     }
-                    return issuer.handle(request).await.map(BodyExt::boxed_unsync);
+                    return issuer
+                        .handle_with_hub(request, state.read_hub.as_deref())
+                        .await
+                        .map(BodyExt::boxed_unsync);
                 }
             }
             state.prepare(request).await.map(BodyExt::boxed_unsync)

@@ -50,7 +50,7 @@ env:
     mqsh-rollback
     shared-client-release-compat
   SHARED_CLIENT_CHECKS: shared-client
-  TEST_CHECKS: tests collector-browser ca-health e2e-hooks-absent
+  TEST_CHECKS: tests collector-browser mission-control-browser ca-health e2e-hooks-absent
   COMPAT_CHECKS: >-
     shared-client-compat-0
     shared-client-compat-1
@@ -307,6 +307,8 @@ jobs:
         run: nix build -L --no-link --print-out-paths ./ci#checks.x86_64-linux.ca-health | tee -a /tmp/attic-paths
       - name: Collector DOM and resource-request gate
         run: nix build -L --no-link --print-out-paths ./ci#checks.x86_64-linux.collector-browser | tee -a /tmp/attic-paths
+      - name: Mission Control web roster browser gate and bundle freshness
+        run: nix build -L --no-link --print-out-paths ./ci#checks.x86_64-linux.mission-control-browser | tee -a /tmp/attic-paths
       - name: Push to Attic cache
         id: attic_publish
         timeout-minutes: 10

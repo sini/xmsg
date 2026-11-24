@@ -1,6 +1,7 @@
 pub mod admin;
 #[allow(dead_code, reason = "Mission Control transport integration")]
 mod admission;
+mod assets;
 #[allow(
     dead_code,
     reason = "Mission Control read-only hub staged before transport integration"
@@ -34,6 +35,7 @@ pub(crate) mod transport;
     reason = "Mission Control read-only hub staged before transport integration"
 )]
 pub(crate) mod upstream;
+mod web_shell;
 pub(crate) mod websocket;
 #[allow(dead_code, reason = "Mission Control transport integration")]
 mod writer;
@@ -372,10 +374,7 @@ fn response(status: StatusCode, content_type: &'static str, body: impl Into<Byte
         .header(header::CONTENT_TYPE, content_type)
         .header("x-content-type-options", "nosniff")
         .header("referrer-policy", "no-referrer")
-        .header(
-            "content-security-policy",
-            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-        )
+        .header("content-security-policy", web_shell::CANONICAL_CSP)
         .body(Full::new(body.into()))
         .unwrap()
 }
@@ -596,7 +595,11 @@ impl Issuer {
         ) else {
             return denied();
         };
-        let mut response = redirect("/");
+        let mut response = response(
+            StatusCode::OK,
+            "text/html; charset=utf-8",
+            web_shell::callback_bridge(),
+        );
         set_cookie(
             &mut response,
             SESSION_COOKIE,
@@ -685,9 +688,31 @@ impl Issuer {
             && origins.next().is_none()
     }
 
+    #[cfg(test)]
     pub async fn handle(&self, request: Request<Incoming>) -> WebResponse {
+        self.handle_with_hub(request, None).await
+    }
+
+    pub(crate) async fn handle_with_hub(
+        &self,
+        request: Request<Incoming>,
+        hub: Option<&upstream::ReadHub>,
+    ) -> WebResponse {
         let method = request.method().clone();
         let route = request.uri().path();
+        if route == assets::JS_PATH && method == Method::GET {
+            return response(
+                StatusCode::OK,
+                "application/javascript; charset=utf-8",
+                assets::JS_BYTES,
+            );
+        }
+        if route == assets::CSS_PATH && method == Method::GET {
+            return response(StatusCode::OK, "text/css; charset=utf-8", assets::CSS_BYTES);
+        }
+        if route == "/favicon.ico" && method == Method::GET {
+            return response(StatusCode::NO_CONTENT, "image/x-icon", "");
+        }
         if !matches!(
             route,
             "/" | "/login"
@@ -704,17 +729,50 @@ impl Issuer {
         }
         match (method, route) {
             (Method::GET, "/login") => self.begin().unwrap_or_else(|_| unavailable()),
-            (Method::GET, "/login/callback") => self.callback(request.uri().query(), request.headers()).await,
-            (Method::POST, "/logout") => self.logout(request).await,
-            (Method::GET, "/") => {
-                match self.browser(request.headers()).await {
-                    Some((handle, _)) => response(StatusCode::OK, "text/html; charset=utf-8", format!(
-                        "<!doctype html><title>Mission Control</title><h1>Mission Control</h1><p><a href=\"/device\">Connect a device</a></p><form method=\"post\" action=\"/logout\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><button>Sign out</button></form>",
-                        csrf(&handle)
-                    )),
-                    None => redirect("/login"),
-                }
+            (Method::GET, "/login/callback") => {
+                self.callback(request.uri().query(), request.headers()).await
             }
+            (Method::POST, "/logout") => self.logout(request).await,
+            (Method::GET, "/") => match self.browser(request.headers()).await {
+                Some((handle, record)) => {
+                    if matches!(
+                        web_shell::sec_fetch_site(request.headers()),
+                        Some("same-origin" | "none")
+                    ) {
+                        let snapshot = hub.and_then(|h| {
+                            let grants = transport::grants(&record);
+                            if grants.is_empty() {
+                                return None;
+                            }
+                            let masked = self.authority.masked_nodes().ok()?;
+                            let scope = authority::Scope::Fleet;
+                            let projection = protocol::Projection {
+                                scope: &scope,
+                                grants,
+                                masked: &|node| masked.contains(node),
+                                activity: true,
+                            };
+                            h.snapshot(&projection).ok().flatten().map(|(s, _)| s)
+                        });
+                        response(
+                            StatusCode::OK,
+                            "text/html; charset=utf-8",
+                            web_shell::authenticated_shell(&csrf(&handle), snapshot.as_ref()),
+                        )
+                    } else {
+                        response(
+                            StatusCode::OK,
+                            "text/html; charset=utf-8",
+                            web_shell::no_data_shell(),
+                        )
+                    }
+                }
+                None => response(
+                    StatusCode::OK,
+                    "text/html; charset=utf-8",
+                    web_shell::signin_shell(),
+                ),
+            },
             (Method::GET, "/device") => self.device_page(request.headers()).await,
             (Method::POST, "/device") => self.device_approval(request).await,
             (Method::POST, "/oauth/device_authorization") => self.device_authorization(request).await,
@@ -744,7 +802,7 @@ impl Issuer {
         if self.authority.revoke(&record.record_id).is_err() {
             return unavailable();
         }
-        let mut response = redirect("/login");
+        let mut response = redirect("/");
         set_cookie(&mut response, SESSION_COOKIE, "", "Strict", 0);
         response
     }
