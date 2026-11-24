@@ -16,6 +16,8 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
