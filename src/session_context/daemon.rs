@@ -611,9 +611,7 @@ mod tag_tests {
         )
         .unwrap();
         let all = live_tags(&db).unwrap();
-        assert!(all
-            .get(&("s1".into(), "claude".into(), "claude:1:10:200".into()))
-            .is_none());
+        assert!(!all.contains_key(&("s1".into(), "claude".into(), "claude:1:10:200".into())));
         assert_eq!(
             all.get(&("s1".into(), "claude".into(), "claude:1:10:100".into()))
                 .map(Vec::as_slice),
