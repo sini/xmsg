@@ -354,6 +354,31 @@ fn a_file_rebuild_imports_a_new_pin_and_records_the_snapshot_revision() {
     );
 }
 
+/// Runs `work` on a thread and waits, up to 2 s after it starts, for it to finish. A thread
+/// held by the publication mutex never finishes inside the window; one that skips the mutex
+/// finishes at once.
+fn run_while_paused<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> std::thread::JoinHandle<T> {
+    let started = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let (s, f) = (started.clone(), finished.clone());
+    let handle = std::thread::spawn(move || {
+        s.store(true, Ordering::SeqCst);
+        let out = work();
+        f.store(true, Ordering::SeqCst);
+        out
+    });
+    while !started.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !finished.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    handle
+}
+
 /// Installs a one-shot barrier pause into a reloader hook: the first caller reaching it
 /// signals `reached` and waits for `release`.
 fn pause_once(hook: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>) -> (Arc<Barrier>, Arc<Barrier>) {
@@ -391,9 +416,8 @@ fn unblock_proves_against_a_pin_a_concurrent_file_rebuild_installs() {
     reached.wait();
     let unblock = {
         let reloader = node.reloader.clone();
-        std::thread::spawn(move || reloader.unblock_device(&other))
+        run_while_paused(move || reloader.unblock_device(&other))
     };
-    std::thread::sleep(Duration::from_millis(300));
     release.wait();
     rebuild.join().unwrap().unwrap();
     assert!(
@@ -416,22 +440,26 @@ fn a_store_publication_cannot_install_stale_file_inputs_over_a_newer_file_genera
         std::thread::spawn(move || reloader.check_and_reload())
     };
     reached.wait();
+    // A file change that imports nothing, so the newer generation has the same revision.
     let pin = format!("sha256:{}", hex::encode(node.peer_id));
-    let (_, _, desk_pin) = generate_self_signed_ed25519("desk").unwrap();
-    let mut peers: serde_json::Value = serde_json::from_str(&peers_json(&pin, "")).unwrap();
-    peers["desk"] =
-        serde_json::json!({"address": "192.0.2.10:7788", "pin": desk_pin, "allow": ["send"]});
-    node.rewrite_peers(&peers.to_string());
+    node.rewrite_peers(&format!(
+        r#"{{"peers": {}, "deny": {{"uris": ["spiffe://example.test/host/gone/user/owner"]}}}}"#,
+        peers_json(&pin, "")
+    ));
     let rebuild = {
         let reloader = node.reloader.clone();
-        std::thread::spawn(move || reloader.check_and_reload())
+        run_while_paused(move || reloader.check_and_reload())
     };
-    std::thread::sleep(Duration::from_millis(300));
     release.wait();
     tick.join().unwrap().unwrap();
     rebuild.join().unwrap().unwrap();
     assert!(
-        node.fs.current_peers().get("desk").is_some(),
+        node.fs
+            .current_peers()
+            .deny
+            .uris
+            .iter()
+            .any(|uri| uri.ends_with("/host/gone/user/owner")),
         "a store publication from older file inputs replaced a newer file generation"
     );
     assert!(node.denied());
