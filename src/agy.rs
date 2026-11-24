@@ -350,64 +350,123 @@ fn darwin_watch(
     Some((kq, evt))
 }
 
+#[cfg(all(target_os = "macos", any(test, feature = "test-hooks")))]
+fn darwin_test_hold(point: &str) {
+    if let Some(dir) = std::env::var_os("XMSG_TEST_HOLD_DIR") {
+        let dir = Path::new(&dir);
+        let hold = dir.join(point);
+        if hold.exists() {
+            let _ = fs::write(dir.join(format!("{point}.entered")), b"");
+            while hold.exists() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", not(any(test, feature = "test-hooks"))))]
+#[inline(always)]
+fn darwin_test_hold(_point: &str) {}
+
+#[cfg(target_os = "macos")]
+const DARWIN_AMBIGUITY_SETTLE: Duration = Duration::from_millis(500);
+
+#[cfg(target_os = "macos")]
+const DARWIN_AMBIGUITY_POLL: Duration = Duration::from_millis(10);
+
+#[cfg(target_os = "macos")]
+fn darwin_nominees(
+    live: &Path,
+    dev: u64,
+    ino: u64,
+    released_ids: &[(u32, String)],
+) -> io::Result<Vec<(u32, String, PathBuf)>> {
+    let mut nominees = Vec::new();
+    for pid in crate::process::same_uid_pids()? {
+        let Ok(st) = crate::process::starttime(live, pid) else {
+            continue;
+        };
+        if released_ids
+            .iter()
+            .any(|(rpid, rst)| *rpid == pid && rst == &st)
+        {
+            continue;
+        }
+        if let Some(path) = darwin_flocked_path(pid, &st, dev, ino) {
+            nominees.push((pid, st, path));
+        }
+    }
+    Ok(nominees)
+}
+
 /// The `flock` holder of `(dev, ino)` on live macOS, nominated from every process of this UID;
 /// a caller attesting one pid compares it with the result. A holder is reported only while its
-/// release watch is unfired. More than one unreleased nominee is ambiguous and an error. A lock
-/// taken and released before the first call that sees it reads as held: the watch comes too late.
+/// release watch is unfired. More than one unreleased nominee is ambiguous and an error, after a
+/// brief settle window so a sibling child mid-fork/exec (whose `O_CLOEXEC` copy closes on exec)
+/// does not cause a false refusal. A lock taken and released before the first call that sees it
+/// reads as held: the watch comes too late.
 #[cfg(target_os = "macos")]
 fn darwin_holder(dev: u64, ino: u64) -> io::Result<Option<u32>> {
     let live = Path::new(crate::process::LIVE_PROC_ROOT);
     let released = |kq: &std::os::fd::OwnedFd| {
         crate::codex::kqueue_drain(kq).map_or(true, |fired| fired & DARWIN_RELEASE != 0)
     };
-    let mut cache = DARWIN_HOLDERS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // 1. A dead or recycled pid's entry goes; dropping a Live one closes its descriptors. A read
-    // that fails otherwise keeps the entry, so a released pid is not resurrected by it.
-    for entries in cache.values_mut() {
-        entries.retain(|e| {
-            let (pid, st) = e.id();
-            match crate::process::probe_starttime(live, pid) {
-                Ok(crate::process::StartTimeProbe::Gone) => false,
-                Ok(crate::process::StartTimeProbe::Known(now)) => now == st,
-                _ => true,
-            }
-        });
-    }
-    cache.retain(|_, entries| !entries.is_empty());
-    let entries = cache.entry((dev, ino)).or_default();
+    let released_ids: Vec<(u32, String)> = {
+        let mut cache = DARWIN_HOLDERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // 1. A dead or recycled pid's entry goes; dropping a Live one closes its descriptors. A read
+        // that fails otherwise keeps the entry, so a released pid is not resurrected by it.
+        for entries in cache.values_mut() {
+            entries.retain(|e| {
+                let (pid, st) = e.id();
+                match crate::process::probe_starttime(live, pid) {
+                    Ok(crate::process::StartTimeProbe::Gone) => false,
+                    Ok(crate::process::StartTimeProbe::Known(now)) => now == st,
+                    _ => true,
+                }
+            });
+        }
+        cache.retain(|_, entries| !entries.is_empty());
+        let entries = cache.entry((dev, ino)).or_default();
 
-    // 2. A watched holder holds until its watch fires or its flag is gone.
-    if let Some(i) = entries
-        .iter()
-        .position(|e| matches!(e, DarwinEntry::Live { .. }))
-    {
-        if let DarwinEntry::Live {
-            pid, starttime, kq, ..
-        } = &entries[i]
+        // 2. A watched holder holds until its watch fires or its flag is gone.
+        if let Some(i) = entries
+            .iter()
+            .position(|e| matches!(e, DarwinEntry::Live { .. }))
         {
-            if !released(kq) && darwin_flocked_path(*pid, starttime, dev, ino).is_some() {
-                return Ok(Some(*pid));
+            if let DarwinEntry::Live {
+                pid, starttime, kq, ..
+            } = &entries[i]
+            {
+                if !released(kq) && darwin_flocked_path(*pid, starttime, dev, ino).is_some() {
+                    return Ok(Some(*pid));
+                }
+                let (pid, starttime) = (*pid, starttime.clone());
+                // Replacing the entry drops, and so closes, its watch.
+                entries[i] = DarwinEntry::Released { pid, starttime };
             }
-            let (pid, starttime) = (*pid, starttime.clone());
-            // Replacing the entry drops, and so closes, its watch.
-            entries[i] = DarwinEntry::Released { pid, starttime };
         }
-    }
+        entries
+            .iter()
+            .map(|e| {
+                let (pid, st) = e.id();
+                (pid, st.to_string())
+            })
+            .collect()
+    };
 
-    // 3. Nominees: the lock flag set, and not released.
-    let mut nominees = Vec::new();
-    for pid in crate::process::same_uid_pids()? {
-        let Ok(st) = crate::process::starttime(live, pid) else {
-            continue;
-        };
-        if entries.iter().any(|e| e.id() == (pid, st.as_str())) {
-            continue;
-        }
-        if let Some(path) = darwin_flocked_path(pid, &st, dev, ino) {
-            nominees.push((pid, st, path));
+    // 3. Nominees: the lock flag set, and not released. On macOS, a child spawned by the holder
+    // briefly mirrors the parent's O_CLOEXEC descriptors until exec closes them, so retry briefly
+    // when multiple nominees appear before failing closed.
+    let mut nominees = darwin_nominees(live, dev, ino, &released_ids)?;
+    darwin_test_hold("darwin-holder-after-first-scan");
+    if nominees.len() > 1 {
+        let deadline = std::time::Instant::now() + DARWIN_AMBIGUITY_SETTLE;
+        while nominees.len() > 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(DARWIN_AMBIGUITY_POLL);
+            nominees = darwin_nominees(live, dev, ino, &released_ids)?;
         }
     }
     let (pid, starttime, path) = match nominees.len() {
@@ -420,7 +479,37 @@ fn darwin_holder(dev: u64, ino: u64) -> io::Result<Option<u32>> {
         }
     };
 
-    // 4. Watch, then confirm the nominee still has the flag and nothing fired meanwhile.
+    // 4. Re-acquire the cache, watch, then confirm the nominee still has the flag and nothing
+    // fired meanwhile.
+    let mut cache = DARWIN_HOLDERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let entries = cache.entry((dev, ino)).or_default();
+    if let Some(i) = entries
+        .iter()
+        .position(|e| matches!(e, DarwinEntry::Live { .. }))
+    {
+        if let DarwinEntry::Live {
+            pid: live_pid,
+            starttime: live_st,
+            kq,
+            ..
+        } = &entries[i]
+        {
+            if !released(kq) && darwin_flocked_path(*live_pid, live_st, dev, ino).is_some() {
+                return Ok(Some(*live_pid));
+            }
+            let (live_pid, live_st) = (*live_pid, live_st.clone());
+            entries[i] = DarwinEntry::Released {
+                pid: live_pid,
+                starttime: live_st,
+            };
+        }
+    }
+    if entries.iter().any(|e| e.id() == (pid, starttime.as_str())) {
+        return Ok(None);
+    }
     let Some((kq, evt)) = darwin_watch(&path, dev, ino) else {
         return Ok(None);
     };

@@ -31,6 +31,17 @@ use xmsg::fed::spki_sha256_from_der;
 
 const BIN: &str = env!("CARGO_BIN_EXE_xmsg");
 
+fn assert_cmd_ok(context: &str, out: &std::process::Output) {
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{context} failed (status={:?})\nSTDOUT:\n{}\nSTDERR:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
 struct Sleeper(Child);
 
 impl Sleeper {
@@ -337,6 +348,18 @@ async fn start_node_with_bin(
     extra_args: &[String],
     listen_fed: bool,
 ) -> (Node, u16) {
+    start_node_with_bin_and_hold(bin_path, ca_pem, creds, peers, extra_args, listen_fed, None).await
+}
+
+async fn start_node_with_bin_and_hold(
+    bin_path: &str,
+    ca_pem: &str,
+    creds: &Creds,
+    peers: Value,
+    extra_args: &[String],
+    listen_fed: bool,
+    hold_dir: Option<&Path>,
+) -> (Node, u16) {
     let tmp = tempdir().unwrap();
     fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(tmp.path().join("ca.pem"), ca_pem).unwrap();
@@ -400,8 +423,8 @@ async fn start_node_with_bin(
         Err(_) => bin_dir.display().to_string(),
     };
 
-    let mut child = tokio::process::Command::new(bin_path)
-        .env("XDG_RUNTIME_DIR", &run_dir)
+    let mut cmd = tokio::process::Command::new(bin_path);
+    cmd.env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("XMSG_AGY_PRESENCE_DIR", &presence_dir)
         .env(
@@ -414,9 +437,11 @@ async fn start_node_with_bin(
         .scrub_agy_env()
         .args(&args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn xmsg serve");
+        .stderr(Stdio::piped());
+    if let Some(dir) = hold_dir {
+        cmd.env("XMSG_TEST_HOLD_DIR", dir);
+    }
+    let mut child = cmd.spawn().expect("spawn xmsg serve");
 
     let stdout = short_sock::StdoutCapture::from_tokio(child.stdout.take().unwrap());
     let mut fed_port = if listen_fed {
@@ -1143,7 +1168,7 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
         .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-tok")
         .output()
         .unwrap();
-    assert_eq!(reg_out.status.code(), Some(0));
+    assert_cmd_ok("oracle 2 agy register", &reg_out);
 
     // 3. Live `pi` session via `register.sock`
     let id_pi = "dddd4444-4444-4444-8444-444444444444";
@@ -1450,7 +1475,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         .env_remove("XMSG_AGY_LABEL")
         .output()
         .unwrap();
-    assert_eq!(out_1.status.code(), Some(0));
+    assert_cmd_ok("oracle 3a first agy register (out_1)", &out_1);
 
     // Verify `list` shows `label: "agy"` and `harness: "agy"`
     let (st, listed) = node.http_get("/v1/recipients").await;
@@ -1493,7 +1518,10 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-1")
         .output()
         .unwrap();
-    assert_eq!(out_1_custom.status.code(), Some(0));
+    assert_cmd_ok(
+        "oracle 3a custom label agy register (out_1_custom)",
+        &out_1_custom,
+    );
 
     let s_claude = Sleeper::new();
     let in_claude = inbox();
@@ -1544,7 +1572,10 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         .env_remove("XMSG_AGY_LABEL")
         .output()
         .unwrap();
-    assert_eq!(out_1_reset.status.code(), Some(0));
+    assert_cmd_ok(
+        "oracle 3b reset label agy register (out_1_reset)",
+        &out_1_reset,
+    );
 
     let conv_2 = "2222bbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     let lock_2 = node.presence_dir.join(format!("{conv_2}.lock"));
@@ -1568,12 +1599,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         .env_remove("XMSG_AGY_LABEL")
         .output()
         .unwrap();
-    assert_eq!(
-        out_2.status.code(),
-        Some(0),
-        "second agy registration failed: {}",
-        String::from_utf8_lossy(&out_2.stderr)
-    );
+    assert_cmd_ok("oracle 3b second agy register (out_2)", &out_2);
 
     let (st_amb, amb_body) = node.http_send("agy", "should be ambiguous").await;
     assert_eq!(
@@ -1620,7 +1646,10 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-1")
         .output()
         .unwrap();
-    assert_eq!(out_1_custom_2.status.code(), Some(0));
+    assert_cmd_ok(
+        "oracle 3b re-register custom label (out_1_custom_2)",
+        &out_1_custom_2,
+    );
 
     // Now `"agy"` is unique again (resolves to `conv_2`), and `"agy-ops"` resolves to `conv_1`!
     let (st_2, body_2) = node.http_send("agy", "now unique again").await;
@@ -1645,6 +1674,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     {
@@ -1655,6 +1685,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
             .unwrap();
     }
     let hook_out = hook_child.wait_with_output().unwrap();
+    assert_cmd_ok("oracle 3a agy --hook --label work", &hook_out);
     let hook_json: Value = serde_json::from_slice(&hook_out.stdout).unwrap();
     assert!(
         hook_json["injectSteps"][0].get("userMessage").is_none(),
@@ -1858,12 +1889,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                     .unwrap();
             }
             let out = child.wait_with_output().unwrap();
-            assert_eq!(
-                out.status.code(),
-                Some(0),
-                "claude PreToolUse hook failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            assert_cmd_ok("claude PreToolUse hook", &out);
             let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
             assert_eq!(
                 parsed["hookSpecificOutput"]["permissionDecision"], "allow",
@@ -1923,7 +1949,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 .unwrap();
         }
         let out = child.wait_with_output().unwrap();
-        assert_eq!(out.status.code(), Some(0));
+        assert_cmd_ok("agy PreToolUse call_mcp_tool hook", &out);
         let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(
             parsed["decision"], "allow",
@@ -1979,7 +2005,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 .unwrap();
         }
         let out = child.wait_with_output().unwrap();
-        assert_eq!(out.status.code(), Some(0));
+        assert_cmd_ok("agy PreToolUse eager hook", &out);
         let parsed: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(
             parsed["decision"], "allow",
@@ -2294,7 +2320,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
         .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-xc1")
         .output()
         .unwrap();
-    assert_eq!(reg_agy.status.code(), Some(0));
+    assert_cmd_ok("oracle 4 agy register (reg_agy)", &reg_agy);
 
     // 2A. Antigravity root (`call_mcp_tool`, clean + spoofed `as_agent`) -> drives
     //     `9d1f5fa` (`deploy_sidecar`) and `9096199` (`pre_ha9_sidecar`).
@@ -2705,4 +2731,175 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             eprintln!("XMSG_PRE_CODEX_BIN unset; skipping live pre-codex sidecar subprocess check");
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_darwin_transient_spawn_shadow_settles_on_agy_register() {
+    use std::os::unix::io::AsRawFd;
+
+    const HELPER_ENV: &str = "XMSG_TEST_DARWIN_SHADOW_HELPER";
+    if std::env::var_os(HELPER_ENV).is_some() {
+        let conv = std::env::var("XMSG_TEST_SHADOW_CONV").unwrap();
+        let lock_path = PathBuf::from(std::env::var("XMSG_TEST_SHADOW_LOCK").unwrap());
+        let register_sock = PathBuf::from(std::env::var("XMSG_TEST_SHADOW_REG_SOCK").unwrap());
+        let hold_dir = PathBuf::from(std::env::var("XMSG_TEST_SHADOW_HOLD_DIR").unwrap());
+
+        fs::write(&lock_path, "lock").unwrap();
+        let open_lock = presence_lock_rw(&lock_path);
+        assert_eq!(
+            unsafe { libc::flock(open_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let lock_meta = fs::metadata(&lock_path).unwrap();
+
+        // Isolated single-test process: only `shadow_child` can inherit this non-CLOEXEC dup.
+        let dup_fd = unsafe { libc::dup(open_lock.as_raw_fd()) };
+        assert!(dup_fd >= 0, "dup of open_lock failed");
+        let shadow_child = Sleeper(
+            Command::new("sleep")
+                .arg("60")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn transient shadow child"),
+        );
+        assert_eq!(unsafe { libc::close(dup_fd) }, 0);
+
+        let hold_file = hold_dir.join("darwin-holder-after-first-scan");
+        let entered_file = hold_dir.join("darwin-holder-after-first-scan.entered");
+        fs::write(&hold_file, b"").unwrap();
+
+        let reg_child = Command::new(BIN)
+            .args(["register", "agy", "--sock", register_sock.to_str().unwrap()])
+            .env("ANTIGRAVITY_CONVERSATION_ID", &conv)
+            .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:9999")
+            .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-shadow")
+            .env_remove("XMSG_AGY_LABEL")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn xmsg register agy");
+
+        let wait_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !entered_file.exists() {
+            assert!(
+                std::time::Instant::now() < wait_deadline,
+                "daemon never reached darwin-holder-after-first-scan hold seam"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let shadow_has_flock = xmsg::process::open_file_vnodes(
+            Path::new(xmsg::process::LIVE_PROC_ROOT),
+            shadow_child.pid(),
+            None,
+        )
+        .unwrap()
+        .iter()
+        .any(|v| v.dev == lock_meta.dev() && v.ino == lock_meta.ino() && v.has_flock);
+        assert!(
+            shadow_has_flock,
+            "control failed: transient shadow child did not carry FWASLOCKED during scan 1"
+        );
+
+        shadow_child.end();
+        fs::remove_file(&hold_file).unwrap();
+
+        let reg_out = reg_child.wait_with_output().unwrap();
+        assert_cmd_ok(
+            "forced-race agy register after transient shadow clears",
+            &reg_out,
+        );
+        {
+            use std::io::{Read, Write};
+            println!("DARWIN_SHADOW_REGISTERED");
+            std::io::stdout().flush().unwrap();
+            let _ = std::io::stdin().read_to_end(&mut Vec::new());
+        }
+        return;
+    }
+
+    let ca = Ca::new();
+    let creds_a = ca.issue("spiffe://xf3.test/host/nodea/user/sini");
+    let my_exe = std::env::current_exe().unwrap();
+    let bin_exe = PathBuf::from(BIN);
+    let hold_tmp = tempdir().unwrap();
+    let hold_dir = hold_tmp.path();
+
+    let extra_args = vec![
+        "--agy-exe".to_string(),
+        my_exe.display().to_string(),
+        "--agy-exe".to_string(),
+        bin_exe.display().to_string(),
+    ];
+    let (node, _) = start_node_with_bin_and_hold(
+        BIN,
+        &ca.pem,
+        &creds_a,
+        json!({}),
+        &extra_args,
+        false,
+        Some(hold_dir),
+    )
+    .await;
+
+    let conv = "3333cccc-cccc-4ccc-8ccc-cccccccccccc";
+    let lock_path = node.presence_dir.join(format!("{conv}.lock"));
+    let mut helper = Command::new(&my_exe)
+        .args([
+            "--exact",
+            "test_darwin_transient_spawn_shadow_settles_on_agy_register",
+            "--nocapture",
+        ])
+        .env(HELPER_ENV, "1")
+        .env("XMSG_TEST_SHADOW_CONV", conv)
+        .env("XMSG_TEST_SHADOW_LOCK", &lock_path)
+        .env("XMSG_TEST_SHADOW_REG_SOCK", &node.register_sock)
+        .env("XMSG_TEST_SHADOW_HOLD_DIR", hold_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn isolated darwin shadow helper");
+
+    let mut helper_stdin = helper.stdin.take();
+    let mut helper_stdout = std::io::BufReader::new(helper.stdout.take().unwrap());
+    let mut seen_registered = false;
+    let mut stdout_buf = String::new();
+    loop {
+        let mut line = String::new();
+        use std::io::BufRead;
+        let n = helper_stdout.read_line(&mut line).unwrap();
+        if n == 0 {
+            break;
+        }
+        stdout_buf.push_str(&line);
+        if line.trim() == "DARWIN_SHADOW_REGISTERED" {
+            seen_registered = true;
+            break;
+        }
+    }
+    if !seen_registered {
+        drop(helper_stdin);
+        let out = helper.wait_with_output().unwrap();
+        panic!(
+            "isolated darwin transient shadow helper exited before registering (status={:?})\nSTDOUT:\n{}{}\nSTDERR:\n{}",
+            out.status,
+            stdout_buf,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    let (st, listed) = node.http_get("/v1/recipients").await;
+    assert_eq!(st, 200, "{listed}");
+    let recs = listed["recipients"].as_array().unwrap();
+    assert_eq!(recs.len(), 1, "{listed}");
+    assert_eq!(recs[0]["address"], format!("{conv}@sini.nodea"));
+    assert_eq!(recs[0]["harness"], "agy");
+
+    drop(helper_stdin.take());
+    let helper_out = helper.wait_with_output().unwrap();
+    assert_cmd_ok("isolated darwin transient shadow helper", &helper_out);
 }
