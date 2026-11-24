@@ -703,6 +703,15 @@ fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
                 )
                 .unwrap();
             assert_eq!(reply.pre_launch_failure, replay.pre_launch_failure);
+            if let Some(status) = reply.status {
+                assert_eq!(status.source, crate::protocol::ObservationSource::Journal);
+                assert_eq!(status.state, crate::protocol::SessionState::Unknown);
+            }
+            if let Some(result) = reply.result {
+                assert_eq!(result.outcome, crate::protocol::Outcome::Failed);
+                assert_eq!(result.provenance, "journal");
+                assert!(result.artifact_refs.is_empty());
+            }
         }
     }
     let mut good = ControlRequest::dispatch("real-acp".into(), "only fake brief".into());

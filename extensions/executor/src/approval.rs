@@ -41,6 +41,19 @@ pub struct HumanDecisionCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HumanQueryKind {
+    Pending,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HumanPendingQuery {
+    pub(crate) operation: HumanQueryKind,
+    pub(crate) session_id: String,
+    pub(crate) generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativePending {
     pub(crate) approval_id: String,
@@ -152,12 +165,9 @@ pub(crate) fn prepare_confirmation(
     else {
         return Err(ErrorCode::PendingMismatch);
     };
-    let current = crate::lifecycle::binding(tx, session_id, *generation)?;
-    let active:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1 AND generation=?2 AND active_turn=?3 AND state NOT IN('unknown','cancelling','ended'))",params![session_id,i64::try_from(*generation).map_err(|_|ErrorCode::Storage)?,turn_id],|r|r.get(0)).map_err(|_|ErrorCode::Storage)?;
-    if !active {
-        return Err(ErrorCode::StaleTurn);
-    }
-    if current != pending.binding
+    require_current_pending(tx, &pending, policy, clock)?;
+    if pending.binding.identity.session_id != *session_id
+        || pending.binding.identity.generation != *generation
         || pending.turn_id != *turn_id
         || pending.approval_id != args.approval_id
         || pending.operation_digest != args.operation_digest
@@ -167,34 +177,6 @@ pub(crate) fn prepare_confirmation(
     {
         return Err(ErrorCode::PendingMismatch);
     }
-    let (principal, original, target) = crate::lifecycle::effect_request(tx, pending.admission_id)?;
-    let mut selected = crate::journal::Journal::require_native_effect(
-        policy,
-        tx,
-        &principal,
-        &original,
-        &target,
-        pending.admission_id,
-        clock,
-    )?;
-    if !selected
-        .required_capabilities
-        .contains(&crate::capability::Capability::PendingApproval)
-    {
-        selected
-            .required_capabilities
-            .push(crate::capability::Capability::PendingApproval);
-    }
-    let configuration = crate::journal::config(tx)?;
-    if pending.policy_revision != configuration.revision {
-        return Err(ErrorCode::PendingMismatch);
-    }
-    policy.ok_or(ErrorCode::NotSupported)?.require_at(
-        &selected,
-        configuration.revision,
-        clock,
-        crate::journal::runtime_disabled(tx)?,
-    )?;
     let valid = match args.decision {
         crate::protocol::Decision::AllowOnce => pending.options.iter().any(|p| {
             p.option_id == args.option_id && p.kind == crate::acp::PermissionKind::AllowOnce
@@ -228,6 +210,111 @@ pub(crate) fn prepare_confirmation(
         return Err(ErrorCode::AlreadyConsumed);
     }
     Ok(true)
+}
+
+fn require_current_pending(
+    tx: &Transaction<'_>,
+    pending: &NativePending,
+    policy: Option<&crate::runtime_policy::RuntimePolicy>,
+    clock: &dyn Fn() -> Result<i64, ErrorCode>,
+) -> Result<(), ErrorCode> {
+    let session = &pending.binding.identity.session_id;
+    let generation =
+        i64::try_from(pending.binding.identity.generation).map_err(|_| ErrorCode::Storage)?;
+    let current = crate::lifecycle::binding(tx, session, pending.binding.identity.generation)?;
+    let active:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1 AND generation=?2 AND active_turn=?3 AND state NOT IN('unknown','cancelling','ended','failed'))",params![session,generation,pending.turn_id],|r|r.get(0)).map_err(|_|ErrorCode::Storage)?;
+    if !active {
+        return Err(ErrorCode::StaleTurn);
+    }
+    if current != pending.binding || pending.expires_at <= clock()? {
+        return Err(ErrorCode::PendingMismatch);
+    }
+    let (principal, original, target) = crate::lifecycle::effect_request(tx, pending.admission_id)?;
+    let mut selected = crate::journal::Journal::require_native_effect(
+        policy,
+        tx,
+        &principal,
+        &original,
+        &target,
+        pending.admission_id,
+        clock,
+    )?;
+    if !selected
+        .required_capabilities
+        .contains(&crate::capability::Capability::PendingApproval)
+    {
+        selected
+            .required_capabilities
+            .push(crate::capability::Capability::PendingApproval);
+    }
+    let configuration = crate::journal::config(tx)?;
+    if pending.policy_revision != configuration.revision {
+        return Err(ErrorCode::PendingMismatch);
+    }
+    policy.ok_or(ErrorCode::NotSupported)?.require_at(
+        &selected,
+        configuration.revision,
+        clock,
+        crate::journal::runtime_disabled(tx)?,
+    )
+}
+
+impl crate::journal::Journal {
+    pub(crate) fn pending_human(
+        &mut self,
+        query: &HumanPendingQuery,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+    ) -> Result<Option<NativePending>, ErrorCode> {
+        if query.session_id.is_empty()
+            || query.session_id.len() > 256
+            || query.session_id.chars().any(char::is_control)
+            || query.generation == 0
+        {
+            return Err(ErrorCode::MalformedFrame);
+        }
+        let policy = self.runtime_policy.clone();
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+            .map_err(|_| ErrorCode::Storage)?;
+        let records = {
+            let mut statement=tx.prepare("SELECT record FROM native_pending WHERE session_id=?1 AND generation=?2 AND state='pending' ORDER BY rowid LIMIT 32").map_err(|_|ErrorCode::Storage)?;
+            let records = statement
+                .query_map(
+                    params![
+                        query.session_id,
+                        i64::try_from(query.generation).map_err(|_| ErrorCode::Storage)?
+                    ],
+                    |r| r.get::<_, String>(0),
+                )
+                .map_err(|_| ErrorCode::Storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ErrorCode::Storage)?;
+            records
+        };
+        let mut result = None;
+        for raw in records {
+            let pending: NativePending =
+                serde_json::from_str(&raw).map_err(|_| ErrorCode::Storage)?;
+            if pending.binding.identity.session_id != query.session_id
+                || pending.binding.identity.generation != query.generation
+            {
+                return Err(ErrorCode::PendingMismatch);
+            }
+            match require_current_pending(&tx, &pending, policy.as_deref(), clock) {
+                Ok(()) => {
+                    result = Some(pending);
+                    break;
+                }
+                Err(
+                    ErrorCode::PendingMismatch | ErrorCode::StaleTurn | ErrorCode::AlreadyConsumed,
+                ) => {}
+                Err(code) => return Err(code),
+            }
+        }
+        tx.commit().map_err(|_| ErrorCode::Storage)?;
+        Ok(result)
+    }
 }
 
 // Callback ingress stays internal until the supervisor pump is wired.

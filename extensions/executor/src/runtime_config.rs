@@ -300,6 +300,15 @@ impl RuntimeConfig {
         let human = private_bytes(&self.paths.human_credential_file, 128)?;
         ProvisionedCredentials::from_bytes(&owner, &human)
     }
+    pub(crate) fn human_proof(&self) -> Result<Vec<u8>, ErrorCode> {
+        let proof = private_bytes(&self.paths.human_credential_file, 128)?;
+        if !(32..=128).contains(&proof.len())
+            || proof.iter().any(|byte| matches!(byte, b'\r' | b'\n'))
+        {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        Ok(proof)
+    }
 }
 
 fn private_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, ErrorCode> {

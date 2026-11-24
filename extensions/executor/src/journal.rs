@@ -272,6 +272,24 @@ impl Journal {
         } else {
             None
         };
+        let reports = if denial.is_none()
+            && matches!(request.action, Action::Status(_) | Action::Result(_))
+        {
+            Some(crate::execution::journal_reports(
+                &tx,
+                receipt.target.as_ref().ok_or(ErrorCode::UnknownTarget)?,
+                clock()?,
+            )?)
+        } else {
+            None
+        };
+        let (status, result) = match reports {
+            Some((status, result)) => (
+                matches!(request.action, Action::Status(_)).then_some(status),
+                matches!(request.action, Action::Result(_)).then_some(result),
+            ),
+            None => (None, None),
+        };
         let reply = ControlReply {
             request_id: request.request_id.clone(),
             replayed: false,
@@ -280,6 +298,8 @@ impl Journal {
             dispatch,
             decision: None,
             pre_launch_failure,
+            status,
+            result,
         };
         tx.execute(
             "INSERT INTO requests VALUES(?1,?2,?3,?4,?5)",
@@ -521,6 +541,8 @@ impl Journal {
             dispatch: None,
             decision: Some(args.clone()),
             pre_launch_failure: None,
+            status: None,
+            result: None,
             receipt: OperationReceipt {
                 request_id: request.request_id.clone(),
                 target: request.target.clone(),

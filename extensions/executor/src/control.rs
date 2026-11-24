@@ -171,6 +171,10 @@ pub struct ControlReply {
     pub decision: Option<crate::protocol::ApproveArgs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_launch_failure: Option<PreLaunchFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::protocol::StatusReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::protocol::NormalizedResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -480,6 +484,25 @@ impl ControlService {
                 Ok(at)
             }
         })
+    }
+    pub(crate) fn pending_human(
+        &self,
+        peer: PeerWitness,
+        credential: &[u8],
+        query: crate::approval::HumanPendingQuery,
+    ) -> Result<Option<crate::approval::NativePending>, ErrorCode> {
+        self.authorize_role(peer, credential, CredentialRole::Human)?;
+        self.journal
+            .lock()
+            .map_err(|_| ErrorCode::Storage)?
+            .pending_human(&query, &|| {
+                let at = self.clock.now();
+                if at <= 0 {
+                    Err(ErrorCode::DeadlineExpired)
+                } else {
+                    Ok(at)
+                }
+            })
     }
 }
 
