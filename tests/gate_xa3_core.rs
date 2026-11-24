@@ -1086,6 +1086,7 @@ async fn test_oracle_10_mcp_four_tools_and_no_idempotency_key() {
         [
             "read_attachment",
             "list",
+            "tag",
             "send",
             "reply",
             "replies",
