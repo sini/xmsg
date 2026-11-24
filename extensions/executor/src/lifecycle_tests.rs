@@ -1212,7 +1212,11 @@ fn native_turn_end_is_journal_background_not_a_completed_task_result() {
         crate::protocol::Outcome::Working,
         "native/model completion was promoted to completed task proof"
     );
-    assert_eq!(status.state, crate::protocol::SessionState::Background);
+    assert_eq!(
+        status.state,
+        crate::protocol::SessionState::Background,
+        "background silence was classified as a human request"
+    );
     assert_eq!(status.source, crate::protocol::ObservationSource::Journal);
     assert_eq!(result.provenance, "journal");
     assert!(result.artifact_refs.is_empty());
@@ -1649,6 +1653,22 @@ fn caller_expiry_blocks_frame_while_adapter_turn_and_request_deadlines_remain_va
             );
         }
     }
+}
+
+#[test]
+fn adapter_record_expiry_blocks_queued_frame_with_current_caller_and_turn() {
+    let mut f = fixture();
+    let id = queue(&f);
+    f.record.expires_at = 101;
+    let policy = replace_adapter_policy(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(policy);
+    let (result, wire) = submit(&mut f, id, EPOCH);
+    assert!(
+        wire.is_empty(),
+        "expired adapter qualification emitted a queued native frame"
+    );
+    assert_eq!(state(&f, id), "queued");
+    assert!(result.is_err());
 }
 
 #[test]

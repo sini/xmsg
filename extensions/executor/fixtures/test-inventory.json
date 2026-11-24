@@ -170,6 +170,7 @@
   "launch_environment::tests::environment_is_fixed_and_has_no_arbitrary_provider_or_model_passthrough",
   "launch_environment::tests::owned_alternate_home_is_refused_and_canonical_alias_is_allowed",
   "lifecycle::tests::adapter_and_native_artifact_drift_each_block_queued_effects",
+  "lifecycle::tests::adapter_record_expiry_blocks_queued_frame_with_current_caller_and_turn",
   "lifecycle::tests::background_silence_without_structured_request_never_becomes_human_review",
   "lifecycle::tests::caller_expiry_blocks_frame_while_adapter_turn_and_request_deadlines_remain_valid",
   "lifecycle::tests::caller_revocation_during_reconnect_cannot_confirm_or_resurrect_the_lease",
