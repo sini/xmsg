@@ -69,6 +69,7 @@ fn presence_child() {
         let grandchild = |mode: &str| {
             spawn::command(std::env::current_exe().unwrap())
                 .args(["--exact", "presence_child", "--nocapture"])
+                .env(HOLD, &path)
                 .env(MODE, mode)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
