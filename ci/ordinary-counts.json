@@ -50,6 +50,7 @@
     "tests/gate_mqsh_sockets_dir.rs",
     "tests/gate_owh_federated_attachments.rs",
     "tests/gate_owh_transport_bounds.rs",
+    "tests/gate_p1pz_session_tags.rs",
     "tests/gate_probe_http.rs",
     "tests/gate_probe_pi.rs",
     "tests/gate_r1_agy_autoreg.rs",
@@ -128,15 +129,15 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1857,
+      "passed": 1864,
       "failed": 0,
-      "ignored": 12,
+      "ignored": 13,
       "summaries": 124
     },
     "darwin": {
-      "passed": 1842,
+      "passed": 1849,
       "failed": 0,
-      "ignored": 12,
+      "ignored": 13,
       "summaries": 124
     }
   }

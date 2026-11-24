@@ -674,3 +674,7 @@ required-features = ["daemon"]
 name = "fleet_golden"
 path = "tests/fleet_golden.rs"
 required-features = ["daemon"]
+[[test]]
+name = "gate_p1pz_session_tags"
+path = "tests/gate_p1pz_session_tags.rs"
+required-features = ["daemon"]

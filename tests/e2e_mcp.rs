@@ -310,8 +310,8 @@ async fn test_mcp_initialize_and_tools_list() {
         .expect("tools array");
     assert_eq!(
         tools.len(),
-        6,
-        "Exactly 6 tools listed, including read_attachment"
+        7,
+        "Exactly 7 tools listed, including read_attachment and tag"
     );
 
     let list_tool = tools.iter().find(|tool| tool["name"] == "list").unwrap();
@@ -330,6 +330,7 @@ async fn test_mcp_initialize_and_tools_list() {
         vec![
             "read_attachment",
             "list",
+            "tag",
             "send",
             "reply",
             "replies",

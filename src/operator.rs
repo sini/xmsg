@@ -38,10 +38,10 @@ pub struct ListArgs {
 #[derive(Args, Debug)]
 pub struct TagArgs {
     /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
-    #[arg(long, env = "XMSG_AGENT_SOCK")]
+    #[arg(long, global = true, env = "XMSG_AGENT_SOCK")]
     agent_sock: Option<PathBuf>,
     /// Print the server's JSON response on one line
-    #[arg(long)]
+    #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
     action: TagAction,

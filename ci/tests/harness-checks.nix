@@ -518,6 +518,27 @@
             printf '%s\n' "${xmsgPrev}" "${xmsgPrevSrc}" "${xmsgPrev.cargoDeps}" > $out
           '';
         };
+
+        p1pz-compat = xmsgPkg.overrideAttrs {
+          pname = "xmsg-p1pz-compat";
+          doCheck = true;
+          dontBuild = true;
+          preCheck = "";
+          XMSG_PREV_BIN = lib.getExe xmsgPrev;
+          checkPhase = ''
+            runHook preCheck
+            set -o pipefail
+            cargoWithProfile test --locked --test gate_p1pz_session_tags -- compat_912ca97a_oracles --ignored --exact --nocapture 2>&1 | tee test.log
+            if ! grep -Fq "p1pz: compat_912ca97a_oracles passed" test.log; then
+              echo "p1pz-compat: compat_912ca97a_oracles did not run" >&2
+              exit 1
+            fi
+            runHook postCheck
+          '';
+          installPhase = ''
+            printf '%s\n' "${xmsgPrev}" > $out
+          '';
+        };
       }
       // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         pi-extension = nodeCheck "pi-extension" "test.mjs";
