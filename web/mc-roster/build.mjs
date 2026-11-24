@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "../..");
 const srcDir = path.join(__dirname, "src");
-const assetsDir = path.join(__dirname, "assets");
+const assetsDir = path.join(repoRoot, "assets/mc-roster");
 const rustAssetsPath = path.join(repoRoot, "src/mission_control/assets.rs");
 
 const BANNED_SINK_PATTERNS = [
@@ -58,8 +58,8 @@ function buildArtifacts() {
 
 pub const JS_PATH: &str = "/assets/${jsName}";
 pub const CSS_PATH: &str = "/assets/${cssName}";
-pub const JS_BYTES: &[u8] = include_bytes!("../../web/mc-roster/assets/${jsName}");
-pub const CSS_BYTES: &[u8] = include_bytes!("../../web/mc-roster/assets/${cssName}");
+pub const JS_BYTES: &[u8] = include_bytes!("../../assets/mc-roster/${jsName}");
+pub const CSS_BYTES: &[u8] = include_bytes!("../../assets/mc-roster/${cssName}");
 `;
   return { jsOut, cssOut, jsName, cssName, rustSrc };
 }

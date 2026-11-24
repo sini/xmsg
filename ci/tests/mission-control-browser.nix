@@ -27,7 +27,7 @@
               node web/mc-roster/build.mjs --check | tee "$out/bundle-freshness.log"
               node --experimental-strip-types --test tests/mc_roster_unit.mjs | tee "$out/mc-roster-unit.log"
               python3 tests/tmjs_web_roster_browser.py \
-                --assets-dir web/mc-roster/assets \
+                --assets-dir assets/mc-roster \
                 --chromium "${lib.getExe pkgs.chromium}" | tee "$out/mission-control-browser.log"
             '';
       };

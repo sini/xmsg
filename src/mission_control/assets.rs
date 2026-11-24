@@ -2,5 +2,5 @@
 
 pub const JS_PATH: &str = "/assets/mc-roster.2e57c75e0c1b.js";
 pub const CSS_PATH: &str = "/assets/mc-roster.666c2486a90d.css";
-pub const JS_BYTES: &[u8] = include_bytes!("../../web/mc-roster/assets/mc-roster.2e57c75e0c1b.js");
-pub const CSS_BYTES: &[u8] = include_bytes!("../../web/mc-roster/assets/mc-roster.666c2486a90d.css");
+pub const JS_BYTES: &[u8] = include_bytes!("../../assets/mc-roster/mc-roster.2e57c75e0c1b.js");
+pub const CSS_BYTES: &[u8] = include_bytes!("../../assets/mc-roster/mc-roster.666c2486a90d.css");
