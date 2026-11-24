@@ -1503,6 +1503,199 @@ fn contradictory_persisted_caller_binding_blocks_otherwise_valid_native_effect()
     assert_eq!(result.unwrap_err(), ErrorCode::AttestationBinding);
 }
 
+fn admit_reconnect(
+    f: &Fixture,
+    id: &str,
+    kind: crate::protocol::ResumeKind,
+) -> crate::control::ControlReply {
+    f.service
+        .lifecycle(
+            peer(),
+            ControlRequest {
+                version: 1,
+                request_id: id.into(),
+                target: Some(Target::Execution {
+                    session_id: "session-1".into(),
+                    generation: 1,
+                }),
+                action: Action::Resume(crate::protocol::ResumeArgs { kind }),
+                deadline: None,
+            },
+            104,
+        )
+        .unwrap()
+}
+#[test]
+fn reconnect_requires_qualified_capability_before_admission() {
+    let f = fixture();
+    let reply = admit_reconnect(
+        &f,
+        "unsupported-reconnect",
+        crate::protocol::ResumeKind::Reconnect,
+    );
+    let admissions: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        admissions, 1,
+        "unqualified reconnect created an effect admission"
+    );
+    assert!(matches!(
+        reply.receipt.authorization,
+        crate::protocol::Authorization::Denied { .. }
+    ));
+}
+#[test]
+fn reconnect_cannot_clear_unknown_state_relaunch_or_rebind_generation() {
+    let mut f = fixture();
+    f.record
+        .capabilities
+        .push(crate::capability::Capability::Reconnect);
+    let policy = replace_adapter_policy(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(policy);
+    let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .native_transport_unknown(&native)
+        .unwrap();
+    let reply = admit_reconnect(
+        &f,
+        "unknown-reconnect",
+        crate::protocol::ResumeKind::Reconnect,
+    );
+    assert!(matches!(
+        reply.receipt.authorization,
+        crate::protocol::Authorization::Allowed { .. }
+    ));
+    {
+        let mut journal = f.service.journal.lock().unwrap();
+        let held = journal.reserve_reconnect(2, &|| Ok(105)).unwrap().unwrap();
+        assert_eq!(held, native);
+        journal
+            .finish_reconnect(2, &held, true, &|| Ok(105))
+            .unwrap();
+        let (generation,session,executions):(i64,String,i64)=journal.db.query_row("SELECT generation,state,(SELECT COUNT(*) FROM executions) FROM sessions WHERE id='session-1'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(
+            (generation, session, executions),
+            (1, "unknown".into(), 1),
+            "reconnect resurrected unknown ownership or launched a new generation"
+        );
+        assert!(journal.reserve_reconnect(2, &|| Ok(106)).unwrap().is_none());
+    }
+    let replay = admit_reconnect(
+        &f,
+        "unknown-reconnect",
+        crate::protocol::ResumeKind::Reconnect,
+    );
+    assert_eq!(
+        replay.reconnect.unwrap().state,
+        crate::protocol::ReconnectState::Unknown
+    );
+}
+#[test]
+fn uncertain_stored_conversation_load_never_relaunches_or_claims_success() {
+    let mut f = fixture();
+    f.record
+        .capabilities
+        .push(crate::capability::Capability::StoredResume);
+    let policy = replace_adapter_policy(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(policy);
+    let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .native_transport_unknown(&native)
+        .unwrap();
+    let reply = admit_reconnect(
+        &f,
+        "stored-unknown",
+        crate::protocol::ResumeKind::LoadStoredConversation,
+    );
+    let (admissions,executions,generation):(i64,i64,i64)=f.service.journal.lock().unwrap().db.query_row("SELECT (SELECT COUNT(*) FROM admissions),(SELECT COUNT(*) FROM executions),generation FROM sessions WHERE id='session-1'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(
+        (admissions, executions, generation),
+        (1, 1, 1),
+        "stored resume created a replacement under uncertain ownership"
+    );
+    assert!(matches!(
+        reply.receipt.authorization,
+        crate::protocol::Authorization::Denied { .. }
+    ));
+}
+
+#[test]
+fn caller_revocation_during_reconnect_cannot_confirm_or_resurrect_the_lease() {
+    let mut f = fixture();
+    f.record
+        .capabilities
+        .push(crate::capability::Capability::Reconnect);
+    let policy = replace_adapter_policy(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(policy);
+    let reply = admit_reconnect(
+        &f,
+        "revoke-during-reconnect",
+        crate::protocol::ResumeKind::Reconnect,
+    );
+    assert!(matches!(
+        reply.receipt.authorization,
+        crate::protocol::Authorization::Allowed { .. }
+    ));
+    let held = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .reserve_reconnect(2, &|| Ok(105))
+        .unwrap()
+        .unwrap();
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            AdminCommand::RevokeCallerQualification {
+                request_id: "reconnect-revoke".into(),
+                expected_revision: 1,
+                record_id: "fixture-caller".into(),
+                record_revision: 1,
+            },
+            105,
+        )
+        .unwrap();
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .finish_reconnect(2, &held, true, &|| Ok(106))
+        .unwrap();
+    let replay = admit_reconnect(
+        &f,
+        "revoke-during-reconnect",
+        crate::protocol::ResumeKind::Reconnect,
+    );
+    assert_eq!(
+        replay.reconnect.unwrap().state,
+        crate::protocol::ReconnectState::Unknown,
+        "revoked caller qualification confirmed a reconnect"
+    );
+    let executions: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(executions, 1);
+}
+
 #[test]
 fn wedged_native_writer_releases_journal_for_owner_disable_and_status() {
     use std::{

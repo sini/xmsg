@@ -11,6 +11,28 @@ use serde::{Deserialize, Serialize};
 
 const MAX_QUEUED: i64 = 32;
 
+pub(crate) fn require_action_capability(
+    request: &ControlRequest,
+    resolved: &mut ResolvedDispatch,
+) -> Result<(), ErrorCode> {
+    let needed = match &request.action {
+        Action::Steer(_) => Some(Capability::StrictSteer),
+        Action::Resume(args) => match args.kind {
+            crate::protocol::ResumeKind::Reconnect => Some(Capability::Reconnect),
+            crate::protocol::ResumeKind::LoadStoredConversation => {
+                return Err(ErrorCode::NotSupported)
+            }
+        },
+        _ => None,
+    };
+    if let Some(capability) = needed {
+        if !resolved.required_capabilities.contains(&capability) {
+            resolved.required_capabilities.push(capability);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod tests;
@@ -414,13 +436,7 @@ impl Journal {
             }
             journal::resolved_for_target(db, target)?
         };
-        if matches!(request.action, Action::Steer(_))
-            && !selected
-                .required_capabilities
-                .contains(&Capability::StrictSteer)
-        {
-            selected.required_capabilities.push(Capability::StrictSteer);
-        }
+        require_action_capability(request, &mut selected)?;
         let policy = policy.ok_or(ErrorCode::NotSupported)?;
         policy.require_at(
             &selected,

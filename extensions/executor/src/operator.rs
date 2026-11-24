@@ -238,6 +238,11 @@ fn serve(configuration: RuntimeConfig) -> Result<(), ErrorCode> {
     let dispatch_service = service.clone();
     std::thread::spawn(move || loop {
         dispatch_once(&dispatch_service, &configuration);
+        let _ = crate::resume::process_one(
+            &dispatch_service,
+            &configuration,
+            &crate::runtime_process::unix_now,
+        );
         std::thread::sleep(Duration::from_millis(25));
     });
     loop {

@@ -401,20 +401,33 @@ fn fake_runtime(f: &Fixture) -> OwnerRuntimeConfig {
 
 #[test]
 fn real_acp_bootstrap_uses_inherited_lease_and_observed_model_before_brief() {
-    real_acp_fixture(false, false);
+    real_acp_fixture(AcpScenario::Bootstrap);
 }
 
 #[test]
 fn continuous_native_frames_service_attach_and_strict_steer_before_batch_end() {
-    real_acp_fixture(true, false);
+    real_acp_fixture(AcpScenario::Fairness);
 }
 
 #[test]
 fn prelaunch_failed_request_is_terminal_and_does_not_block_one_slot_after_restart() {
-    real_acp_fixture(false, true);
+    real_acp_fixture(AcpScenario::PrelaunchFailure);
 }
 
-fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
+#[test]
+fn qualified_reconnect_attaches_same_live_owned_lease_without_native_session_or_launch() {
+    real_acp_fixture(AcpScenario::Reconnect);
+}
+enum AcpScenario {
+    Bootstrap,
+    Fairness,
+    PrelaunchFailure,
+    Reconnect,
+}
+fn real_acp_fixture(scenario: AcpScenario) {
+    let fairness = matches!(scenario, AcpScenario::Fairness);
+    let prelaunch_failure = matches!(scenario, AcpScenario::PrelaunchFailure);
+    let reconnect = matches!(scenario, AcpScenario::Reconnect);
     use crate::runtime_config::{
         PinnedExecutable, ProgramConfig, RuntimeConfig, ServicePaths, WorkspaceConfig,
     };
@@ -446,6 +459,16 @@ fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
     buffer_barrier.set_nonblocking(true).unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_runtime_acp.py");
     let mut config = f.config.clone();
+    if reconnect {
+        config.grants.push(Grant {
+            principal: "worker".into(),
+            verb: Verb::Resume,
+            target: GrantTarget::Session {
+                session_id: "session-1".into(),
+                generation: 1,
+            },
+        });
+    }
     if fairness {
         config.grants.push(Grant {
             principal: "worker".into(),
@@ -565,7 +588,10 @@ fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
         adapter_sha256: pinned.sha256.clone(),
         native_sha256: pinned.sha256,
         executor_sha256: executor.sha256.clone(),
-        capabilities: vec![crate::capability::Capability::StrictSteer],
+        capabilities: vec![
+            crate::capability::Capability::StrictSteer,
+            crate::capability::Capability::Reconnect,
+        ],
         host,
         uid: xmsg::client::current_uid(),
         operating_system: std::env::consts::OS.into(),
@@ -798,6 +824,60 @@ fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
     let mut reached = [0];
     prompt.read_exact(&mut reached).unwrap();
     assert_eq!(reached, [b'P']);
+    if reconnect {
+        let before = fs::read_to_string(&trace).unwrap();
+        let request = ControlRequest {
+            version: 1,
+            request_id: "reconnect-live".into(),
+            target: Some(Target::Execution {
+                session_id: started.identity.session_id.clone(),
+                generation: 1,
+            }),
+            action: Action::Resume(crate::protocol::ResumeArgs {
+                kind: crate::protocol::ResumeKind::Reconnect,
+            }),
+            deadline: None,
+        };
+        let admitted = service.lifecycle(peer(), request.clone(), now).unwrap();
+        assert!(matches!(
+            admitted.receipt.authorization,
+            crate::protocol::Authorization::Allowed { .. }
+        ));
+        crate::resume::process_one(&service, &configuration, &crate::runtime_process::unix_now)
+            .unwrap();
+        let after = fs::read_to_string(&trace).unwrap();
+        let journal = service.journal.lock().unwrap();
+        let executions: i64 = journal
+            .db
+            .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "same-lease reconnect emitted a native command or initialized a new session"
+        );
+        assert_eq!(executions, 1, "reconnect launched a replacement execution");
+        drop(journal);
+        let replay = service.lifecycle(peer(), request, now).unwrap();
+        assert!(replay.replayed && replay.historical);
+        let report = replay.reconnect.unwrap();
+        assert_eq!(
+            report.state,
+            crate::protocol::ReconnectState::SameOwnedExecution
+        );
+        assert_eq!(report.generation, 1);
+        assert_eq!(
+            report.source,
+            crate::protocol::ObservationSource::Supervisor
+        );
+        let held = crate::lifecycle::binding(
+            &service.journal.lock().unwrap().db,
+            &started.identity.session_id,
+            1,
+        )
+        .unwrap();
+        assert_eq!(report.transport_epoch, held.transport_epoch);
+        assert_eq!(report.native_session_id, held.native_session_id);
+    }
     let frames: Vec<serde_json::Value> = fs::read_to_string(&trace)
         .unwrap()
         .lines()

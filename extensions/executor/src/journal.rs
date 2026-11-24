@@ -223,11 +223,12 @@ impl Journal {
                     request.action,
                     Action::Status(_) | Action::Result(_) | Action::Stop(_)
                 ) {
-                    let selected = if matches!(request.action, Action::Dispatch(_)) {
+                    let mut selected = if matches!(request.action, Action::Dispatch(_)) {
                         serde_json::from_str(&resolved).map_err(storage)?
                     } else {
                         resolved_for_target(&tx, &target)?
                     };
+                    crate::lifecycle::require_action_capability(request, &mut selected)?;
                     policy.require_at(
                         &selected,
                         configuration.revision,
@@ -375,6 +376,7 @@ impl Journal {
             pre_launch_failure,
             status,
             result,
+            reconnect: None,
         };
         tx.execute(
             "INSERT INTO requests VALUES(?1,?2,?3,?4,?5)",
@@ -692,6 +694,7 @@ impl Journal {
             pre_launch_failure: None,
             status: None,
             result: None,
+            reconnect: None,
             receipt: OperationReceipt {
                 request_id: request.request_id.clone(),
                 target: request.target.clone(),
@@ -847,6 +850,10 @@ fn replay(
                 return Err(ErrorCode::RequestConflict);
             }
             let mut reply: ControlReply = serde_json::from_str(&body).map_err(storage)?;
+            let reconnect:Option<String>=tx.query_row("SELECT n.command FROM admissions a JOIN native_operations n ON n.admission_id=a.id WHERE a.principal=?1 AND a.request_id=?2 AND a.verb='\"resume\"' AND n.state IN('reconnected','reconnect_unknown')",params![principal,id],|r|r.get(0)).optional().map_err(storage)?;
+            if let Some(raw) = reconnect {
+                reply.reconnect = Some(serde_json::from_str(&raw).map_err(storage)?);
+            }
             if let Some(dispatch) = &reply.dispatch {
                 reply.pre_launch_failure =
                     crate::execution::pre_launch_failure(tx, &dispatch.session_id)?;
