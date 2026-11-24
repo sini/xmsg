@@ -278,5 +278,15 @@
     "test_module": "lifecycle::tests",
     "test_file": "extensions/executor/src/lifecycle_tests.rs",
     "assertion": "revoked eligibility submitted queued bus content"
+  },
+  {
+    "id": "runtime-adapter-expiry",
+    "file": "extensions/executor/src/eligibility.rs",
+    "needle": "                && r.expires_at > facts.now",
+    "replacement": "                && true",
+    "test": "adapter_record_expiry_blocks_queued_frame_with_current_caller_and_turn",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "expired adapter qualification emitted a queued native frame"
   }
 ]
