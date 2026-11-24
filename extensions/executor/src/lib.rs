@@ -27,6 +27,8 @@ mod runtime_process;
 pub mod auth;
 #[allow(dead_code)]
 pub mod content;
+#[allow(dead_code)]
+mod content_admission;
 pub mod control;
 mod journal;
 pub mod unix;

@@ -655,7 +655,13 @@ impl Session {
             Err(ErrorCode::StaleGeneration) => return Ok(()),
             Err(code) => return Err(code.into()),
         };
-        let store = Journal::open_existing(&content.journal)?;
+        let mut journal = Journal::open_existing(&content.journal)?;
+        journal.runtime_policy = self.journal.runtime_policy.clone();
+        let store = crate::content_admission::BoundContentJournal::new(
+            journal,
+            self.binding.clone(),
+            self.expires,
+        );
         let listener = content.listener.take().ok_or(SupervisorError::Unknown)?;
         content.service = Some(
             crate::content::start_content_service(content.config.clone(), binding, store, listener)

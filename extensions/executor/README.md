@@ -10,6 +10,8 @@ Owner launch environment is a bounded fixed search path plus an optional real ac
 
 Optional owner `bus` configuration exposes only text `list`, `send` and `reply` through a separate execution-bound content socket. The SDK registration remains in the supervisor process. Sidecar initialization and tool discovery are local; SDK calls run on bounded dedicated tasks. Inbound automatic input additionally requires explicit `auto_input: true`: content is committed before ACK and gets its own durable native-delivery intent. A message's sender, origin, JSON or prose cannot create a lifecycle admission or human decision. Unknown transports keep queued content without rebinding or relaunching.
 
+Each outgoing managed content call gets a fresh journal admission check against the original dispatch, owned session/generation/epoch, current grants, caller and adapter eligibility, disable fence and wall bound. The policy/audit transaction commits immediately before one SDK attempt; no journal mutex is held over network IO and no stale authorization is cached. A request admitted before revocation may finish in flight; this does not promise cancellation of an already sent bus message. Later calls are denied.
+
 ## Contracts
 
 `runtime_config::RuntimeConfig` describes owner-selected program paths and SHA256 pins, native modes, workspace bindings, service paths and separate credential-file references. Its bounded private-file reader and artifact verification do not execute programs or qualify runtime capabilities. Caller requests cannot replace those settings. Runtime activation remains unavailable until separately reviewed qualification records exist.

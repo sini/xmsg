@@ -32,6 +32,33 @@ struct Fixture {
     executor: std::sync::Arc<crate::runtime_config::ExecutableArtifact>,
     driver: Driver,
 }
+pub(super) fn content_gate_fixture() -> crate::content_admission::ManagedContentFixture {
+    let f = fixture_with_bus(true);
+    let policy = f.service.journal.lock().unwrap().runtime_policy.clone();
+    let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+    let proxy = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .proxy_binding(&native.identity)
+        .unwrap();
+    let mut journal =
+        crate::journal::Journal::open_existing(&f.configuration.paths.journal).unwrap();
+    journal.runtime_policy = policy;
+    let store = crate::membership::SharedContentStore::new(
+        crate::content_admission::fixture_store(journal, native),
+    );
+    crate::content_admission::ManagedContentFixture {
+        _dir: f._dir,
+        service: f.service,
+        store,
+        binding: proxy,
+        configuration: f.configuration,
+        record: f.record,
+        executor: f.executor,
+    }
+}
 fn peer() -> PeerWitness {
     PeerWitness {
         uid: xmsg::client::current_uid(),
