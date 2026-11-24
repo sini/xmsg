@@ -1,0 +1,435 @@
+use super::*;
+use crate::{
+    acp::Adapter,
+    auth::{Grant, GrantTarget, PeerWitness, ProvisionedCredentials},
+    capability::{
+        ProfileContract, ProtectionReport, ProtectionState, QualificationKey, ReviewMode,
+        TrustProfile,
+    },
+    control::{AdminCommand, ControlService, DispatchTemplate, OwnerConfig, OwnerProfile},
+    eligibility::AdapterQualification,
+    framing::{Frame, Notification, Success},
+    protocol::{
+        EnvironmentBackend, EnvironmentDescriptor, Harness, Model, ResourceBudget, SendArgs, Verb,
+        WorkspaceSpec,
+    },
+    runtime_config::{
+        PinnedExecutable, ProgramConfig, RuntimeConfig, ServicePaths, WorkspaceConfig,
+    },
+    runtime_policy::RuntimePolicy,
+};
+use sha2::{Digest, Sha256};
+use std::os::unix::fs::PermissionsExt;
+const OWNER: &[u8] = b"synthetic-owner-only-proof-0000000000";
+const HUMAN: &[u8] = b"synthetic-human-only-proof-0000000000";
+const EPOCH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    service: ControlService,
+    configuration: RuntimeConfig,
+    record: AdapterQualification,
+    driver: Driver,
+}
+fn peer() -> PeerWitness {
+    PeerWitness {
+        uid: xmsg::client::current_uid(),
+        pid: Some(std::process::id()),
+    }
+}
+fn complete(driver: &mut Driver, command: Command, result: serde_json::Value) {
+    let Frame::Request(request) = driver.begin(command).unwrap() else {
+        panic!("fixture expected request")
+    };
+    driver
+        .observe(Frame::Success(Success {
+            jsonrpc: "2.0".into(),
+            id: request.id,
+            result,
+        }))
+        .unwrap();
+}
+fn fixture() -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = |name: &str| dir.path().join(name);
+    let file = path("fake-only-not-executed");
+    std::fs::write(&file, b"fake-only-no-harness").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = PinnedExecutable {
+        path: file,
+        sha256: hex::encode(Sha256::digest(b"fake-only-no-harness")),
+    };
+    let pin = crate::capability::builtin_pins()
+        .unwrap()
+        .pins
+        .remove(0)
+        .pin;
+    let unknown = ProtectionState::Unknown {
+        reason: "fake-only".into(),
+    };
+    let model = Model {
+        provider: "fixture".into(),
+        name: "no-model".into(),
+    };
+    let resolved = ResolvedDispatch {
+        harness: Harness::Claude,
+        model: model.clone(),
+        environment: EnvironmentDescriptor {
+            id: "environment".into(),
+            executor: "local".into(),
+            host: "fixture-host".into(),
+            backend: EnvironmentBackend::Headless,
+            project: "project".into(),
+            profile: "safe".into(),
+        },
+        profile: ProfileContract {
+            mode: TrustProfile::Safe,
+            owner_selection_required: false,
+            protections: ProtectionReport {
+                hard_denials: unknown.clone(),
+                human_checkpoints: unknown,
+            },
+        },
+        qualification: QualificationKey {
+            pin_id: pin.id.clone(),
+            adapter_version: pin.adapter_version.clone(),
+            runtime_version: pin.runtime_version.clone(),
+            protocol_version: 1,
+            profile: TrustProfile::Safe,
+            native_mode: "default".into(),
+            review_mode: ReviewMode::HumanOnly,
+            protocol_schema: "fixture-schema".into(),
+            model,
+            effective_config_digest: "a".repeat(64),
+        },
+        workspace: WorkspaceSpec {
+            repo_identity: "repo".into(),
+            base_revision: "b".repeat(40),
+            destination_selector: "owned".into(),
+            context_refs: vec![],
+            patch_ref: None,
+        },
+        required_capabilities: vec![],
+        budget: ResourceBudget {
+            worker_slots: 2,
+            reviewer_slots: 0,
+            max_wall_ms: 60000,
+            max_content_bytes: 65536,
+        },
+    };
+    let control = OwnerConfig {
+        revision: 1,
+        local_host: "fixture-host".into(),
+        grants: vec![Grant {
+            principal: "worker".into(),
+            verb: Verb::Dispatch,
+            target: GrantTarget::Team {
+                team_id: "team".into(),
+            },
+        }],
+        profiles: vec![OwnerProfile {
+            id: "safe".into(),
+            revision: "1".into(),
+            project: "project".into(),
+            harness: Harness::Claude,
+            environment: "environment".into(),
+            mode: TrustProfile::Safe,
+            enabled: true,
+            owner_selected: false,
+        }],
+        defaults: vec![DispatchTemplate {
+            team_id: "team".into(),
+            profile_id: "safe".into(),
+            resolved,
+            lifecycle_verbs: vec![Verb::Send, Verb::Steer, Verb::Interrupt, Verb::Resume],
+        }],
+    };
+    let mut configuration = RuntimeConfig {
+        version: 1,
+        control,
+        paths: ServicePaths {
+            journal: path("journal"),
+            lifecycle_socket: path("life"),
+            owner_socket: path("owner"),
+            human_socket: path("human"),
+            attribution_socket: path("attribution"),
+            runtime_root: path("runtime"),
+            owner_credential_file: path("owner-proof"),
+            human_credential_file: path("human-proof"),
+        },
+        programs: vec![ProgramConfig {
+            pin_id: pin.id.clone(),
+            adapter: executable.clone(),
+            native: executable.clone(),
+            arguments: vec![],
+            native_mode: "default".into(),
+        }],
+        workspaces: vec![WorkspaceConfig {
+            repo_id: "repo".into(),
+            repository: path("repo"),
+            approved_root: path("workspaces"),
+            base_revision: "b".repeat(40),
+            destination_selector: "owned".into(),
+        }],
+    };
+    let digest = configuration
+        .effective_digest(&configuration.control.defaults[0].resolved)
+        .unwrap();
+    configuration.control.defaults[0]
+        .resolved
+        .qualification
+        .effective_config_digest = digest;
+    let (host, kernel) = crate::runtime_policy::runtime_envelope().unwrap();
+    let record = AdapterQualification {
+        key: configuration.control.defaults[0]
+            .resolved
+            .qualification
+            .clone(),
+        adapter_sha256: executable.sha256.clone(),
+        native_sha256: executable.sha256,
+        capabilities: vec![Capability::StrictSteer, Capability::PendingApproval],
+        host,
+        uid: xmsg::client::current_uid(),
+        operating_system: std::env::consts::OS.into(),
+        architecture: std::env::consts::ARCH.into(),
+        kernel,
+        policy_revision: 1,
+        expires_at: 200,
+        revoked: false,
+    };
+    let service = ControlService::open(
+        &configuration.paths.journal,
+        xmsg::client::current_uid(),
+        configuration.control.clone(),
+        ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
+    )
+    .unwrap()
+    .fixture_attributed("worker");
+    service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(
+        RuntimePolicy::fixture(configuration.clone(), vec![record.clone()]),
+    ));
+    service
+        .lifecycle(
+            peer(),
+            ControlRequest::dispatch("dispatch".into(), "initial brief".into()),
+            100,
+        )
+        .unwrap();
+    let mut driver = Driver::new(Adapter::for_pin(&pin).unwrap());
+    complete(
+        &mut driver,
+        Command::Initialize {
+            client_name: "fixture".into(),
+        },
+        serde_json::json!({"protocolVersion":1,"agentCapabilities":{},"_meta":{"steering":{"supported":true}}}),
+    );
+    complete(
+        &mut driver,
+        Command::NewSession {
+            cwd: "/fixture".into(),
+            mcp_servers: vec![],
+        },
+        serde_json::json!({"sessionId":"native","modes":{"currentModeId":"default"}}),
+    );
+    complete(
+        &mut driver,
+        Command::SetMode {
+            native_session_id: "native".into(),
+            mode_id: "default".into(),
+        },
+        serde_json::json!({}),
+    );
+    driver.observe(Frame::Notification(Notification {jsonrpc:"2.0".into(),method:"session/update".into(),params:Some(serde_json::json!({"sessionId":"native","update":{"sessionUpdate":"config_option_update","configOptions":[{"id":"mode","type":"select","currentValue":"default"}]}}))})).unwrap();
+    {
+        let mut journal = service.journal.lock().unwrap();
+        let lease = journal.reserve_launch(1, 100).unwrap();
+        journal.commit_spawn_intent(&lease, 100).unwrap();
+        journal
+            .bind_native(
+                &NativeBinding {
+                    identity: lease.identity.clone(),
+                    native_session_id: "native".into(),
+                    transport_epoch: EPOCH.into(),
+                    native_mode: "default".into(),
+                    expires_at: 180,
+                },
+                100,
+            )
+            .unwrap();
+        journal
+            .mark_running(&lease.identity, std::process::id(), 0, 100)
+            .unwrap();
+    }
+    Fixture {
+        _dir: dir,
+        service,
+        configuration,
+        record,
+        driver,
+    }
+}
+fn queue(f: &Fixture) -> i64 {
+    let reply = f
+        .service
+        .lifecycle(
+            peer(),
+            ControlRequest {
+                version: 1,
+                request_id: "send".into(),
+                target: Some(Target::Execution {
+                    session_id: "session-1".into(),
+                    generation: 1,
+                }),
+                action: Action::Send(SendArgs {
+                    text: "queued content".into(),
+                    prefer_live: None,
+                }),
+                deadline: Some(170),
+            },
+            101,
+        )
+        .unwrap();
+    assert!(matches!(
+        reply.receipt.authorization,
+        crate::protocol::Authorization::Allowed { .. }
+    ));
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .queue_native(2, &|| Ok(101))
+        .unwrap();
+    2
+}
+fn state(f: &Fixture, id: i64) -> String {
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT state FROM native_operations WHERE admission_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn qualified_fake_queue_submits_one_real_serialized_frame_once() {
+    let mut f = fixture();
+    let id = queue(&f);
+    let mut wire = vec![];
+    assert!(f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .submit_native(id, &mut f.driver, EPOCH, &|| Ok(102), &mut wire)
+        .unwrap());
+    let frame: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+    assert_eq!(frame["method"], "session/prompt");
+    assert_eq!(frame["params"]["prompt"][0]["text"], "queued content");
+    let before = wire.clone();
+    let replay = f.service.journal.lock().unwrap().submit_native(
+        id,
+        &mut f.driver,
+        EPOCH,
+        &|| Ok(103),
+        &mut wire,
+    );
+    assert_eq!(wire, before, "native submission replay wrote another frame");
+    assert_eq!(state(&f, id), "submitted");
+    assert!(replay.is_err());
+}
+
+#[test]
+fn losing_eligibility_after_queue_writes_no_native_frame_or_new_launch() {
+    let mut f = fixture();
+    let id = queue(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(
+        RuntimePolicy::reviewed(f.configuration.clone()).unwrap(),
+    ));
+    let mut wire = vec![];
+    let result = f.service.journal.lock().unwrap().submit_native(
+        id,
+        &mut f.driver,
+        EPOCH,
+        &|| Ok(102),
+        &mut wire,
+    );
+    assert!(
+        wire.is_empty(),
+        "lost eligibility submitted queued native content"
+    );
+    assert_eq!(state(&f, id), "queued");
+    let launches: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        launches, 1,
+        "eligibility loss created replacement execution"
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn emergency_disable_blocks_queued_native_output_even_with_current_qualification() {
+    let mut f = fixture();
+    let id = queue(&f);
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            AdminCommand::DisableRuntime {
+                request_id: "disable".into(),
+                expected_revision: 1,
+            },
+            102,
+        )
+        .unwrap();
+    f.record.policy_revision = 2;
+    f.service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(
+        RuntimePolicy::fixture(f.configuration.clone(), vec![f.record.clone()]),
+    ));
+    let mut wire = vec![];
+    let result = f.service.journal.lock().unwrap().submit_native(
+        id,
+        &mut f.driver,
+        EPOCH,
+        &|| Ok(103),
+        &mut wire,
+    );
+    assert!(
+        wire.is_empty(),
+        "emergency disable submitted queued native content"
+    );
+    assert_eq!(state(&f, id), "queued");
+    assert!(result.is_err());
+}
+
+#[test]
+fn wrong_transport_epoch_cannot_consume_or_submit_queued_content() {
+    let mut f = fixture();
+    let id = queue(&f);
+    let mut wire = vec![];
+    let result = f.service.journal.lock().unwrap().submit_native(
+        id,
+        &mut f.driver,
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        &|| Ok(102),
+        &mut wire,
+    );
+    assert!(
+        wire.is_empty(),
+        "wrong transport epoch wrote native content"
+    );
+    assert_eq!(state(&f, id), "queued");
+    assert!(result.is_err());
+}
