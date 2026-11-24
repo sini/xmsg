@@ -352,6 +352,8 @@ struct State {
     watchdog_tick: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     projection_gate: Option<Arc<super::writer::ProjectionGate>>,
+    #[cfg(test)]
+    abort_delay: Option<Duration>,
 
     masked_nodes: HashSet<String>,
     live: HashMap<u64, Registration>,
@@ -559,6 +561,8 @@ impl Authority {
                 watchdog_tick: Arc::default(),
                 #[cfg(test)]
                 projection_gate: None,
+                #[cfg(test)]
+                abort_delay: None,
 
                 masked_nodes: HashSet::new(),
                 live: HashMap::new(),
@@ -1063,6 +1067,11 @@ impl Authority {
         self.locked().unwrap().watchdog_tick.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn delay_abort_for_test(&self, delay: Duration) {
+        self.locked().unwrap().abort_delay = Some(delay);
+    }
+
     pub(crate) fn rebind(&self, owner: &str, issuer: &str, subject: &str) -> Result<()> {
         if !bounded(issuer, 2_048) || !bounded(subject, 512) {
             return Err(AuthorityError::Invalid);
@@ -1158,7 +1167,7 @@ impl Authority {
         Ok(())
     }
 
-    fn cutoff(&self) -> Duration {
+    pub(crate) fn cutoff(&self) -> Duration {
         Duration::from_millis(self.config.revocation_slo_ms)
     }
 }
@@ -1230,6 +1239,8 @@ struct Registration {
     runtime: tokio::runtime::Handle,
     sender: watch::Sender<Option<Invalidation>>,
     invalidation: Option<Invalidation>,
+    #[cfg(test)]
+    abort_delay: Option<Duration>,
 }
 
 #[allow(dead_code, reason = "Mission Control transport registration handle")]
@@ -1272,8 +1283,14 @@ impl Registration {
         let slo = change.cutoff - change.changed_at;
         // Keep half the SLO for scheduling and socket wake-up, even after a missed push.
         let abort_at = change.changed_at + slo / 2;
+        #[cfg(test)]
+        let abort_delay = self.abort_delay;
         self.runtime.spawn(async move {
             tokio::time::sleep_until(abort_at.into()).await;
+            #[cfg(test)]
+            if let Some(delay) = abort_delay {
+                tokio::time::sleep(delay).await;
+            }
             let _ = socket.shutdown(Shutdown::Both);
         });
     }
@@ -1342,6 +1359,8 @@ impl Authority {
         let (sender, receiver) = watch::channel(None);
         let id = state.next_live_id;
         state.next_live_id = id.checked_add(1).ok_or(AuthorityError::Storage)?;
+        #[cfg(test)]
+        let abort_delay = state.abort_delay;
         state.live.insert(
             id,
             Registration {
@@ -1352,6 +1371,8 @@ impl Authority {
                 runtime,
                 sender,
                 invalidation: None,
+                #[cfg(test)]
+                abort_delay,
             },
         );
         Ok(Live {

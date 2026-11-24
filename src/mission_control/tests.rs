@@ -67,8 +67,40 @@ pub(crate) async fn transport_with_lease(
     directory: &TempDir,
     lease_secs: u64,
 ) -> (Arc<Issuer>, authority::Issued) {
+    transport_with_settings(oidc, directory, lease_secs, None, None).await
+}
+
+pub(crate) async fn transport_with_slo(
+    oidc: &Fixture,
+    directory: &TempDir,
+    revocation_slo_ms: u64,
+) -> (Arc<Issuer>, authority::Issued) {
+    transport_with_settings(oidc, directory, 900, Some(revocation_slo_ms), None).await
+}
+
+pub(crate) async fn transport_with_handshake_timeout(
+    oidc: &Fixture,
+    directory: &TempDir,
+    handshake_timeout_ms: u64,
+) -> (Arc<Issuer>, authority::Issued) {
+    transport_with_settings(oidc, directory, 900, None, Some(handshake_timeout_ms)).await
+}
+
+async fn transport_with_settings(
+    oidc: &Fixture,
+    directory: &TempDir,
+    lease_secs: u64,
+    revocation_slo_ms: Option<u64>,
+    handshake_timeout_ms: Option<u64>,
+) -> (Arc<Issuer>, authority::Issued) {
     let mut settings = config(&oidc.issuer());
     settings.session_limits.lease_max_secs = lease_secs;
+    if let Some(slo) = revocation_slo_ms {
+        settings.revocation_slo_ms = slo;
+    }
+    if let Some(handshake) = handshake_timeout_ms {
+        settings.handshake_timeout_ms = handshake;
+    }
     let issuer = issuer_with_config(oidc, directory, false, settings).await;
     let browser = issuer
         .authority
@@ -140,17 +172,35 @@ pub(crate) fn synthetic_transport_record(issuer: &Issuer, handle: &str) {
     issuer.authority.allow_synthetic_for_test(handle);
 }
 
-pub(crate) async fn suppress_and_revoke(
+pub(crate) struct WatchdogAbortGuard(
+    tokio::task::JoinHandle<std::result::Result<(), super::authority::AuthorityError>>,
+);
+
+impl Drop for WatchdogAbortGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+pub(crate) fn delay_abort_for_test(issuer: &Issuer, delay: std::time::Duration) {
+    issuer.authority.delay_abort_for_test(delay);
+}
+
+pub(crate) fn authority_cutoff(issuer: &Issuer) -> std::time::Duration {
+    issuer.authority.cutoff()
+}
+
+pub(crate) async fn suppress_and_revoke_scoped(
     issuer: &Arc<Issuer>,
     directory: &TempDir,
     record_id: &str,
-) -> std::time::Instant {
+) -> (std::time::Instant, WatchdogAbortGuard) {
     let listener = admin::bind(directory.path(), &issuer.authority).unwrap();
     let admin = tokio::spawn(admin::serve(listener, issuer.authority.clone()));
     let tick = issuer.authority.watchdog_tick_for_test();
     let watchdog = tokio::spawn(issuer.authority.clone().watchdog());
     issuer.authority.suppress_push_for_test();
-    tokio::time::timeout(Duration::from_secs(1), tick.notified())
+    tokio::time::timeout(Duration::from_secs(5), tick.notified())
         .await
         .unwrap();
     admin::revoke_fixture(directory.path(), record_id).await;
@@ -163,9 +213,19 @@ pub(crate) async fn suppress_and_revoke(
         .iter()
         .any(|row| { row.action == "revoke" && row.record_id.as_deref() == Some(record_id) }));
     admin.abort();
+    (at, WatchdogAbortGuard(watchdog))
+}
+
+pub(crate) async fn suppress_and_revoke(
+    issuer: &Arc<Issuer>,
+    directory: &TempDir,
+    record_id: &str,
+) -> std::time::Instant {
+    let (at, guard) = suppress_and_revoke_scoped(issuer, directory, record_id).await;
+    let watchdog = guard;
     tokio::spawn(async move {
+        let _guard = watchdog;
         tokio::time::sleep(Duration::from_secs(2)).await;
-        watchdog.abort();
     });
     at
 }

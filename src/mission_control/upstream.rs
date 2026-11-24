@@ -16,6 +16,8 @@ pub(crate) struct ReadHub {
     state: Mutex<ReadState>,
     changed: tokio::sync::watch::Sender<u64>,
     pub(super) budgets: std::sync::Arc<super::budgets::Budgets>,
+    #[cfg(test)]
+    snapshot_hold: Mutex<Option<Duration>>,
 }
 
 struct ReadState {
@@ -30,6 +32,8 @@ impl ReadHub {
         Ok(Self {
             changed: tokio::sync::watch::channel(0).0,
             budgets: std::sync::Arc::default(),
+            #[cfg(test)]
+            snapshot_hold: Mutex::new(None),
             state: Mutex::new(ReadState {
                 hub: Hub::new(ReplayLimits {
                     events: limits.replay_events,
@@ -143,6 +147,16 @@ impl ReadHub {
 
     pub(crate) fn wake(&self) {
         self.changed.send_modify(|_| {});
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_snapshot_for_test(&self, delay: Duration) {
+        *self.snapshot_hold.lock().unwrap() = Some(delay);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_hold(&self) -> Option<Duration> {
+        *self.snapshot_hold.lock().unwrap()
     }
 
     #[cfg(test)]

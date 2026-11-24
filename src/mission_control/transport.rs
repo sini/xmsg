@@ -125,6 +125,10 @@ async fn snapshot_response(
             &cursor,
             issuer.config.session_limits.snapshot_max_bytes,
         )?;
+        #[cfg(test)]
+        if let Some(delay) = hub.snapshot_hold() {
+            tokio::time::sleep(delay).await;
+        }
         response(StatusCode::OK, "application/json", body)
     };
     result.headers_mut().insert(

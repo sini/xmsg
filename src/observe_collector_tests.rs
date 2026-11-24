@@ -1949,8 +1949,26 @@ async fn r2a_direct_404_recovers_on_valid_response_and_403_stays_denied() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
+    run_three_transports_share_the_snapshot_and_cursor(None, None, Duration::from_secs(30)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forced_control_three_transports_slow_snapshot_delivery() {
+    run_three_transports_share_the_snapshot_and_cursor(
+        Some(Duration::from_millis(5200)),
+        None,
+        Duration::from_secs(30),
+    )
+    .await;
+}
+
+async fn run_three_transports_share_the_snapshot_and_cursor(
+    snapshot_hold: Option<Duration>,
+    client_timeout: Option<Duration>,
+    ws_timeout: Duration,
+) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
@@ -1958,13 +1976,22 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
         crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
     let directory = tempfile::tempdir().unwrap();
     let (issuer, issued) =
-        crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
+        crate::mission_control::tests::transport_with_handshake_timeout(&oidc, &directory, 15_000)
+            .await;
     let f = Fixture::with_issuer(false, true, Some(issuer.clone()), None).await;
     f.state.read_hub.as_ref().unwrap().fill_snapshot_for_test();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
+    if let Some(delay) = snapshot_hold {
+        f.state
+            .read_hub
+            .as_ref()
+            .unwrap()
+            .hold_snapshot_for_test(delay);
+    }
+    let mut client = reqwest::Client::builder();
+    if let Some(timeout) = client_timeout {
+        client = client.timeout(timeout);
+    }
+    let client = client.build().unwrap();
     let response = client
         .get(format!("{}/v1/mission-control/snapshot/fleet", f.url))
         .bearer_auth(&issued.handle)
@@ -2002,13 +2029,11 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
     );
     let host = req.uri().authority().unwrap().as_str().to_owned();
     let tcp = tokio::net::TcpStream::connect(host).await.unwrap();
-    let (mut socket, response) = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio_tungstenite::client_async(req, tcp),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let (mut socket, response) =
+        tokio::time::timeout(ws_timeout, tokio_tungstenite::client_async(req, tcp))
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
     socket
         .send(Message::Text(
@@ -2018,7 +2043,7 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
         .await
         .unwrap();
     let receive = async |socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>| {
-        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        let frame = tokio::time::timeout(ws_timeout, socket.next())
             .await
             .unwrap()
             .unwrap()
@@ -2114,6 +2139,19 @@ async fn mission_control_three_transports_share_the_snapshot_and_cursor() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_control_blocked_writes_end_by_audited_cutoff() {
+    run_blocked_writes_end_by_audited_cutoff(4_000, 5, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forced_control_blocked_writes_scheduling_delay() {
+    run_blocked_writes_end_by_audited_cutoff(4_000, 1, Some(Duration::from_millis(600))).await;
+}
+
+async fn run_blocked_writes_end_by_audited_cutoff(
+    revocation_slo_ms: u64,
+    runs: usize,
+    abort_delay: Option<Duration>,
+) {
     use futures_util::{SinkExt, StreamExt};
     use std::io::Write as _;
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -2122,12 +2160,19 @@ async fn mission_control_blocked_writes_end_by_audited_cutoff() {
     let oidc =
         crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
     for websocket in [true, false] {
-        let mut samples = Vec::with_capacity(20);
-        for _ in 0..20 {
+        let mut samples = Vec::with_capacity(runs);
+        for _ in 0..runs {
             let probe = Arc::new(crate::mission_control::stream::WireProbe::default());
             let directory = tempfile::tempdir().unwrap();
-            let (issuer, issued) =
-                crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
+            let (issuer, issued) = crate::mission_control::tests::transport_with_slo(
+                &oidc,
+                &directory,
+                revocation_slo_ms,
+            )
+            .await;
+            if let Some(delay) = abort_delay {
+                crate::mission_control::tests::delay_abort_for_test(&issuer, delay);
+            }
             let f =
                 Fixture::with_issuer(false, true, Some(issuer.clone()), Some(probe.clone())).await;
             let address = f.url.strip_prefix("http://").unwrap();
@@ -2226,13 +2271,15 @@ async fn mission_control_blocked_writes_end_by_audited_cutoff() {
             tokio::time::timeout(Duration::from_secs(5), probe.blocked.notified())
                 .await
                 .expect("real socket write must become pending");
-            let change = crate::mission_control::tests::suppress_and_revoke(
+            let (change, _watchdog) = crate::mission_control::tests::suppress_and_revoke_scoped(
                 &issuer,
                 &directory,
                 &issued.record.record_id,
             )
             .await;
-            let cutoff = tokio::time::Instant::from_std(change + Duration::from_millis(1000));
+            let cutoff = tokio::time::Instant::from_std(
+                change + crate::mission_control::tests::authority_cutoff(&issuer),
+            );
             tokio::time::timeout_at(cutoff, probe.closed.notified())
                 .await
                 .expect("blocked socket remained open past the recorded cutoff");
@@ -2251,7 +2298,7 @@ async fn mission_control_blocked_writes_end_by_audited_cutoff() {
             |percent: usize| samples[(samples.len() * percent).div_ceil(100) - 1].as_millis();
         writeln!(
             std::io::stderr().lock(),
-            "SP5 {} blocked writes: runs=20 p50={}ms p95={}ms max={}ms (abort timer at T_change + SLO/2)",
+            "SP5 {} blocked writes: runs={runs} p50={}ms p95={}ms max={}ms (abort timer at T_change + SLO/2)",
             if websocket { "WebSocket" } else { "SSE" },
             percentile(50), percentile(95), percentile(100),
         ).unwrap();
