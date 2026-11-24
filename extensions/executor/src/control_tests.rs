@@ -5,6 +5,66 @@ use std::os::unix::fs::PermissionsExt;
 
 const OWNER: &[u8] = b"synthetic-owner-only-proof-0000000000";
 const HUMAN: &[u8] = b"synthetic-human-only-proof-0000000000";
+
+#[test]
+fn owner_disable_transport_is_independent_of_runtime_qualification_and_human_role() {
+    use std::os::fd::AsRawFd;
+    let f = fixture(config(vec![]));
+    for (proof, expected) in [(HUMAN, false), (OWNER, true)] {
+        let socket = f._dir.path().join(if expected {
+            "owner-good"
+        } else {
+            "owner-wrong"
+        });
+        let listener = crate::unix::bind_private_socket(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let command = AdminCommand::DisableRuntime {
+            request_id: format!("disable-{expected}"),
+            expected_revision: 1,
+        };
+        let result = std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let mut ready = libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                assert_eq!(
+                    unsafe { libc::poll(&mut ready, 1, 2000) },
+                    1,
+                    "owner fixture did not connect"
+                );
+                let (stream, _) = listener.accept().unwrap();
+                f.service.handle_owner_connection(stream)
+            });
+            let result = crate::human_operator::request::<_, u64>(&socket, proof, &command);
+            server.join().unwrap().unwrap();
+            result
+        });
+        let disabled: i64 = f
+            .service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT disabled FROM runtime_control WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            disabled,
+            i64::from(expected),
+            "human role changed the owner emergency-disable fence"
+        );
+        if expected {
+            assert_eq!(result.unwrap(), 2)
+        } else {
+            assert_eq!(result.unwrap_err(), ErrorCode::CredentialDenied)
+        }
+    }
+}
 struct Fixture {
     _dir: tempfile::TempDir,
     service: ControlService,

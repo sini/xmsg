@@ -27,7 +27,9 @@ pub(crate) fn run(
         session_id: session,
         generation,
     };
-    let Some(pending) = request::<_, Option<NativePending>>(&configuration, &proof, &query)? else {
+    let Some(pending) =
+        request::<_, Option<NativePending>>(&configuration.paths.human_socket, &proof, &query)?
+    else {
         println!("no pending native request");
         return Ok(());
     };
@@ -57,7 +59,7 @@ pub(crate) fn run(
         &mut writer,
         &crate::runtime_process::unix_now,
     )?;
-    let reply: ControlReply = request(&configuration, &proof, &call)?;
+    let reply: ControlReply = request(&configuration.paths.human_socket, &proof, &call)?;
     if !matches!(
         reply.receipt.authorization,
         crate::protocol::Authorization::Allowed { .. }
@@ -68,13 +70,12 @@ pub(crate) fn run(
     Ok(())
 }
 
-fn request<B: serde::Serialize, R: serde::de::DeserializeOwned>(
-    configuration: &RuntimeConfig,
+pub(crate) fn request<B: serde::Serialize, R: serde::de::DeserializeOwned>(
+    socket: &std::path::Path,
     proof: &[u8],
     body: &B,
 ) -> Result<R, ErrorCode> {
     use xmsg::client::caller_attribution as wire;
-    let socket = &configuration.paths.human_socket;
     wire::private_socket(socket, xmsg::client::current_uid()).map_err(failure)?;
     let expires = Instant::now() + Duration::from_secs(2);
     let mut stream = wire::connect(socket, expires).map_err(failure)?;

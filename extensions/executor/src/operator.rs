@@ -26,12 +26,32 @@ enum Invocation {
         session: String,
         generation: u64,
     },
+    OwnerDisable {
+        config: PathBuf,
+        revision: u64,
+    },
     Version,
 }
 fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, ErrorCode> {
     let args: Vec<OsString> = arguments.into_iter().collect();
     if args.len() == 1 && args[0] == "--version" {
         return Ok(Invocation::Version);
+    }
+    if args.len() == 5
+        && args[0] == "owner-disable"
+        && args[1] == "--config"
+        && args[3] == "--expected-revision"
+    {
+        let config = PathBuf::from(&args[2]);
+        let revision = args[4]
+            .to_str()
+            .and_then(|r| r.parse::<u64>().ok())
+            .filter(|r| *r > 0)
+            .ok_or(ErrorCode::MalformedFrame)?;
+        if !config.is_absolute() {
+            return Err(ErrorCode::MalformedFrame);
+        }
+        return Ok(Invocation::OwnerDisable { config, revision });
     }
     if args.len() == 7
         && args[0] == "human"
@@ -122,6 +142,25 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), ErrorCod
             session,
             generation,
         } => crate::human_operator::run(RuntimeConfig::read(&config)?, session, generation),
+        Invocation::OwnerDisable { config, revision } => {
+            let configuration = RuntimeConfig::read(&config)?;
+            let proof = configuration.owner_proof()?;
+            let mut nonce = [0; 16];
+            getrandom::fill(&mut nonce).map_err(|_| ErrorCode::Storage)?;
+            let command = crate::control::AdminCommand::DisableRuntime {
+                request_id: format!("disable-{}", hex::encode(nonce)),
+                expected_revision: revision,
+            };
+            let changed: u64 = crate::human_operator::request(
+                &configuration.paths.owner_socket,
+                &proof,
+                &command,
+            )?;
+            println!(
+                "runtime disabled at policy revision {changed}; native stopping is not confirmed"
+            );
+            Ok(())
+        }
         Invocation::Serve(file) => serve(RuntimeConfig::read(&file)?),
         Invocation::Runtime { fd, max_wall_ms } => {
             crate::supervisor::run_inherited(fd, max_wall_ms)
@@ -312,6 +351,17 @@ mod tests {
     }
     #[test]
     fn entrypoints_refuse_activation_flags_and_unowned_standard_descriptors() {
+        assert!(matches!(
+            parse(args(&[
+                "owner-disable",
+                "--config",
+                "/fixture/config",
+                "--expected-revision",
+                "1"
+            ])),
+            Ok(Invocation::OwnerDisable { revision: 1, .. })
+        ));
+        assert!(parse(args(&["owner-restore", "--config", "/fixture/config"])).is_err());
         assert!(matches!(
             parse(args(&[
                 "human",
