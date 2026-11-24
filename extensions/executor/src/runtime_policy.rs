@@ -11,6 +11,10 @@ struct ProgramArtifacts {
     adapter: Option<ExecutableArtifact>,
     native: Option<ExecutableArtifact>,
 }
+// Trusted core record references await the separately gated activation API.
+struct CallerRecordReference {
+    _activation_review: (),
+}
 fn observe_programs(configuration: &RuntimeConfig) -> Vec<ProgramArtifacts> {
     configuration
         .programs
@@ -26,17 +30,19 @@ fn observe_programs(configuration: &RuntimeConfig) -> Vec<ProgramArtifacts> {
 pub(crate) struct RuntimePolicy {
     pub(crate) configuration: RuntimeConfig,
     eligibility: Eligibility,
-    executor: Arc<ExecutableArtifact>,
+    executor: Option<Arc<ExecutableArtifact>>,
     programs: Vec<ProgramArtifacts>,
+    caller_record: Option<CallerRecordReference>,
 }
 
 impl RuntimePolicy {
     pub(crate) fn reviewed(configuration: RuntimeConfig) -> Result<Self, ErrorCode> {
         configuration.validate()?;
         let eligibility = Eligibility::reviewed();
-        let executor = Arc::new(ExecutableArtifact::observe(
-            &std::env::current_exe().map_err(|_| ErrorCode::Storage)?,
-        )?);
+        let executor = std::env::current_exe()
+            .ok()
+            .and_then(|p| ExecutableArtifact::observe(&p).ok())
+            .map(Arc::new);
         let programs = if eligibility.is_empty() {
             vec![]
         } else {
@@ -47,6 +53,7 @@ impl RuntimePolicy {
             eligibility,
             executor,
             programs,
+            caller_record: None,
         })
     }
 
@@ -73,13 +80,20 @@ impl RuntimePolicy {
         if self.eligibility.is_empty() {
             return Err(ErrorCode::NotSupported);
         }
+        if self.caller_record.is_none() {
+            return Err(ErrorCode::AttestationUnavailable);
+        }
         let program = self.configuration.program_for(resolved)?;
         if self.configuration.effective_digest(resolved)?
             != resolved.qualification.effective_config_digest
         {
             return Err(ErrorCode::InvalidConfiguration);
         }
-        self.executor.unchanged()?;
+        let executor = self
+            .executor
+            .as_ref()
+            .ok_or(ErrorCode::AttestationUnavailable)?;
+        executor.unchanged()?;
         let observed = self
             .programs
             .iter()
@@ -100,11 +114,14 @@ impl RuntimePolicy {
         }
         let (host, kernel) = runtime_envelope()?;
         let now = clock()?;
+        if now <= 0 {
+            return Err(ErrorCode::DeadlineExpired);
+        }
         self.eligibility.require(&EffectFacts {
             key: &resolved.qualification,
             adapter_sha256: &program.adapter.sha256,
             native_sha256: &program.native.sha256,
-            executor_sha256: &self.executor.sha256,
+            executor_sha256: &executor.sha256,
             required_capabilities: &resolved.required_capabilities,
             host: &host,
             uid: xmsg::client::current_uid(),
@@ -127,8 +144,11 @@ impl RuntimePolicy {
         Self {
             configuration,
             eligibility: Eligibility::fixture(records),
-            executor,
+            executor: Some(executor),
             programs,
+            caller_record: Some(CallerRecordReference {
+                _activation_review: (),
+            }),
         }
     }
 }
