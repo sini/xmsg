@@ -29,6 +29,7 @@ struct Fixture {
     service: ControlService,
     configuration: RuntimeConfig,
     record: AdapterQualification,
+    executor: std::sync::Arc<crate::runtime_config::ExecutableArtifact>,
     driver: Driver,
 }
 fn peer() -> PeerWitness {
@@ -59,6 +60,13 @@ fn fixture() -> Fixture {
     let executable = PinnedExecutable {
         path: file,
         sha256: hex::encode(Sha256::digest(b"fake-only-no-harness")),
+    };
+    let native_file = path("fake-native-not-executed");
+    std::fs::write(&native_file, b"fake-only-no-harness").unwrap();
+    std::fs::set_permissions(&native_file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let native_executable = PinnedExecutable {
+        path: native_file,
+        sha256: executable.sha256.clone(),
     };
     let pin = crate::capability::builtin_pins()
         .unwrap()
@@ -167,7 +175,7 @@ fn fixture() -> Fixture {
         programs: vec![ProgramConfig {
             pin_id: pin.id.clone(),
             adapter: executable.clone(),
-            native: executable.clone(),
+            native: native_executable,
             arguments: vec![],
             native_mode: "default".into(),
         }],
@@ -187,6 +195,10 @@ fn fixture() -> Fixture {
         .qualification
         .effective_config_digest = digest;
     let (host, kernel) = crate::runtime_policy::runtime_envelope().unwrap();
+    let executor = std::sync::Arc::new(
+        crate::runtime_config::ExecutableArtifact::observe(&std::env::current_exe().unwrap())
+            .unwrap(),
+    );
     let record = AdapterQualification {
         key: configuration.control.defaults[0]
             .resolved
@@ -194,6 +206,7 @@ fn fixture() -> Fixture {
             .clone(),
         adapter_sha256: executable.sha256.clone(),
         native_sha256: executable.sha256,
+        executor_sha256: executor.sha256.clone(),
         capabilities: vec![Capability::StrictSteer, Capability::PendingApproval],
         host,
         uid: xmsg::client::current_uid(),
@@ -212,9 +225,12 @@ fn fixture() -> Fixture {
     )
     .unwrap()
     .fixture_attributed("worker");
-    service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(
-        RuntimePolicy::fixture(configuration.clone(), vec![record.clone()]),
-    ));
+    service.journal.lock().unwrap().runtime_policy =
+        Some(std::sync::Arc::new(RuntimePolicy::fixture(
+            configuration.clone(),
+            vec![record.clone()],
+            executor.clone(),
+        )));
     service
         .lifecycle(
             peer(),
@@ -272,6 +288,7 @@ fn fixture() -> Fixture {
         service,
         configuration,
         record,
+        executor,
         driver,
     }
 }
@@ -407,9 +424,12 @@ fn emergency_disable_blocks_queued_native_output_even_with_current_qualification
         )
         .unwrap();
     f.record.policy_revision = 2;
-    f.service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(
-        RuntimePolicy::fixture(f.configuration.clone(), vec![f.record.clone()]),
-    ));
+    f.service.journal.lock().unwrap().runtime_policy =
+        Some(std::sync::Arc::new(RuntimePolicy::fixture(
+            f.configuration.clone(),
+            vec![f.record.clone()],
+            f.executor.clone(),
+        )));
     let (result, wire) = submit(&mut f, id, EPOCH);
     assert!(
         wire.is_empty(),
@@ -427,6 +447,48 @@ fn wrong_transport_epoch_cannot_consume_or_submit_queued_content() {
     assert!(
         wire.is_empty(),
         "wrong transport epoch wrote native content"
+    );
+    assert_eq!(state(&f, id), "queued");
+    assert!(result.is_err());
+}
+
+#[test]
+fn adapter_and_native_artifact_drift_each_block_queued_effects() {
+    for native in [false, true] {
+        let mut f = fixture();
+        let id = queue(&f);
+        let program = &f.configuration.programs[0];
+        let file = if native {
+            &program.native.path
+        } else {
+            &program.adapter.path
+        };
+        std::fs::write(file, b"changed artifact").unwrap();
+        let (result, wire) = submit(&mut f, id, EPOCH);
+        assert!(
+            wire.is_empty(),
+            "changed adapter/native artifact emitted a native frame"
+        );
+        assert_eq!(state(&f, id), "queued");
+        assert!(result.is_err());
+    }
+}
+
+#[test]
+fn executor_artifact_record_cannot_carry_to_another_build() {
+    let mut f = fixture();
+    let id = queue(&f);
+    f.record.executor_sha256 = "0".repeat(64);
+    f.service.journal.lock().unwrap().runtime_policy =
+        Some(std::sync::Arc::new(RuntimePolicy::fixture(
+            f.configuration.clone(),
+            vec![f.record.clone()],
+            f.executor.clone(),
+        )));
+    let (result, wire) = submit(&mut f, id, EPOCH);
+    assert!(
+        wire.is_empty(),
+        "qualification from another executor build emitted a native frame"
     );
     assert_eq!(state(&f, id), "queued");
     assert!(result.is_err());
