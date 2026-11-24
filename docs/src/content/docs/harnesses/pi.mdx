@@ -98,3 +98,9 @@ Set `XMSG_ACTIVITY=1` to enable the in-process activity handler in
 remain untouched). Maps `agent_start`/`turn_start` -> `working`,
 `ui_prompt_start`/`end` -> `blocked(input)`/`working`, `agent_settled` ->
 `idle` (`agent_end` is not treated as idle).
+
+## Session capability tags
+
+<Status id="xmsg.session-tags" />
+
+Pi session tags are keyed by a per-registration mint (`mint:<uuid>`), so **daemon restart or re-registration drops tags**. The daemon accepts `{"action":"tag",...}` on `register.sock`; tag tools are not yet exposed in the Pi extension.

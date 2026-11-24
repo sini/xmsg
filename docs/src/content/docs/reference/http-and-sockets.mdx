@@ -53,7 +53,7 @@ curl -s --unix-socket "$sock" "http://localhost/v1/messages/<message_id>/replies
 | Method & Route | Description |
 |---|---|
 | `GET /healthz` | Server health check (`200 OK`); the Unix socket also reports daemon build metadata. |
-| `GET /v1/recipients?name=&node=&kind=&status=&within=` | Lists recipients across this node and reachable peers (`{"recipients": [...], "nodes": [...]}`). Reconciles claims and registrations and can deliver queued work or fork notices. |
+| `GET /v1/recipients?name=&node=&kind=&status=&within=&tag=` | Lists recipients across this node and reachable peers (`{"recipients": [...], "nodes": [...], "total", "truncated", "coverage"?}`). Reconciles claims and registrations and can deliver queued work or fork notices. `tag` is refused (`bad_request`) with `read_only=true` or `status=inactive`. |
 | `GET /v1/recipients?read_only=true` | Returns an explicitly partial, read-only local registration snapshot; no reconciliation, pruning, delivery or federation requests. |
 | `POST /v1/messages` | Sends `{ "to", "text", "from"?, "idempotency_key"? }`. Returns `202 Accepted` with `{ "message_id", "address", "outcome" }`. |
 | `POST /v1/messages/{id}/replies` | Replies to `{id}` with `{ "text", "idempotency_key"? }`. Requires traced session/service caller (or leaf principal). Returns `200 OK` with `{ "seq", "messageId", "createdAt", "replierSessionId", "text", "pushOutcome", "pushedMessageId" }`. |
@@ -287,7 +287,8 @@ service client's `AgentClient` use it:
 
 | Request Frame | Response Frame |
 |---|---|
-| `{"action":"list","name"?,"node"?,"kind"?,"status"?,"within"?,"limit"?}` | `{"status":"ok","recipients":[…],"nodes":[…],"total":N,"truncated":B}` |
+| `{"action":"list","name"?,"node"?,"kind"?,"status"?,"within"?,"tag"?,"limit"?}` | `{"status":"ok","recipients":[…],"nodes":[…],"total":N,"truncated":B,"coverage"?:{…}}` |
+| `{"action":"tag","add"?,"remove"?,"codex_session"?,"codex_thread"?,"codex_turn"?}` | `{"status":"ok","address","tags":[…]}` (<Status id="xmsg.session-tags" />; `session_id` and `as_agent` are refused `bad_request`) |
 | `{"action":"send","to","text","idempotency_key"?,"as_agent"?}` | `{"status":"ok","message_id","address","outcome"}` |
 | `{"action":"reply","message_id","text","idempotency_key"?,"as_agent"?}` | `{"status":"ok","reply":{…}}` |
 | `{"action":"replies","message_id","wait"?,"after"?}` | `{"status":"ok","replies":[…]}` |
@@ -595,6 +596,17 @@ query. The peer update should be deployed together.
 The CLI's detail configuration is a viewer preference. A same-UID HTTP caller
 can request detail independently. Reach hints belong only to the viewer's
 explicitly selected CLI configuration and never appear in this API.
+
+## Session capability tags
+
+<Status id="xmsg.session-tags" />
+
+Registered live sessions can add or remove capability tags (`1..=64` ASCII `[A-Za-z0-9._-]`, up to 8 per registration) on their own session.
+
+- `agent.sock`: `{"action":"tag","add":"orchestrator.proj"}` or `{"action":"tag","remove":"orchestrator.proj"}` (with `codex_session`/`codex_thread`/`codex_turn` for Codex callers; `session_id` and `as_agent` are refused `bad_request`).
+- Pi (`register.sock`): `{"action":"tag","sessionId"?,"add"?,"remove"?}` (foreign `sessionId` is refused `denied`).
+- Multiplexed plugin (`register.sock`): `{"action":"tag","request_id":"1","session":"thread-418","add"?,"remove"?}` (unheld `session` is refused `denied`).
+- Federation v3: `/fed/v2/sessions?v=3` returns `{"v":3,"entries":[...]}` when `v >= 3` and `!read_only` (otherwise the bare array). A dial-out leaf sets `FedListAnswer::Ok.v = 3` only when the queued `list` item asked for `v >= 3`.
 
 ## Session context tags
 

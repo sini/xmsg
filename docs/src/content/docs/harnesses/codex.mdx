@@ -183,3 +183,9 @@ When `xmsg serve --activity` is enabled, Codex's existing hook frames are also
 reduced by the activity engine without changing hook replies. Add optional
 `xmsg activity hook codex` for `PermissionRequest` and `Interrupt`. Input and
 background-task gaps remain unclassified (`unknown(unreported)`).
+
+## Session capability tags
+
+<Status id="xmsg.session-tags" />
+
+Codex session tags are keyed by `codex:<generation>`. Startup recovery after a daemon restart takes a new generation, so **all Codex tags are dropped on daemon restart**; a Codex orchestrator must re-add its tags after every daemon restart. Parking, closing, or resuming also starts a new generation.

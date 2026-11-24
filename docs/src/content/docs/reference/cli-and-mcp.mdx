@@ -20,7 +20,9 @@ These commands use the daemon's HTTP Unix socket, on Linux and macOS. To select 
 runtime-directory default, which includes the macOS fallback.
 
 ```bash
-xmsg list [--node NODE] [--kind service|instance|subagent] [--status live|inactive] [--limit 1..500] [--json]
+xmsg list [--node NODE] [--kind service|instance|subagent] [--status live|inactive] [--tag TAG] [--limit 1..500] [--json]
+xmsg tag add <NAME> [--agent-sock PATH] [--json]
+xmsg tag remove <NAME> [--agent-sock PATH] [--json]
 xmsg send RECIPIENT [TEXT|-] [--from LABEL] [--idempotency-key KEY] [--json]
 xmsg replies MESSAGE_ID [--wait SECONDS] [--json]
 xmsg show MESSAGE_ID [--json]
@@ -393,6 +395,8 @@ retain precedence over derived endpoints.
 ```rust file=<rootDir>/src/main.rs#L461-L489
 ```
 
+- **`xmsg tag add|remove <NAME>` (<Status id="xmsg.session-tags" />):** Connects over `agent.sock` (not `http.sock`), so it only succeeds when run from inside an attested session; outside a session it exits non-zero with `denied`.
+
 ### `xmsg register`
 
 Registers credentials or handles lifecycle hooks for [Antigravity](/harnesses/antigravity/),
@@ -463,7 +467,7 @@ Reads a bounded byte range of attachment `index` (`>= 0`) on `message_id`. Attac
   where `encoding` is `"utf-8"` or `"base64"` and `next` is the next byte offset when more bytes
   remain, or `{ state: "pending" }` while a planned federated fetch is in progress.
 
-### `list(name?, node?, kind?, status?, within?, limit?)`
+### `list(name?, node?, kind?, status?, within?, tag?, limit?)`
 
 Lists recipients the caller may see on this node and every reachable peer:
 
@@ -477,8 +481,9 @@ Lists recipients the caller may see on this node and every reachable peer:
 - **`kind`:** Filter by `"service"`, `"instance"`, or `"subagent"`.
 - **`name`:** Filter by service name or instance label.
 - **`node`:** An exact canonical name or local nickname queries one node. A bare-host selector queries all matching nodes in the current view; see [node selectors](/concepts/addressing/#node-selectors).
+- **`tag` (<Status id="xmsg.session-tags" />):** Exact-match filter on live whole instances' session tags (applied before `total` and `truncated`). Refused (`bad_request`) when `status` is `"inactive"` or `read_only` is true.
 - **`limit` (<Status id="xmsg.recipient-snapshot" />):** Default `50`, maximum `500`; must be at least `1`. Applies once across all nodes after filters. Live entries sort by newest `registered_at`, inactive entries by newest `last_seen`; equal timestamps sort by address.
-- **Returns (<Status id="xmsg.recipient-snapshot" />):** `{ recipients: [{ address, kind, harness?, label?, status, node, user, registered_at | last_seen }], nodes: [{ node, status, detail? }], total, truncated }`. `total` counts matching recipients before the cap. When `truncated` is true, narrow with `name`, `node` or `kind`, or raise `limit`.
+- **Returns (<Status id="xmsg.recipient-snapshot" />):** `{ recipients: [{ address, kind, harness?, label?, status, node, user, registered_at | last_seen, tags? }], nodes: [{ node, status, detail? }], total, truncated, coverage? }`. `total` counts matching recipients before the cap. When `truncated` is true, narrow with `name`, `node`, `kind` or `tag`, or raise `limit`. When `tag` is set, `coverage` reports `{ complete, unanswered, tag_incapable }` (`complete` is true only when both lists are empty).
 
 Planned CLI example: `xmsg list --node alice.laptop --limit 100 --json`. CLI and MCP default to 50. This response change requires updating daemon and clients together.
 
@@ -530,6 +535,14 @@ sender. If you sent it, the reply is a follow-up to the recipient in the same ex
 
 Reads the stored replies to `message_id`. It can wait up to `wait` seconds (`0..=60`) for the
 first reply.
+
+### `tag(add?, remove?)`
+
+<Status id="xmsg.session-tags" />
+
+Adds or removes a capability tag (`1..=64` ASCII `[A-Za-z0-9._-]`, up to 8 per live registration) on your own calling session. Provide exactly one of `add` or `remove`; unknown arguments and `from` are refused.
+
+- **Returns:** `{ status: "ok", address, tags }`.
 
 ### `inbox(wait?, as_agent?)`
 
@@ -760,7 +773,7 @@ Use a normalized repository slug or a keyed or salted repository identifier pref
 a basename for the worktree, and an opaque task identifier if the title is
 private. A branch name or task title may itself contain sensitive information.
 
-Pass `--no-context-tags` to `xmsg serve` to disable collection and publication.
+Pass `--no-context-tags` to `xmsg serve` to disable collection and publication. Neither `--no-context-tags` nor `--context-tags-config` affects [session capability tags](/concepts/addressing/#session-tags).
 Use the repeatable `--context-mask SURFACE:FIELD` option to suppress fields
 before publishing. For example, the following daemon options hide branch names
 from federated lists and omit all context tags from observation export.

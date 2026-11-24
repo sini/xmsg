@@ -128,3 +128,9 @@ Set `XMSG_ACTIVITY=1` to enable the in-process activity handler in
 handlers remain untouched). `post_llm_call` stays `working` unless proven
 turn-final; `on_human_input_request` (`clarify` vs `approval`/`sudo`) resolves
 via `pre_llm_call` or `post_approval_response`.
+
+## Session capability tags
+
+<Status id="xmsg.session-tags" />
+
+Hermes session tags are keyed by a per-registration mint (`mint:<uuid>`) in the daemon's `TEMP` session table, so **daemon restart, detach, or close drops tags**. The daemon accepts `Frame::Tag` on `register.sock`; tag tools are not yet exposed in the Hermes plugin.

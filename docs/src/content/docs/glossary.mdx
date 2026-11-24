@@ -201,7 +201,7 @@ A session as a recipient: a live or parked conversation that has an instance ID.
 
 A sender's own description, such as a session name. xmsg shows it apart from the attested
 address. A label can address a session only when no service has that name and exactly one live
-session has the label. See
+session has the label. Distinct from a capability [session tag](#tag-session). See
 [sender labels](/concepts/addressing/#sender-labels).
 
 ### leaf
@@ -357,6 +357,12 @@ A child turn that a parent session starts. A bound subagent has the address `<P>
 See [delegated subagents](/concepts/sessions-services-subagents/#delegated-subagents-pchildnode).
 
 ## T
+
+### tag (session)
+
+<Status id="xmsg.session-tags" />
+
+A capability name (`1..=64` ASCII `[A-Za-z0-9._-]`, up to 8 per live registration) attached to a whole session with `tag(add?, remove?)` or `xmsg tag add|remove` and filtered by `list(tag)`. Separate from [sender labels](#label) and from self-reported session context tags; never a `send` target. See [session tags](/concepts/addressing/#session-tags).
 
 ### trust domain
 

@@ -439,6 +439,14 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		plannedSince: '2026-11-22',
 		note: 'Staging template and verification procedure; exact approved workflow run, artifact ID, and commit SHA are published in a separate docs update after the approved run exists.',
 	},
+	'xmsg.session-tags': {
+		id: 'xmsg.session-tags',
+		title: 'Session capability tags',
+		owner: 'sini',
+		evidence: [{ path: 'src/session_context/daemon.rs', anchor: 'pub fn add_tag_with_check' }],
+		plannedSince: '2026-11-24',
+		note: 'Optional session-scoped capability tags with v3 federation coverage.',
+	},
 };
 
 export const SIBLING_ALLOWLIST: SiblingAllowlistEntry[] = [

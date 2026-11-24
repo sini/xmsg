@@ -48,6 +48,12 @@ name. xmsg shows it apart from the attested identifier. These rules apply to a l
 
 xmsg always shows the attested `id@node` part whole.
 
+## Session tags
+
+<Status id="xmsg.session-tags" />
+
+A **session tag** is a capability label (`1..=64` ASCII `[A-Za-z0-9._-]`, up to 8 per live registration) that a registered whole session attaches to itself via `tag(add?, remove?)` or `xmsg tag add|remove <NAME>`. Unlike a sender [label](/glossary/#label), a tag is not a display name on delivered messages and is never a `to` address for `send`. Unlike [session context tags](/reference/cli-and-mcp/#session-context-tags), session tags are not masked, have no staleness TTL, and carry a `tags` array on live whole-instance rows in `list` and `/fed/v2/sessions?v=3`.
+
 ## Local resolution order
 
 Each surface that takes a target uses the same five steps to resolve `to`. The surfaces are
@@ -145,3 +151,5 @@ all reachable nodes by default. Filters run before this global limit. Check `tot
 and `truncated` in JSON/MCP output; narrow by name, node or kind when truncated,
 or raise `limit` to at most 500. For example, `xmsg list --kind service --limit 100`
 shows more services while retaining the per-node reachability summary.
+
+With `tag` (<Status id="xmsg.session-tags" />), `list` filters live whole instances by exact tag match before `total` and `truncated`, propagating over federation v3 and returning `coverage: { complete, unanswered, tag_incapable }` (`complete` holds only when both lists are empty). Tags never filter by `user`; callers check each matching row's `user` and `coverage.complete` before acting.

@@ -215,3 +215,9 @@ When `xmsg serve --activity` is enabled, add `xmsg activity hook claude` beside
 
 - **Proven / degraded:** `SessionStart` yields `unknown(unreported)` unless
   proven ready; `Stop` with absent `background_tasks` yields `unknown(unreported)`.
+
+## Session capability tags
+
+<Status id="xmsg.session-tags" />
+
+Claude session tags are keyed by `(id, claude, pid:proc_start:created_at)`, so tags **survive a daemon restart** while the claim remains live. Parking or closing releases the claim and drops its tags; a new claim starts empty.

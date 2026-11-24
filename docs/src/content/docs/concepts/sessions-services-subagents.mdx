@@ -66,6 +66,20 @@ records them in the persistent SQLite `instance_claims` table:
   `410 gone`. When xmsg releases plain `X`, the next process with `X` claims plain `X`. xmsg never
   uses a numeric suffix `~2`, `~3`, … again while its records exist.
 
+### Session tag lifecycle
+
+<Status id="xmsg.session-tags" />
+
+Session capability tags (`tag(add?, remove?)`) are scoped to the live registration key (`reg`). Only Claude session tags survive a daemon restart; every non-Claude orchestrator (including Codex) must re-add its tags after every daemon restart:
+
+| Harness | Daemon restart | Park | Resume or re-register | Close |
+| --- | --- | --- | --- | --- |
+| `claude` | kept | dropped | new claim timestamp, starts empty | dropped |
+| `codex` | dropped (new generation) | dropped | new generation, starts empty | dropped |
+| `agy` | dropped (new mint) | dropped | new mint (including takeover), starts empty | dropped |
+| `pi` | dropped | — | new mint, starts empty | dropped |
+| `opencode` / `hermes` / plugin | dropped (`TEMP` table) | dropped | new mint, starts empty | dropped |
+
 ## Services (`<name>@<node>`)
 
 Headless daemons, bots, guards and bridges register bare service names over `register.sock`.

@@ -106,6 +106,23 @@ a child turn. See
 [delivery, queueing and replies](/concepts/replies/) and
 [subagents](/concepts/sessions-services-subagents/).
 
+### A new agent finds the orchestrator
+
+<Status id="xmsg.session-tags" />
+
+1. **The owner spawns the agent with the tag name and the expected user** in its launch instructions or configuration. The user is copied as `list` shows it in a row's `user` (the holder node's federation user).
+2. The orchestrator's boot, and its restart handling, runs `tag(add: "orchestrator.<project>")`.
+3. The new agent runs the **unfiltered** `list(tag: "orchestrator.<project>")` (with no `node` and no `status`), or `xmsg list --tag …`.
+4. **It sends unattended only when:**
+   - `total == 1`;
+   - `coverage.complete == true`;
+   - the row's `user` equals the expected user it was given.
+
+   It then sends to that row's exact `address`. With `total == 1`, `truncated` is false. (An agent that already knows the writer's exact address from its instructions may send to that address without listing at all.)
+5. **Otherwise it reports** `total`, `truncated`, `coverage` and the rows, then stops or asks. It never sends to the first of several rows, never sends to another user's row, never concludes "no orchestrator" from an incomplete result, and with no expected user given, stops and asks.
+
+A tag never means authority or exclusivity. Holders are visible only within the asker's view. **pi, opencode, hermes and genie pod agents cannot list by tag in this release.**
+
 ## Let a hosted model talk to your local agents
 
 A hosted model, such as one running in ChatGPT, cannot reach the Unix sockets on your machine. The

@@ -166,3 +166,9 @@ When `xmsg serve --activity` is enabled, add `xmsg activity hook agy` for
 (always prints `{}` and exits `0`). `Stop` maps `fullyIdle: false` to
 `working(background)` and `fullyIdle: true` to `idle`; input and permission
 remain unclassified (`never blocked`).
+
+## Session capability tags
+
+<Status id="xmsg.session-tags" />
+
+Antigravity session tags are keyed by a per-registration mint (`mint:<uuid>`). **Daemon restart, eviction, or process takeover** mints a new key and drops previous tags. An `unregistered` session cannot add or remove tags (`denied`).
