@@ -666,18 +666,12 @@ fn real_acp_fixture(scenario: AcpScenario) {
         .unwrap()
         .fixture_attributed("worker");
         service.journal.lock().unwrap().runtime_policy = policy;
-        assert!(matches!(
-            service.journal.lock().unwrap().reserve_launch(1, now),
-            Err(ErrorCode::PreLaunchFailed)
-        ));
-        assert!(matches!(
-            SupervisorController::new(runtime.clone()).start_admitted_at(
-                &service,
-                1,
-                &crate::runtime_process::unix_now
-            ),
-            Err(SupervisorError::Journal(ErrorCode::PreLaunchFailed))
-        ));
+        let reserved = service.journal.lock().unwrap().reserve_launch(1, now);
+        let direct = SupervisorController::new(runtime.clone()).start_admitted_at(
+            &service,
+            1,
+            &crate::runtime_process::unix_now,
+        );
         let effects: i64 = service
             .journal
             .lock()
@@ -693,6 +687,11 @@ fn real_acp_fixture(scenario: AcpScenario) {
             !trace.exists(),
             "terminal failed admission reached the native process"
         );
+        assert!(matches!(reserved, Err(ErrorCode::PreLaunchFailed)));
+        assert!(matches!(
+            direct,
+            Err(SupervisorError::Journal(ErrorCode::PreLaunchFailed))
+        ));
         repeated_outcome = Some(crate::operator::dispatch_once_inner(
             &service,
             &configuration,

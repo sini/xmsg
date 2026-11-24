@@ -575,10 +575,18 @@ fn strict_steer_refuses_idle_and_sends_only_the_no_new_turn_extension() {
         turn_id: "t".into(),
         text: "fixture".into(),
     };
-    assert_eq!(driver.begin(steer()).unwrap_err(), Error::Turn);
+    let idle = driver.begin(steer());
+    assert!(
+        driver.active_turn_id().is_none(),
+        "idle strict steer created a native turn"
+    );
+    assert_eq!(idle.unwrap_err(), Error::Turn);
     prompt(&mut driver, "t");
     let frame = request(driver.begin(steer()).unwrap());
-    assert_eq!(frame.method, "_session/steering");
+    assert_eq!(
+        frame.method, "_session/steering",
+        "strict steering used a prompt fallback instead of injection"
+    );
     assert_eq!(
         frame.params.as_ref().unwrap()["_meta"]["steering"]["idleBehavior"],
         "promptRequired"
@@ -615,13 +623,16 @@ fn steer_reply_cannot_cross_a_finished_turn_or_allow_a_new_prompt() {
     driver
         .observe(reply(active.id, json!({"stopReason":"end_turn"})))
         .unwrap();
-    assert!(driver
-        .begin(Command::Prompt {
-            native_session_id: "native".into(),
-            turn_id: "b".into(),
-            text: "fixture".into()
-        })
-        .is_err());
+    let next = driver.begin(Command::Prompt {
+        native_session_id: "native".into(),
+        turn_id: "b".into(),
+        text: "fixture".into(),
+    });
+    assert!(
+        driver.active_turn_id().is_none(),
+        "unfinished steering crossed the finish/start turn fence"
+    );
+    assert!(next.is_err());
     assert_eq!(
         driver
             .observe(reply(steer.id, json!({"outcome":"injected"})))

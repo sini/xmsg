@@ -554,7 +554,10 @@ fn native_approval_requires_current_explicit_confirmation_and_one_use_option() {
     sent.unwrap();
     let response: serde_json::Value = serde_json::from_slice(&wire).unwrap();
     assert_eq!(response["id"], 77);
-    assert_eq!(response["result"]["outcome"]["optionId"], "once");
+    assert_eq!(
+        response["result"]["outcome"]["optionId"], "once",
+        "allow-once decision was widened on the native wire"
+    );
     let (again, repeated) = respond(&mut f, &replay.decision.unwrap().approval_id, EPOCH, 105);
     assert!(
         repeated.is_empty(),
@@ -1147,6 +1150,47 @@ fn human_credential_without_exact_per_request_confirmation_has_no_decision_effec
         "human credential was treated as per-request human intent"
     );
     assert!(confirmation.is_err());
+}
+
+fn confirmation_mismatch_has_no_effect(
+    change: impl FnOnce(&mut crate::approval::HumanDecisionCall),
+) {
+    let mut f = fixture();
+    let mut call = pending_decision(&mut f);
+    change(&mut call);
+    let result = f.service.native_human(peer(), HUMAN, call);
+    let (decisions, consumed): (i64, i64) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM decisions),(SELECT SUM(consumed) FROM approvals)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (decisions, consumed),
+        (0, 0),
+        "unmatched human confirmation consumed a native request"
+    );
+    assert!(result.is_err());
+}
+#[test]
+fn human_confirmation_id_is_bound_before_native_consumption() {
+    confirmation_mismatch_has_no_effect(|call| {
+        call.confirmation.approval_id = "other-request".into()
+    });
+}
+#[test]
+fn human_confirmation_digest_is_bound_before_native_consumption() {
+    confirmation_mismatch_has_no_effect(|call| call.confirmation.operation_digest = "0".repeat(64));
+}
+#[test]
+fn human_confirmation_freshness_is_checked_before_native_consumption() {
+    confirmation_mismatch_has_no_effect(|call| call.confirmation.confirmed_at = 1);
 }
 
 #[test]
