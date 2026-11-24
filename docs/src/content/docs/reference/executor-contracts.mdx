@@ -1,59 +1,196 @@
 ---
 title: Executor Contracts
-description: The internal library and fake ACP fixtures that precede the optional teams runtime.
+description: The optional executor CLI, lifecycle boundaries, and qualification required before real execution.
 ---
 
 import Status from '../../../components/Status.astro';
 
 <Status id="teams.executor-contracts" />
 
-The standalone `xmsg-executor` library lives in `extensions/executor/`. This
-foundation contains data contracts, bounded ACP framing and test-only fake
-fixtures, a private Unix control handler and a separate journal.
-**Real lifecycle calls fail closed** while caller-attribution qualification
-is unavailable. The metadata-only bridge exists, but enables no runtime tuple
-in this release. There is no installed executable or real harness integration.
-Supervisor subprocess fixtures use a fake ACP backend only. The [teams runtime](/concepts/teams/) remains planned.
-The default xmsg installation does not acquire an executor dependency.
+`xmsg-executor` is a separate package in `extensions/executor/`. It now contains
+an optional broker/supervisor entrypoint, ACP session mappings, a control journal
+and operator commands. The default xmsg package does not install or start it.
 
-## Developer checks
+**Runtime activation is unavailable.** Both caller and adapter qualification
+remain empty/default-deny. There is no configuration flag, record loader or
+sample record that enables a real harness. Fake subprocess and scratch-bus tests
+exercise the mechanism; they do not qualify a model, platform or native effect.
+See [teams](/concepts/teams/) for the boundary between the mechanism and a real pilot.
 
-From a source checkout:
+## Optional executor commands
 
-```sh
-cargo test --manifest-path extensions/executor/Cargo.toml --locked
-cargo clippy --manifest-path extensions/executor/Cargo.toml --locked --all-targets -- -D warnings
-cargo fmt --manifest-path extensions/executor/Cargo.toml -- --check
-```
+These are commands of `xmsg-executor`, not subcommands of `xmsg`. Configuration
+and socket arguments below must be absolute paths.
 
-The package has its own manifest, lockfile and test inventory/census. These checks
-exercise fake peers and contracts; they do not start Claude, Codex or Antigravity
-or qualify a native effect. No adapter package installation or credentials are
-needed for them.
+| Command | Meaning and limit |
+| --- | --- |
+| `check-config --config <file>` | Validate the bounded private owner configuration. Success prints `configuration valid; runtime activation unavailable`; it is not a qualification or launch check. |
+| `serve --config <file>` | Bind the configured lifecycle, owner and human sockets and run the journal-backed broker. Missing qualification still refuses real lifecycle effects. |
+| `call --config <file>` | Read one bounded strict `LifecycleCall` JSON object from stdin and send it on a fresh lifecycle connection. It sends no owner/human credential prefix or claimed principal. |
+| `human --config <file> --session <id> --generation <N>` | Query genuine outstanding native requests through the human credential channel, then require explicit per-request confirmation on the controlling terminal. |
+| `owner-disable --config <file> --expected-revision <N>` | Use the owner credential channel to persist an emergency-disable fence. Success does not confirm that native processes have stopped. There is no restore/enable command. |
+| `content-mcp --socket <path>` | Stdio content sidecar for one owned execution socket. It exposes only text `list`, `send` and `reply`, not lifecycle management. |
 
-## Contract boundary
+The native runtime bootstrap is internal, not an operator activation interface.
+There is no control-MCP facade: a shared MCP process is not proof of the agent
+that issued a lifecycle call. The CLI-first facade preserves the actual kernel
+peer for each connection.
 
-`protocol::ControlRequest` separates `version`, `request_id`, `verb`, `target`,
-`args` and `deadline`. Targets distinguish team, session, execution and turn.
-Dispatch keeps the harness and model separate and carries a locally resolved,
-cross-host-shaped executor/workspace descriptor.
+`call` accepts `{ "request": { ... } }`, with optional `caller_context`. The
+request has `version`, `request_id`, `verb`, `target`, `args` and optional
+`deadline`. Caller context is only an accountable selector for an already
+represented native session/root; it is not identity or qualification. Unknown
+fields, caller-provided principals, role proofs and qualification record IDs are
+refused. See the [non-activating example](/use-cases/#inspect-the-optional-executor-boundary).
 
-The uniform verbs are `dispatch`, `send`, `steer`, `interrupt`, `resume`, `stop`,
-`status`, `result` and `approve`. Best-effort “send, prefer live” is distinct from
-strict steer. Authorization, durable admission, native submission and observed
-effect are separate receipt concepts. The DTOs do not authenticate callers,
-enforce grants, persist a journal or perform these operations.
+## Owner configuration and qualification
 
-Future lifecycle calls require peer UID plus an owner-configured verb/target
-grant tied to the attested caller for that call. There are no per-agent minted
-control credentials. Separate credentials belong only to owner administration
-and the human-decision channel. An ordinary bus message or a field claiming to
-be a parent/human is not a control grant.
+`RuntimeConfig` version 1 separates these owner-selected settings from caller input:
 
-## Pins are not conformance evidence
+- `control`: current grants, profiles and dispatch defaults. A template's optional
+  `lifecycle_verbs` defaults to empty. Explicit delegation binds only its attested
+  holder and exact new session/generation; current dispatch grant and template
+  verb must remain present. Creation and parentage confer nothing.
+- `paths`: the separate journal, lifecycle/owner/human sockets, attribution socket,
+  runtime root and private owner/human credential-file references.
+- `programs` and `workspaces`: fixed adapter/native executable paths and SHA256
+  pins, arguments, native mode, immutable repository/base and approved root.
+  Each configured pin has one unified provider/model to `native_model_id` mapping;
+  actual native mode and model readback is required before prompting.
+- `launch_environment`: a fixed search path and optional real account home.
+  Configured home must match the current UID's canonical passwd home. It does not
+  copy auth state or provide an arbitrary environment/credential map. Native
+  executable overrides come from the pinned paths.
+- `bus`: optional explicit node and agent/registration endpoints; absent by
+  default. `auto_input: true` separately authorizes automatic content input.
 
-`capability::PinManifest` and `fixtures/pins.json` record these planned ACP v1
-tuples:
+The launch-settings digest is not proof of the native tool/hook/account settings.
+Caller qualification and managed-adapter effects use separate records. The daemon
+attests caller identity and call binding; executor caller qualification is an
+extension policy fact, **not daemon-attested qualification**. A record for one
+artifact, mode, host or policy revision confers nothing on another.
+
+Missing caller scope, caller artifact evidence or protected-policy-store evidence
+keeps effects disabled. Private mode bits and the same UID are not an isolation
+guarantee. No request, adapter record or configuration field can supply the
+missing trust property. A diagnostic receipt cannot restore an opaque caller
+reference after restart. There is no old-PID re-query or silent replacement with
+a newer record.
+
+## Lifecycle, receipts and recovery
+
+<Status id="teams.control-journal" />
+
+The verbs are `dispatch`, `send`, `steer`, `interrupt`, `resume`, `stop`, `status`,
+`result` and human-channel `approve`. Lifecycle calls need peer UID, per-call
+attribution and current owner verb/target grants. Owner/human credentials do not
+substitute for that attribution; no per-agent control credential is minted.
+
+Authorization, durable admission, native submission and observed effect are
+separate receipt layers. Replaying the same canonical principal/request ID
+returns historical information, not fresh authority or another execution.
+Different input under the same ID conflicts. Status/result identify provenance;
+a finished ACP turn or a model saying “done” is not a verified completed task.
+
+Strict steer addresses an active generation/turn. It neither starts a new turn
+nor silently queues a prompt. Interrupt concerns the turn and never falls back
+to session stop/kill. A failed or synthetic cancelled response leaves the turn
+uncertain until independently qualified quiescence is observed. Silence and
+background work without a structured ask do not become `needs_human`.
+
+Reconnect observes the **same owned lease**, generation, native session and
+transport epoch, rechecking caller and adapter eligibility before and after the
+probe. It does not initialize a new session, replay a prompt or launch a
+replacement. These paths are fake-tested, not qualified native capabilities.
+`load_stored_conversation` remains unsupported without safe prior-retirement
+proof; an ACP load mapping alone does not establish that proof.
+
+A known failure before any execution row/spawn intent becomes a durable typed
+`pre_launch_failure` with `failed` / `not_attempted`, audit and result. It is
+excluded from broker selection and direct launch leases, so later work can
+proceed without automatically retrying it. Post-spawn uncertainty remains
+`unknown` and consumes its slot; a saved PID is not proof of ownership or death.
+Stop preserves dirty/unowned workspaces and does not claim full descendant
+absence merely because a direct child was reaped.
+
+Before effects, current caller and adapter qualification, grant/profile,
+generation/turn, policy, expiry, epoch and disable state are rechecked. Losing
+eligibility stops new work, including queued input and reconnect/resume. Restart
+does not clear emergency disable or resurrect stale authority. Inspection and
+stop remain separately authorized; disabling does not undo an effect already
+admitted or a bus message already sent.
+
+## Supervisor and workspace boundary
+
+<Status id="teams.supervisor" />
+
+Only a journal-derived lease can launch an execution. An exclusive execution
+lock and durable spawn intent precede the OS effect; receipts supplied by a
+caller are not launch authority. Native startup and client I/O share an absolute
+wall-time bound. Control polling and scheduling remain fair while native output
+is buffered. The bootstrap channel is not inherited by the adapter.
+
+Workspaces bind an owner-approved repository, immutable base and destination
+root. Identity, HEAD and worktree inventory are revalidated before execution;
+preparation does not copy dirty work or harness auth files. Dirty or unowned
+workspaces are preserved on cleanup.
+
+### Runtime socket location
+
+The owner configuration's `paths.runtime_root` selects the short private parent
+for per-execution sockets, separate from state and workspace paths. The entire
+derived socket path is checked before execution-directory/workspace creation,
+including its terminating NUL: macOS permits 104 bytes. An unsafe existing root
+is refused, not chmodded or taken over. Choose a shorter private runtime root
+when the typed error reports a path-capacity refusal; long state/workspace paths
+are not silently relocated.
+
+The internal `OwnerRuntimeConfig::for_user` library chooser prefers a validated
+owner-private `XDG_RUNTIME_DIR` on Linux, or a short per-user directory under
+canonical `/tmp` on macOS/Linux without that variable. This helper is not an
+activation flag or a replacement for the CLI's explicit owner configuration.
+
+## Human-only native requests
+
+Only a genuine request in the driver's live outstanding-permission map can
+create a native ask. The private journal binds its native RPC/operation,
+session/generation/turn, transport epoch, digest, policy, expiry and once-only
+options. Failed tool status, hard denial, messages and constructed events create
+no ask. Interrupt intent invalidates asks immediately; late old-turn callbacks
+cannot reopen them.
+
+The human command reads only the configured separate human credential reference,
+shows the bounded request as data on `/dev/tty`, and requires
+`confirm <approval-id> <number>`. Choices are genuine allow-once/reject-once
+options or cancellation. There is no `--yes`, persistent-allow or approval via
+chat. Querying does not consume a request; recording a decision does not confirm
+the native response effect. The actor rechecks all fences before responding.
+This is a trusted operator-channel contract, not physical-human detection or
+isolation from arbitrary same-UID code. Credentials never belong in prompts,
+arguments, audit records or evidence.
+
+## Managed content tools
+
+<Status id="teams.supervisor" />
+
+Each owned execution uses an ordinary SDK service proxy. The registration stays
+in the supervisor process; a child MCP process cannot inherit that service
+identity. The separate `content-mcp` sidecar advertises only text `list`, `send`
+and `reply`. It has no `inbox`, `replies`, attachments, local-path reads,
+`as_agent`, caller identity nonce, lifecycle, owner or approval operation.
+
+Owner-enabled automatic input commits bounded content before bus ACK, then
+creates an execution/generation/epoch-bound delivery intent. It does not fabricate
+a lifecycle admission from the sender or interpret JSON/prose as control. There
+is no competing inbox/pull consumer. Unknown transports retain queued content
+without retargeting it to a replacement.
+
+Each outgoing call has a fresh bounded policy check immediately before one SDK
+forwarding admission. Later calls are denied after revocation or disable; an
+already admitted in-flight call may finish. No journal lock is held across the
+network wait, and stale authorization is not cached.
+
+## Candidate pins and verification
 
 | Harness | Adapter | Native runtime |
 | --- | --- | --- |
@@ -61,138 +198,31 @@ tuples:
 | Codex | codex-acp 2.7.0 | Codex 0.169.1 |
 | Antigravity | native agy ACP | agy 1.5.10 |
 
-Every real-pin capability starts **unproven**. Capability states are `unproven`,
-`proven` and `not_supported`; evidence classes distinguish `fake_only` from
-`pinned_runtime`. A passing fake fixture is never a native-runtime proof. In
-particular, it establishes neither strict live steering nor cancellation
-quiescence, resume, reviewer isolation or preservation of human-only approval
-subtypes.
+These are a candidate ACP-v1 test matrix. **No real tuple is qualified.** Fake
+fixtures do not prove steering, interrupt quiescence, native resume, human-only
+provenance or reviewer isolation. Codex `humanCommand` provenance may be recorded
+as unsupported for the narrow human-only row; it is never passed/retained or
+usable by a caller requiring that capability. agy mappings remain unproved.
 
-SAFE human-only is the default profile contract. The owner-only UNSAFE profile
-is representable for every pin, with per-protection states `proved_retained`,
-`unknown` and `lost`; the initial fixture records unknown protections. That is
-not an implemented permissions-off launcher or a claim that safeguards survive.
-No agent may select/edit that profile in the future control service.
+SAFE/human-only is the baseline. The future reviewer/overseer and UNSAFE
+administration stages are not enabled here. Budgeting has two layers: an
+owner-provisioned hard provider account/project cap and executor wall-clock/
+content-byte limits. Byte limits are not token limits; no estimator fills that
+gap. Adapter-native token enforcement is proved or unsupported per pin.
 
-`framing::MAX_FRAME_BYTES` bounds frame decoding. Structured native permission
-requests remain distinct from failed tool status and content. All child-supplied
-text and metadata remain data. Harness-owned child observations do not become
-managed dispatches or additional prompts.
+From a source checkout, developer checks need no real adapter/account:
 
-## Fail-closed control journal
+```sh
+extensions/executor/scripts/check.sh
+```
 
-<Status id="teams.control-journal" />
-
-`control::ControlService` is a library boundary, not an installed daemon or a
-new core xmsg endpoint. The embedding application owns each private Unix
-connection. `unix::bind_private_socket` requires a private directory and creates
-a private socket. The lifecycle, owner and human connection handlers are
-separate; each consumes one call. There is no `xmsg-executor serve` command.
-
-The lifecycle path checks the kernel peer UID and requests an attested
-principal for that specific call. The production attestor is deliberately
-unavailable, so a valid same-UID lifecycle request returns
-`attestation_unavailable`; a caller of the wrong UID is rejected. Grant-success
-paths use a sealed, test-only attestor in unit tests. No request field, parent
-relationship, copied bus origin, ambient MCP process or owner/human credential
-substitutes for lifecycle attribution. The opt-in bridge below adds no enabled production tuple.
-
-Owner-configured grants name a principal, verb and target. The journal keeps
-authorization, durable admission and observed effect distinct. The same
-principal/request ID and canonical resolved input replays a **historical**
-receipt, not fresh authority or a second admission. Different input reusing the
-ID conflicts. Generation/turn, current policy/profile and deadline fences apply
-before a new admission. A denied request does not become accepted simply
-because policy changes later.
-
-The executor database is separate from the bus database, in a private directory.
-It records requests, sessions, admissions, policy/profile revisions and audit
-metadata. Fake pending requests test human-decision fencing and single use;
-they are not a real ACP approval relay or a claim that native human-only
-provenance is preserved. The supervisor fixtures launch only owned fake subprocesses. No bus message
-becomes control, and no real harness is invoked.
-
-### Privileged connection contracts
-
-`ControlService::handle_lifecycle_connection` accepts one strict JSON line.
-`handle_owner_connection` and `handle_human_connection` first accept a bounded
-newline-terminated proof, then a strict JSON line. Their separately provisioned
-proofs are distinct, 32–128 bytes without CR/LF; proofs never belong in prompts,
-bus messages, command arguments or logs. This library does not mint or install
-credentials. Same UID alone is not owner or human authority.
-
-Owner policy replacement/profile revocation requires the owner channel, with
-revision checks and atomic configuration validation. Human decisions require
-the human channel and exact still-pending request binding. Their credentials
-do not bypass lifecycle attribution or grant checks. These controls do not
-claim isolation from arbitrary same-UID code.
-
-
-## Supervisor and workspace boundary
-
-<Status id="teams.supervisor" />
-
-The crate-private supervisor foundation consumes journal-derived launch authority, not
-serialized receipts supplied by a caller. Immediately before launch it rechecks
-the current grant, profile, generation and resource budget. A durable launch
-intent and exclusive execution lock prevent concurrent claims or reconnects
-from starting a second execution. Reconnect reconciles identity and progress;
-it does not replay a prompt or silently start a replacement.
-
-An ambiguous or lost owner is `unknown`, with its resource slot still consumed.
-A saved PID alone is neither ownership nor proof of death. Stop applies only
-to an owned process group; it is not an interrupt fallback. In this stage, a
-stop attempt remains `unknown` and retains the slot and workspace: reaping the
-direct backend does not prove that every descendant has stopped. The supervisor
-bounds startup and connection I/O within the execution wall-time budget and
-checks its held backend before reporting it running.
-
-Workspace preparation uses an owner-bound repository, an immutable base and an
-approved destination root. It revalidates repository identity, HEAD and worktree
-inventory before the owned effect. It does not copy a dirty checkout or harness
-authentication files. Cleanup preserves modified work rather than silently
-discarding it.
-
-### Runtime socket location
-
-The internal `OwnerRuntimeConfig::for_user` chooser separates socket storage
-from the journal and workspace. On Linux it prefers an absolute
-`XDG_RUNTIME_DIR` owned by the current UID, mode `0700`, with no symlink
-components. A configured but invalid value is refused. On macOS, or Linux
-without that variable, it selects a short per-user namespace under canonical
-`/tmp`. The namespace is created only after backend availability and genuine
-admission checks; pre-existing unsafe directories are refused rather than
-chmodded or taken over.
-
-`OwnerRuntimeConfig::new(runtime_root, ...)` preserves an explicit root. Before
-creating an execution directory or workspace, the controller checks the entire
-derived Unix socket path against the platform capacity, including space for its
-terminating NUL (104 bytes on macOS). A typed error reports the platform, byte
-count and capacity. Use the short `for_user` chooser or supply a shorter
-`runtime_root`; this stage adds no CLI configuration flag. Long state or
-workspace paths are not themselves shortened.
-
-### Ordinary bus service proxies
-
-Each proxy is an ordinary service recipient registered through the existing
-client SDK, with a compact stable service name. It introduces no recipient kind
-or core role. Incoming message IDs and bounded content are committed before the
-message is acknowledged, so reconnect can recognize a duplicate delivery.
-
-Text, JSON-looking control requests and approval-looking replies remain
-content. Neither their origin nor their wording grants lifecycle, owner or human
-authority. Real-bus fixtures exercise this distinction with a sender and an
-isolated daemon; they do not use the fleet service.
-
-### Recovery example
-
-If a broker disconnects after a fake child starts but before acknowledgement,
-the next connection reconciles the existing execution. If ownership cannot be
-established, the result stays `unknown` and reserves the slot; it does not spawn
-another child to recover availability. Dirty workspace contents remain available
-for inspection. These are fake-backend library checks, not instructions for
-starting a production team.
-
+This builds an explicit scratch daemon and runs the package's own executed
+inventory/census, fake peers and OS subprocess controls. It is not a pilot or
+qualification. A real pilot additionally needs reviewed immutable artifacts and
+runtime envelope, protected caller policy, explicit account/model/time/token
+bounds, no production secrets/data or external task targets, and observed
+stop/cleanup behavior. A scratch repository alone is not isolation. Installing
+xmsg does not install adapters or activate any of these records.
 
 ## Daemon caller-attribution bridge
 

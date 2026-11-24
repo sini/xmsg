@@ -339,3 +339,26 @@ socket, deadline expiry or unknown context must refuse. Repeating the request
 as another principal or sending control-looking bus text is not a recovery
 path. Check the [bridge boundary](/reference/executor-contracts/#daemon-caller-attribution-bridge)
 before treating unavailable as a transport failure.
+
+
+## Optional executor refuses or remains unknown
+
+<Status id="teams.executor-contracts" />
+
+The optional executor is default-off. A passing `check-config` is not an
+activation or native-runtime qualification. Diagnose the reported layer:
+
+| Result | Meaning | Next step |
+| --- | --- | --- |
+| `attestation_unavailable` | The original caller could not be attested; the shipped daemon bridge has no qualified production tuple. | Do not substitute a label, parent claim, bus service identity or role credential. Qualification is a separate reviewed step. |
+| `caller_scope_unproven`, `caller_artifact_unproven`, `caller_policy_store_unproven` | The extension cannot establish the required caller scope/artifact or protection of policy state from that caller. | Keep effects disabled. Private mode bits and the same UID do not establish isolation. Configuration cannot assert the missing property. |
+| `caller_qualification_unavailable`, `caller_reference_unavailable` | The exact current qualification or held admission reference is missing, replaced, expired, revoked or unavailable after restart. | Do not replay queued work under a newer record or query an old PID. Review the exact scope/revision and missing evidence; no activation loader is supplied. |
+| `pre_launch_failure` with `failed` / `not_attempted` | A known terminal failure occurred before an execution row/spawn intent. It is journal evidence, not a native completion. | Inspect the typed code and workspace/configuration deliberately. The old admission is not automatically retried and must not block later work. |
+| `unknown` after cancel, EOF, a write or ownership loss | Native quiescence or full owned-process absence has not been proved. Its slot remains consumed. | Inspect the existing owned execution; do not relaunch or treat a cancelled response as permission to load a stored conversation. |
+| `not_supported` for stored resume or a required capability | The requested effect lacks the required qualified capability/retirement proof. | Use only the reported supported subset; never change harness, mode or host silently. |
+
+An emergency disable persists across restart and policy replacement. A successful
+`owner-disable` reports that native stopping is **not confirmed**; it has no
+restore/enable command. Existing in-flight content calls admitted before
+revocation may finish, while later calls are denied. See
+[executor receipts and recovery](/reference/executor-contracts/#lifecycle-receipts-and-recovery).

@@ -7,26 +7,27 @@ import Status from '../../../components/Status.astro';
 
 <Status id="teams.local-parity" />
 
-Teams is a planned optional executor extension. A Claude parent will be able to
-work with independent Codex and Antigravity teammates on one host. Ordinary xmsg
-recipients will continue to work without an executor or a prescribed workflow.
+Teams is an optional, default-off executor extension for a Claude parent with
+independent Codex and Antigravity teammates on one host. Ordinary xmsg recipients
+work without an executor or a prescribed workflow.
 
-The foundation supplies [internal contracts, a fake ACP test harness and a
-fail-closed control journal and fake-backend supervisor](/reference/executor-contracts/). There is no runtime
-launcher, team CLI or team MCP tool. The library control boundary denies real
-lifecycle calls as `attestation_unavailable` while the bridge has no qualified production runtime tuple. No real harness capability is qualified by fake
-tests. Installing xmsg does not start an executor.
+The [executor mechanism](/reference/executor-contracts/) now includes an optional
+broker/supervisor entrypoint, ACP mappings, journal-backed lifecycle controls and
+CLI commands. **Real execution remains unavailable:** caller and adapter
+qualification are empty/default-deny, and no configuration switch enables them.
+No real harness capability or parity pilot is qualified by fake tests. Installing
+xmsg does not install adapters, start an executor or provision credentials.
 
 ## Messages and control
 
-A message is content, never management authority. A future typed control service
-will expose dispatch, send, steer, interrupt, resume, stop, status and result.
+A message is content, never management authority. The typed control contract
+separates dispatch, send, steer, interrupt, resume, stop, status and result.
 Lifecycle calls require the local peer UID and an owner-configured verb/target
 grant bound to the attested caller for that call. Parentage and text that looks
 like a command confer no grant; no per-agent control credentials are minted.
 Owner administration and human approval decisions use separate credentials.
 
-The planned meanings are precise:
+The meanings are precise:
 
 - **send** queues content for the next eligible turn. **Send, prefer live** is
   explicitly best effort, with a deadline, generation and next-turn allowance.
@@ -35,8 +36,9 @@ The planned meanings are precise:
 - **interrupt** affects the turn, not the session. Submitted, confirmed,
   already-ended, unknown and unsupported are different outcomes; it has no
   stop/kill fallback.
-- **resume** distinguishes reconnecting to a surviving execution from loading a
-  stored conversation. Reconnect reconciles rather than spawning twice.
+- **resume** distinguishes reconnecting to the same owned execution from loading
+  a stored conversation. Reconnect never initializes or launches a replacement.
+  Stored loading remains unsupported without safe prior-retirement proof.
 - **stop** concerns the owned runtime. It is separately authorized from interrupt.
 
 Dispatch keeps harness and model separate. Its descriptor names an executor,
@@ -46,7 +48,7 @@ report unsupported placement rather than switch host or harness.
 
 ## Approvals and trust profiles
 
-The planned product default is SAFE with human-only approval. Only a genuinely
+The product baseline is SAFE with human-only approval. Only a genuinely
 pending structured ACP permission request can enter review. A native hard denial
 stays terminal; failed tool status and ordinary messages never become approval
 requests. A known human-mandatory request remains human-only.
@@ -83,7 +85,7 @@ Explicit mixed-harness teammates have independent managed identities.
 
 <Status id="teams.supervisor" />
 
-The supervisor foundation keeps execution ownership separate from the parent
+The supervisor keeps execution ownership separate from the parent
 conversation. Launch claims come from the durable control journal and are
 rechecked before use. Reconnecting observes the same execution; an uncertain
 owner remains unknown and holds its slot instead of triggering another spawn.
@@ -91,8 +93,10 @@ owner remains unknown and holds its slot instead of triggering another spawn.
 Workspaces are prepared from an immutable base under owner-approved roots and
 revalidated before use. Stopping does not discard changed work. Bus membership
 uses ordinary service recipients: incoming messages become durable content,
-never control or approval authority. Only fake ACP subprocesses are exercised
-at this stage; a real mixed-harness runtime remains planned.
+never control or approval authority. An explicitly configured content sidecar
+has only text `list`, `send` and `reply`; it does not expose lifecycle or human
+credentials. Owner-enabled automatic input is the sole inbound content consumer.
+Only fake ACP subprocesses have been exercised; no real tuple is qualified.
 
 
 ## Caller attribution is separate from bus identity
@@ -111,3 +115,32 @@ ownership and child inheritance checks. The bridge installs no team runtime,
 adapter or model. The
 [bridge reference](/reference/executor-contracts/#daemon-caller-attribution-bridge)
 describes the qualification and shared-UID limits.
+
+
+## Qualification is a separate decision
+
+Caller qualification and adapter effects are independent. Core attests the
+principal and per-call binding; the optional executor owns caller policy and
+must not describe it as daemon-attested qualification. A private same-UID store
+is not automatically protected from its caller. Missing scope, protected-store
+or artifact evidence therefore leaves effects disabled.
+
+Every new native effect, queued input, human response and reconnect rechecks
+current eligibility and its exact record revision, grant, generation/turn,
+epoch and expiry. Replacement or loss does not silently substitute a newer
+record. A task may outlive its parent, but it does not re-query an old PID to
+recover authority. Emergency disable is durable across restart; it has no
+restore/enable command and does not itself confirm native stop.
+
+The parent facade is CLI-first, with one actual socket peer per call. A shared
+MCP server cannot claim ambient parent authority. The optional content MCP
+sidecar is not a control facade. The [command reference](/reference/executor-contracts/#optional-executor-commands)
+describes the separate lifecycle, owner and human channels.
+
+A real parity pilot needs a reviewed host/runtime envelope and per-capability
+outcomes, no production secrets/data or external task targets, no ambient
+control grants, explicit models/accounts and budgets, and observed stop/cleanup.
+The owner supplies a hard provider account/project cap; the executor separately
+bounds wall time and content bytes. Native per-session token control is proved
+or unsupported per adapter, never estimated from bytes. Codex's unproved
+human-mandatory subtype is unsupported for the narrow human-only row, not passed.
