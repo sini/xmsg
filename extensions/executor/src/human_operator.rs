@@ -8,7 +8,7 @@ use crate::{
 };
 use std::{
     io::{BufRead, BufReader, Write},
-    os::fd::{AsFd, AsRawFd},
+    os::fd::AsRawFd,
     time::{Duration, Instant},
 };
 
@@ -75,11 +75,26 @@ pub(crate) fn request<B: serde::Serialize, R: serde::de::DeserializeOwned>(
     proof: &[u8],
     body: &B,
 ) -> Result<R, ErrorCode> {
+    exchange(socket, Some(proof), body)
+}
+
+pub(crate) fn lifecycle_request(
+    socket: &std::path::Path,
+    call: &crate::control::LifecycleCall,
+) -> Result<ControlReply, ErrorCode> {
+    exchange(socket, None, call)
+}
+
+fn exchange<B: serde::Serialize, R: serde::de::DeserializeOwned>(
+    socket: &std::path::Path,
+    proof: Option<&[u8]>,
+    body: &B,
+) -> Result<R, ErrorCode> {
     use xmsg::client::caller_attribution as wire;
     wire::private_socket(socket, xmsg::client::current_uid()).map_err(failure)?;
     let expires = Instant::now() + Duration::from_secs(2);
     let mut stream = wire::connect(socket, expires).map_err(failure)?;
-    if wire::socket_peer(stream.as_fd()).map_err(failure)?.0 != xmsg::client::current_uid() {
+    if crate::unix::peer(&stream)?.uid != xmsg::client::current_uid() {
         return Err(ErrorCode::PeerUid);
     }
     let mut bounded = crate::supervisor::DeadlineIo::new(&mut stream, expires).map_err(failure)?;
@@ -87,8 +102,10 @@ pub(crate) fn request<B: serde::Serialize, R: serde::de::DeserializeOwned>(
     if encoded.len() + 1 > crate::framing::MAX_FRAME_BYTES {
         return Err(ErrorCode::MalformedFrame);
     }
-    bounded.write_all(proof).map_err(failure)?;
-    bounded.write_all(b"\n").map_err(failure)?;
+    if let Some(proof) = proof {
+        bounded.write_all(proof).map_err(failure)?;
+        bounded.write_all(b"\n").map_err(failure)?;
+    }
     bounded.write_all(&encoded).map_err(failure)?;
     bounded.write_all(b"\n").map_err(failure)?;
     let bytes = crate::unix::line(

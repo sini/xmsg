@@ -194,6 +194,8 @@
   "lifecycle::tests::transport_loss_keeps_turn_and_execution_unknown_without_replay",
   "lifecycle::tests::wedged_native_writer_releases_journal_for_owner_disable_and_status",
   "lifecycle::tests::wrong_transport_epoch_cannot_consume_or_submit_queued_content",
+  "lifecycle_client::tests::cli_call_is_strict_and_cannot_claim_identity_credentials_or_qualification",
+  "lifecycle_client::tests::lifecycle_request_has_no_credential_or_identity_prefix",
   "membership::tests::ack_failure_keeps_committed_content_for_safe_redelivery",
   "membership::tests::bounded_content_is_refused_before_storage_or_ack",
   "membership::tests::changed_payload_with_same_identity_is_not_acknowledged",
