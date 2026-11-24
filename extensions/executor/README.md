@@ -14,6 +14,8 @@ Each outgoing managed content call gets a fresh journal admission check against 
 
 ## Contracts
 
+The staged credential-free `call --config <file>` command reads one bounded `LifecycleCall` JSON object from stdin. It sends no role proof or caller identity prefix: lifecycle authorization comes from the actual kernel peer of that connection plus the configured attestor and current owner grants. `caller_context` is only an accountable selector for an already represented native session/root, never an identity, registration or qualification claim. There is no public control MCP endpoint in this slice.
+
 `runtime_config::RuntimeConfig` describes owner-selected program paths and SHA256 pins, native modes, workspace bindings, service paths and separate credential-file references. Its bounded private-file reader and artifact verification do not execute programs or qualify runtime capabilities. Caller requests cannot replace those settings. Runtime activation remains unavailable until separately reviewed qualification records exist.
 
 Each configured pin has one explicit unified provider/model mapping to its exact `native_model_id`. All templates selecting that pin must match the mapping. The ACP driver must apply and observe that actual native ID before a prompt; an empty acknowledgement or ambient default is insufficient. The launch-settings digest is not evidence of native effective tool/hook inventory.

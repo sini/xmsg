@@ -16,6 +16,7 @@ mod human_operator;
 pub mod launch_environment;
 #[allow(dead_code)]
 mod lifecycle;
+mod lifecycle_client;
 pub mod operator;
 pub mod protocol;
 pub mod runtime_config;

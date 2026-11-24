@@ -14,6 +14,7 @@ use std::{
 
 #[derive(Debug, PartialEq, Eq)]
 enum Invocation {
+    Call(PathBuf),
     Serve(PathBuf),
     Check(PathBuf),
     Runtime {
@@ -36,6 +37,13 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, Er
     let args: Vec<OsString> = arguments.into_iter().collect();
     if args.len() == 1 && args[0] == "--version" {
         return Ok(Invocation::Version);
+    }
+    if args.len() == 3 && args[0] == "call" && args[1] == "--config" {
+        let file = PathBuf::from(&args[2]);
+        if !file.is_absolute() {
+            return Err(ErrorCode::MalformedFrame);
+        }
+        return Ok(Invocation::Call(file));
     }
     if args.len() == 5
         && args[0] == "owner-disable"
@@ -125,6 +133,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, Er
 
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), ErrorCode> {
     match parse(arguments)? {
+        Invocation::Call(file) => crate::lifecycle_client::run(&file),
         Invocation::Version => {
             println!("xmsg-executor {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -351,6 +360,18 @@ mod tests {
     }
     #[test]
     fn entrypoints_refuse_activation_flags_and_unowned_standard_descriptors() {
+        assert!(matches!(
+            parse(args(&["call", "--config", "/fixture/config"])),
+            Ok(Invocation::Call(_))
+        ));
+        assert!(parse(args(&[
+            "call",
+            "--config",
+            "/fixture/config",
+            "--principal",
+            "owner"
+        ]))
+        .is_err());
         assert!(matches!(
             parse(args(&[
                 "owner-disable",
