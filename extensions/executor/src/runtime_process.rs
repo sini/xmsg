@@ -70,6 +70,16 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
     #[cfg(not(test))]
     let policy = crate::runtime_policy::RuntimePolicy::reviewed(configuration.as_ref().clone())?;
     let mut journal = Journal::open_existing(&configuration.paths.journal)?;
+    #[cfg(test)]
+    if matches!(
+        &manifest.backend,
+        Backend::Acp {
+            fixture_records: Some(_),
+            ..
+        }
+    ) {
+        policy.callers.restore_fixture(&journal.db)?;
+    }
     journal.runtime_policy = Some(std::sync::Arc::new(policy));
     let selected = journal.validate_bootstrap(
         admission,
@@ -253,6 +263,14 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
         binding,
         expires,
         content: content.take(),
+        #[cfg(test)]
+        refresh_caller_fixtures: matches!(
+            &manifest.backend,
+            Backend::Acp {
+                fixture_records: Some(_),
+                ..
+            }
+        ),
     };
     crate::supervisor::frame_until(
         &mut startup,
@@ -290,10 +308,16 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
             let frame = native_frame(&mut reader, expires)?;
             #[cfg(test)]
             let is_end = fixture_batch_end(&frame);
+            #[cfg(test)]
+            let is_injected = fixture_steer_observed(&frame);
             session.observe(frame)?;
             #[cfg(test)]
             if is_end {
                 fixture_notice(&manifest, b'E', false, expires)?;
+            }
+            #[cfg(test)]
+            if is_injected {
+                fixture_notice(&manifest, b'I', false, expires)?;
             }
         }
         let mut ready = [
@@ -326,10 +350,16 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
             let frame = native_frame(&mut reader, expires)?;
             #[cfg(test)]
             let is_end = fixture_batch_end(&frame);
+            #[cfg(test)]
+            let is_injected = fixture_steer_observed(&frame);
             session.observe(frame)?;
             #[cfg(test)]
             if is_end {
                 fixture_notice(&manifest, b'E', false, expires)?;
+            }
+            #[cfg(test)]
+            if is_injected {
+                fixture_notice(&manifest, b'I', false, expires)?;
             }
         }
         if ready[1].revents & libc::POLLIN != 0 {
@@ -349,6 +379,11 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
 #[cfg(test)]
 fn fixture_batch_end(frame: &Frame) -> bool {
     matches!(frame,Frame::Notification(n) if n.params.as_ref().is_some_and(|p|p["update"]["content"]["text"]=="batch-end"))
+}
+
+#[cfg(test)]
+fn fixture_steer_observed(frame: &Frame) -> bool {
+    matches!(frame,Frame::Success(reply) if reply.result["outcome"]=="injected")
 }
 
 #[cfg(test)]
@@ -554,6 +589,8 @@ struct Session {
     binding: NativeBinding,
     expires: Instant,
     content: Option<RuntimeContent>,
+    #[cfg(test)]
+    refresh_caller_fixtures: bool,
 }
 
 struct RuntimeContent {
@@ -593,6 +630,18 @@ impl RuntimeContent {
     }
 }
 impl Session {
+    #[cfg(test)]
+    fn refresh_fixture_callers(&self) -> Result<(), SupervisorError> {
+        if self.refresh_caller_fixtures {
+            self.journal
+                .runtime_policy
+                .as_deref()
+                .ok_or(ErrorCode::NotSupported)?
+                .callers
+                .restore_fixture(&self.journal.db)?;
+        }
+        Ok(())
+    }
     fn start_content(&mut self) -> Result<(), SupervisorError> {
         let Some(content) = &mut self.content else {
             return Ok(());
@@ -744,6 +793,8 @@ impl Session {
         Ok(())
     }
     fn schedule(&mut self) -> Result<(), SupervisorError> {
+        #[cfg(test)]
+        self.refresh_fixture_callers()?;
         let running:bool=self.journal.db.query_row("SELECT EXISTS(SELECT 1 FROM executions WHERE session_id=?1 AND generation=?2 AND state='running')",rusqlite::params![self.binding.identity.session_id,i64::try_from(self.binding.identity.generation).map_err(|_|ErrorCode::Storage)?],|r|r.get(0)).map_err(|_|ErrorCode::Storage)?;
         if !running {
             return Ok(());
@@ -779,6 +830,8 @@ impl Session {
         Ok(())
     }
     fn control(&mut self, mut stream: UnixStream) -> Result<bool, SupervisorError> {
+        #[cfg(test)]
+        self.refresh_fixture_callers()?;
         if crate::unix::peer(&stream)?.uid != xmsg::client::current_uid() {
             return Err(ErrorCode::PeerUid.into());
         }

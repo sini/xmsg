@@ -54,7 +54,26 @@ fn fixture() -> Fixture {
     fixture_with_bus(false)
 }
 
+fn replace_adapter_policy(f: &Fixture) -> std::sync::Arc<RuntimePolicy> {
+    let current = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .runtime_policy
+        .clone()
+        .unwrap();
+    std::sync::Arc::new(current.fixture_with_adapter_records(
+        f.configuration.clone(),
+        vec![f.record.clone()],
+        f.executor.clone(),
+    ))
+}
+
 fn fixture_with_bus(auto_input: bool) -> Fixture {
+    fixture_with_options(auto_input, i64::MAX)
+}
+fn fixture_with_options(auto_input: bool, caller_expiry: i64) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = |name: &str| dir.path().join(name);
@@ -240,12 +259,16 @@ fn fixture_with_bus(auto_input: bool) -> Fixture {
     .unwrap()
     .fixture_attributed("worker")
     .fixture_time(103);
-    service.journal.lock().unwrap().runtime_policy =
-        Some(std::sync::Arc::new(RuntimePolicy::fixture(
-            configuration.clone(),
-            vec![record.clone()],
-            executor.clone(),
-        )));
+    let policy = std::sync::Arc::new(RuntimePolicy::fixture(
+        configuration.clone(),
+        vec![record.clone()],
+        executor.clone(),
+    ));
+    policy
+        .callers
+        .fixture_expiry_before_admission(caller_expiry)
+        .unwrap();
+    service.journal.lock().unwrap().runtime_policy = Some(policy);
     service
         .lifecycle(
             peer(),
@@ -646,6 +669,9 @@ fn failed_tool_update_never_creates_pending_human_authority() {
 }
 
 fn submit(f: &mut Fixture, id: i64, epoch: &str) -> (Result<bool, ErrorCode>, Vec<u8>) {
+    submit_at(f, id, epoch, 102)
+}
+fn submit_at(f: &mut Fixture, id: i64, epoch: &str, at: i64) -> (Result<bool, ErrorCode>, Vec<u8>) {
     use std::io::Read;
     let (mut writer, mut reader) = std::os::unix::net::UnixStream::pair().unwrap();
     let result = {
@@ -658,7 +684,7 @@ fn submit(f: &mut Fixture, id: i64, epoch: &str) -> (Result<bool, ErrorCode>, Ve
             id,
             &mut f.driver,
             epoch,
-            &|| Ok(102),
+            &|| Ok(at),
             &mut io,
         )
     };
@@ -803,12 +829,8 @@ fn queued_bus_content_survives_eligibility_loss_without_native_effect_or_relaunc
     finish_initial_brief(&mut f);
     commit_bus_content(&f);
     f.record.revoked = true;
-    let policy = RuntimePolicy::fixture(
-        f.configuration.clone(),
-        vec![f.record.clone()],
-        f.executor.clone(),
-    );
-    f.service.journal.lock().unwrap().runtime_policy = Some(std::sync::Arc::new(policy));
+    let policy = replace_adapter_policy(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(policy);
     let (result, wire) = submit_bus_content(&mut f);
     let (content,intents,executions):(i64,i64,i64)=f.service.journal.lock().unwrap().db.query_row("SELECT (SELECT COUNT(*) FROM execution_content),(SELECT COUNT(*) FROM native_content),(SELECT COUNT(*) FROM executions)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
     assert!(
@@ -1148,12 +1170,8 @@ fn emergency_disable_blocks_queued_native_output_even_with_current_qualification
         )
         .unwrap();
     f.record.policy_revision = 2;
-    f.service.journal.lock().unwrap().runtime_policy =
-        Some(std::sync::Arc::new(RuntimePolicy::fixture(
-            f.configuration.clone(),
-            vec![f.record.clone()],
-            f.executor.clone(),
-        )));
+    let policy = replace_adapter_policy(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(policy);
     let (result, wire) = submit(&mut f, id, EPOCH);
     assert!(
         wire.is_empty(),
@@ -1258,12 +1276,8 @@ fn executor_artifact_record_cannot_carry_to_another_build() {
     let mut f = fixture();
     let id = queue(&f);
     f.record.executor_sha256 = "0".repeat(64);
-    f.service.journal.lock().unwrap().runtime_policy =
-        Some(std::sync::Arc::new(RuntimePolicy::fixture(
-            f.configuration.clone(),
-            vec![f.record.clone()],
-            f.executor.clone(),
-        )));
+    let policy = replace_adapter_policy(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(policy);
     let (result, wire) = submit(&mut f, id, EPOCH);
     assert!(
         wire.is_empty(),
@@ -1271,6 +1285,195 @@ fn executor_artifact_record_cannot_carry_to_another_build() {
     );
     assert_eq!(state(&f, id), "queued");
     assert!(result.is_err());
+}
+
+#[test]
+fn owner_caller_record_revocation_blocks_queued_frames_without_adapter_revision_drift() {
+    let mut f = fixture();
+    let id = queue(&f);
+    let command = AdminCommand::RevokeCallerQualification {
+        request_id: "revoke-caller".into(),
+        expected_revision: 1,
+        record_id: "fixture-caller".into(),
+        record_revision: 1,
+    };
+    assert!(matches!(
+        f.service.admin(peer(), HUMAN, command.clone(), 102),
+        Err(ErrorCode::CredentialDenied)
+    ));
+    assert_eq!(
+        f.service
+            .admin(peer(), OWNER, command.clone(), 102)
+            .unwrap(),
+        1
+    );
+    assert_eq!(f.service.admin(peer(), OWNER, command, 102).unwrap(), 1);
+    let policy = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .runtime_policy
+        .clone()
+        .unwrap();
+    assert!(
+        policy
+            .require(&f.configuration.control.defaults[0].resolved, 1, 102, false)
+            .is_ok(),
+        "caller-only revocation changed adapter eligibility"
+    );
+    let (result, wire) = submit(&mut f, id, EPOCH);
+    let (revocations,decisions):(i64,i64)=f.service.journal.lock().unwrap().db.query_row("SELECT (SELECT COUNT(*) FROM caller_revocations),(SELECT COUNT(*) FROM owner_record_requests)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert!(
+        wire.is_empty(),
+        "revoked caller qualification emitted a queued native frame"
+    );
+    assert_eq!((revocations, decisions), (1, 1));
+    assert_eq!(
+        result.unwrap_err(),
+        ErrorCode::CallerQualificationUnavailable
+    );
+}
+
+#[test]
+fn caller_expiry_blocks_frame_while_adapter_turn_and_request_deadlines_remain_valid() {
+    for now in [102, 121] {
+        let mut f = fixture_with_options(false, 120);
+        let id = queue(&f);
+        let policy = f
+            .service
+            .journal
+            .lock()
+            .unwrap()
+            .runtime_policy
+            .clone()
+            .unwrap();
+        assert!(policy
+            .require(&f.configuration.control.defaults[0].resolved, 1, now, false)
+            .is_ok());
+        let (result, wire) = submit_at(&mut f, id, EPOCH, now);
+        if now == 102 {
+            assert!(!wire.is_empty());
+            assert!(result.unwrap());
+        } else {
+            assert!(
+                wire.is_empty(),
+                "expired caller record emitted a native frame under valid adapter/deadline facts"
+            );
+            assert_eq!(state(&f, id), "queued");
+            assert_eq!(
+                result.unwrap_err(),
+                ErrorCode::CallerQualificationUnavailable
+            );
+        }
+    }
+}
+
+#[test]
+fn replaced_caller_record_cannot_silently_requalify_old_admission() {
+    let mut f = fixture();
+    let id = queue(&f);
+    let policy = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .runtime_policy
+        .clone()
+        .unwrap();
+    policy.callers.fixture_replace_reference_record(id).unwrap();
+    let (result, wire) = submit(&mut f, id, EPOCH);
+    assert!(
+        wire.is_empty(),
+        "replacement caller record silently authorized the old admission"
+    );
+    assert_eq!(state(&f, id), "queued");
+    assert_eq!(
+        result.unwrap_err(),
+        ErrorCode::CallerQualificationUnavailable
+    );
+}
+
+#[test]
+fn diagnostic_caller_receipts_do_not_restore_lost_opaque_authority_on_replay() {
+    let mut f = fixture();
+    let id = queue(&f);
+    let policy = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .runtime_policy
+        .clone()
+        .unwrap();
+    policy.callers.fixture_forget_references();
+    let (result, wire) = submit(&mut f, id, EPOCH);
+    let saved: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM caller_receipts", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        wire.is_empty(),
+        "diagnostic caller JSON was treated as opaque authority"
+    );
+    assert_eq!(saved, 2);
+    assert_eq!(result.unwrap_err(), ErrorCode::CallerReferenceUnavailable);
+    let request: ControlRequest = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT payload FROM admissions WHERE id=?1", [id], |r| {
+            r.get::<_, String>(0)
+        })
+        .map(|raw| serde_json::from_str(&raw).unwrap())
+        .unwrap();
+    let replay = f.service.lifecycle(peer(), request, 103).unwrap();
+    assert!(replay.replayed && replay.historical);
+    let (result, wire) = submit(&mut f, id, EPOCH);
+    assert!(
+        wire.is_empty(),
+        "historical replay requalified a lost caller reference"
+    );
+    assert_eq!(result.unwrap_err(), ErrorCode::CallerReferenceUnavailable);
+}
+
+#[test]
+fn contradictory_persisted_caller_binding_blocks_otherwise_valid_native_effect() {
+    let mut f = fixture();
+    let id = queue(&f);
+    {
+        let journal = f.service.journal.lock().unwrap();
+        let raw: String = journal
+            .db
+            .query_row(
+                "SELECT receipt FROM caller_receipts WHERE admission_id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut receipt: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        receipt["context"]["binding"]["input_digest"] = "0".repeat(64).into();
+        journal
+            .db
+            .execute(
+                "UPDATE caller_receipts SET receipt=?1 WHERE admission_id=?2",
+                rusqlite::params![serde_json::to_string(&receipt).unwrap(), id],
+            )
+            .unwrap();
+    }
+    let (result, wire) = submit(&mut f, id, EPOCH);
+    assert!(
+        wire.is_empty(),
+        "contradictory admitted caller binding emitted a native frame"
+    );
+    assert_eq!(state(&f, id), "queued");
+    assert_eq!(result.unwrap_err(), ErrorCode::AttestationBinding);
 }
 
 #[test]

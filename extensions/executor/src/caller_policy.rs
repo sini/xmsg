@@ -397,6 +397,20 @@ impl CallerEligibility {
         Ok(())
     }
     #[cfg(test)]
+    pub(crate) fn fixture_expiry_before_admission(
+        &mut self,
+        expires_at: i64,
+    ) -> Result<(), MissingTrustProperty> {
+        self.protected()?;
+        if expires_at <= 0 {
+            return Err(MissingTrustProperty::ExactCallerQualification);
+        }
+        for record in &mut self.records {
+            record.expires_at = expires_at;
+        }
+        Ok(())
+    }
+    #[cfg(test)]
     pub(crate) fn fixture_replace(
         &mut self,
         reference: &CallerRecordReference,

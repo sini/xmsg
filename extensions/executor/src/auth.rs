@@ -117,6 +117,13 @@ pub(crate) fn principal(
     Ok(principal)
 }
 impl TrustedPrincipal {
+    #[cfg(test)]
+    pub(crate) fn fixture_without_attestor_context(mut self) -> Self {
+        self.authority_stamp = None;
+        self.attestor_epoch = None;
+        self.context_digest = None;
+        self
+    }
     pub(crate) fn id(&self) -> &str {
         &self.id
     }
@@ -201,9 +208,16 @@ pub(crate) mod fake {
             Ok(TrustedPrincipal {
                 id: self.principal.clone(),
                 binding,
-                authority_stamp: None,
-                attestor_epoch: None,
-                context_digest: None,
+                authority_stamp: Some(Box::new(xmsg::client::caller_attribution::AuthorityStamp {
+                    source: "claude".into(),
+                    matched_pid: 44,
+                    matched_start: "fixture-start".into(),
+                    registration_digest: hex::encode(Sha256::digest(self.principal.as_bytes())),
+                    root_generation: None,
+                    child_generation: None,
+                })),
+                attestor_epoch: Some("a".repeat(32)),
+                context_digest: Some("b".repeat(64)),
             })
         }
     }

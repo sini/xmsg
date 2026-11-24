@@ -83,6 +83,8 @@ impl Journal {
           CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,principal TEXT,request_id TEXT NOT NULL,event TEXT NOT NULL,at INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,generation INTEGER NOT NULL,turn_id TEXT NOT NULL,operation_digest TEXT NOT NULL,policy_revision TEXT NOT NULL,expires_at INTEGER NOT NULL,option_id TEXT NOT NULL,consumed INTEGER NOT NULL DEFAULT 0);").map_err(storage)?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS runtime_control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),disabled INTEGER NOT NULL CHECK(disabled IN(0,1))); INSERT OR IGNORE INTO runtime_control VALUES(1,0);").map_err(storage)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS caller_receipts(admission_id INTEGER PRIMARY KEY,receipt TEXT NOT NULL); CREATE TABLE IF NOT EXISTS caller_revocations(record_id TEXT NOT NULL,record_revision INTEGER NOT NULL,revoked_at INTEGER NOT NULL,PRIMARY KEY(record_id,record_revision));").map_err(storage)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS owner_record_requests(request_id TEXT PRIMARY KEY,input_digest TEXT NOT NULL,response_revision INTEGER NOT NULL);").map_err(storage)?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS session_delegations(principal TEXT NOT NULL,session_id TEXT NOT NULL,generation INTEGER NOT NULL,verb TEXT NOT NULL,team_id TEXT NOT NULL,profile_id TEXT NOT NULL,policy_revision INTEGER NOT NULL,dispatch_admission INTEGER NOT NULL,PRIMARY KEY(principal,session_id,generation,verb));").map_err(storage)?;
         db.execute(
             "INSERT OR IGNORE INTO configuration VALUES(1,?1,?2)",
@@ -108,7 +110,7 @@ impl Journal {
         request: &ControlRequest,
         now: i64,
     ) -> Result<ControlReply, ErrorCode> {
-        self.admit_clock(principal, input, request, &|| Ok(now))
+        self.admit_clock(principal, input, request, &|| Ok(now), None)
     }
     pub(crate) fn admit_bound(
         &mut self,
@@ -118,12 +120,67 @@ impl Journal {
         clock: &dyn Fn() -> i64,
         deadline: std::time::Instant,
     ) -> Result<ControlReply, ErrorCode> {
-        self.admit_clock(principal, input, request, &|| {
-            if std::time::Instant::now() >= deadline {
-                return Err(ErrorCode::DeadlineExpired);
-            }
-            Ok(clock())
-        })
+        self.admit_clock(
+            principal,
+            input,
+            request,
+            &|| {
+                if std::time::Instant::now() >= deadline {
+                    return Err(ErrorCode::DeadlineExpired);
+                }
+                Ok(clock())
+            },
+            None,
+        )
+    }
+    pub(crate) fn admit_attested(
+        &mut self,
+        principal: &crate::auth::TrustedPrincipal,
+        input: &str,
+        request: &ControlRequest,
+        now: i64,
+    ) -> Result<ControlReply, ErrorCode> {
+        if self.runtime_policy.is_none() {
+            return self.admit(principal.id(), input, request, now);
+        }
+        self.admit_clock(
+            principal.id(),
+            input,
+            request,
+            &|| Ok(now),
+            Some(
+                crate::caller_policy::TrustedCallerContext::from_attestation(principal)
+                    .map_err(|_| ErrorCode::CallerScopeUnproven),
+            ),
+        )
+    }
+    pub(crate) fn admit_attested_bound(
+        &mut self,
+        principal: &crate::auth::TrustedPrincipal,
+        input: &str,
+        request: &ControlRequest,
+        clock: &dyn Fn() -> i64,
+        deadline: std::time::Instant,
+    ) -> Result<ControlReply, ErrorCode> {
+        if self.runtime_policy.is_none() {
+            return self.admit_bound(principal.id(), input, request, clock, deadline);
+        }
+        self.admit_clock(
+            principal.id(),
+            input,
+            request,
+            &|| {
+                if std::time::Instant::now() >= deadline {
+                    Err(ErrorCode::DeadlineExpired)
+                } else {
+                    Ok(clock())
+                }
+            },
+            Some(
+                crate::caller_policy::TrustedCallerContext::from_attestation(principal)
+                    .map_err(|_| ErrorCode::CallerScopeUnproven),
+            ),
+        )
     }
     fn admit_clock(
         &mut self,
@@ -131,6 +188,7 @@ impl Journal {
         input: &str,
         request: &ControlRequest,
         clock: &dyn Fn() -> Result<i64, ErrorCode>,
+        caller: Option<Result<crate::caller_policy::TrustedCallerContext, ErrorCode>>,
     ) -> Result<ControlReply, ErrorCode> {
         let runtime_policy = self.runtime_policy.clone();
         let tx = self
@@ -150,6 +208,7 @@ impl Journal {
             return Ok(reply);
         }
         let configuration = config(&tx)?;
+        let mut caller_admission = None;
         let outcome = admit_new(
             &tx,
             &configuration,
@@ -175,6 +234,18 @@ impl Journal {
                         clock,
                         runtime_disabled(&tx)?,
                     )?;
+                    let context = caller
+                        .as_ref()
+                        .ok_or(ErrorCode::CallerScopeUnproven)?
+                        .as_ref()
+                        .map_err(|code| *code)?
+                        .clone();
+                    caller_admission = Some(policy.callers.qualify(
+                        &tx,
+                        context,
+                        configuration.revision,
+                        clock()?,
+                    )?);
                     let at = clock()?;
                     if request.deadline.is_some_and(|deadline| deadline <= at) {
                         return Err(ErrorCode::DeadlineExpired);
@@ -188,10 +259,14 @@ impl Journal {
             Err(code) => (request.target.clone(), String::new(), Some(code)),
         };
         let mut dispatch = None;
+        let mut caller_id = None;
         let admission = if denial.is_none() {
             let target = target.as_ref().ok_or(ErrorCode::UnknownTarget)?;
             tx.execute("INSERT INTO admissions(principal,request_id,verb,target,policy_revision,payload,resolved) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![principal,request.request_id,serde_json::to_string(&request.action.verb()).map_err(storage)?,serde_json::to_string(target).map_err(storage)?,sql_u64(configuration.revision)?,serde_json::to_string(request).map_err(storage)?,resolved]).map_err(storage)?;
             let id = tx.last_insert_rowid();
+            if caller_admission.is_some() {
+                caller_id = Some(id);
+            }
             if matches!(request.action, Action::Interrupt(_)) {
                 crate::approval::cancel_turn(&tx, target)?;
             }
@@ -323,7 +398,26 @@ impl Journal {
             },
             now,
         )?;
-        tx.commit().map_err(storage)?;
+        if let (Some(id), Some(caller)) = (caller_id, caller_admission) {
+            tx.execute(
+                "INSERT INTO caller_receipts VALUES(?1,?2)",
+                params![
+                    id,
+                    serde_json::to_string(&caller.receipt()).map_err(storage)?
+                ],
+            )
+            .map_err(storage)?;
+            let policy = runtime_policy
+                .as_deref()
+                .ok_or(ErrorCode::CallerReferenceUnavailable)?;
+            policy.callers.bind(id, caller)?;
+            if let Err(error) = tx.commit() {
+                policy.callers.discard(id);
+                return Err(storage(error));
+            }
+        } else {
+            tx.commit().map_err(storage)?;
+        }
         Ok(reply)
     }
     pub(crate) fn admin(&mut self, command: AdminCommand, now: i64) -> Result<u64, ErrorCode> {
@@ -332,8 +426,17 @@ impl Journal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         let mut configuration = config(&tx)?;
+        let record_command = matches!(command, AdminCommand::RevokeCallerQualification { .. });
+        let command_digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(&command).map_err(storage)?,
+        ));
         let (id, expected) = match &command {
-            AdminCommand::DisableRuntime {
+            AdminCommand::RevokeCallerQualification {
+                request_id,
+                expected_revision,
+                ..
+            }
+            | AdminCommand::DisableRuntime {
                 request_id,
                 expected_revision,
             }
@@ -348,10 +451,46 @@ impl Journal {
                 ..
             } => (request_id.clone(), *expected_revision),
         };
+        if record_command {
+            let prior:Option<(String,i64)>=tx.query_row("SELECT input_digest,response_revision FROM owner_record_requests WHERE request_id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
+            if let Some((digest, revision)) = prior {
+                if digest != command_digest {
+                    return Err(ErrorCode::RequestConflict);
+                }
+                tx.commit().map_err(storage)?;
+                return u64::try_from(revision).map_err(storage);
+            }
+        }
         if expected != configuration.revision {
             return Err(ErrorCode::RequestConflict);
         }
         match command {
+            AdminCommand::RevokeCallerQualification {
+                record_id,
+                record_revision,
+                ..
+            } => {
+                if id.is_empty()
+                    || id.len() > 128
+                    || id.chars().any(char::is_control)
+                    || record_id.is_empty()
+                    || record_id.len() > 128
+                    || record_id.chars().any(char::is_control)
+                    || record_revision == 0
+                {
+                    return Err(ErrorCode::MalformedFrame);
+                }
+                tx.execute(
+                    "INSERT OR IGNORE INTO caller_revocations VALUES(?1,?2,?3)",
+                    params![record_id, sql_u64(record_revision)?, now],
+                )
+                .map_err(storage)?;
+                tx.execute(
+                    "INSERT INTO owner_record_requests VALUES(?1,?2,?3)",
+                    params![id, command_digest, sql_u64(configuration.revision)?],
+                )
+                .map_err(storage)?;
+            }
             AdminCommand::DisableRuntime { .. } => {
                 crate::approval::disable_pending(&tx)?;
                 tx.execute(
@@ -394,7 +533,17 @@ impl Journal {
             ],
         )
         .map_err(storage)?;
-        audit(&tx, "owner-admin", &id, "policy_changed", now)?;
+        audit(
+            &tx,
+            "owner-admin",
+            &id,
+            if record_command {
+                "caller_record_revoked"
+            } else {
+                "policy_changed"
+            },
+            now,
+        )?;
         tx.commit().map_err(storage)?;
         Ok(configuration.revision)
     }
