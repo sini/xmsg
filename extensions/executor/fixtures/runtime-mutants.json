@@ -1,0 +1,282 @@
+[
+  {
+    "id": "runtime-caller-tombstone",
+    "file": "extensions/executor/src/caller_admission.rs",
+    "needle": "if revoked {",
+    "replacement": "if false && revoked {",
+    "test": "owner_caller_record_revocation_blocks_queued_frames_without_adapter_revision_drift",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "revoked caller qualification emitted a queued native frame"
+  },
+  {
+    "id": "runtime-caller-expiry",
+    "file": "extensions/executor/src/caller_policy.rs",
+    "needle": "            && self.expires_at > now",
+    "replacement": "            && { let _ = now; true }",
+    "test": "caller_expiry_blocks_frame_while_adapter_turn_and_request_deadlines_remain_valid",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "expired caller record emitted a native frame under valid adapter/deadline facts"
+  },
+  {
+    "id": "runtime-caller-replacement",
+    "file": "extensions/executor/src/caller_policy.rs",
+    "needle": "            || !Arc::ptr_eq(&current.incarnation, &reference.record.incarnation)",
+    "replacement": "            || false",
+    "test": "replaced_caller_record_cannot_silently_requalify_old_admission",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "replacement caller record silently authorized the old admission"
+  },
+  {
+    "id": "runtime-missing-opaque-reference",
+    "file": "extensions/executor/src/caller_admission.rs",
+    "needle": "        let reference = state\n            .references\n            .get(&id)\n            .ok_or(ErrorCode::CallerReferenceUnavailable)?;",
+    "replacement": "        let Some(reference) = state.references.get(&id) else { return Ok(()); };",
+    "test": "diagnostic_caller_receipts_do_not_restore_lost_opaque_authority_on_replay",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "diagnostic caller JSON was treated as opaque authority"
+  },
+  {
+    "id": "runtime-contradictory-caller-binding",
+    "file": "extensions/executor/src/caller_admission.rs",
+    "needle": "        if principal != reference.context.principal()\n            || receipt != reference.receipt()\n            || receipt[\"context\"][\"binding\"][\"input_digest\"] != digest\n            || receipt[\"context\"][\"principal\"] != principal\n        {",
+    "replacement": "        if false && (principal != reference.context.principal()\n            || receipt != reference.receipt()\n            || receipt[\"context\"][\"binding\"][\"input_digest\"] != digest\n            || receipt[\"context\"][\"principal\"] != principal )\n        {",
+    "test": "contradictory_persisted_caller_binding_blocks_otherwise_valid_native_effect",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "contradictory admitted caller binding emitted a native frame"
+  },
+  {
+    "id": "runtime-held-adapter-artifact",
+    "file": "extensions/executor/src/runtime_policy.rs",
+    "needle": "        adapter.unchanged()?;",
+    "replacement": "        let _ = &adapter;",
+    "test": "adapter_and_native_artifact_drift_each_block_queued_effects",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "changed adapter/native artifact emitted a native frame"
+  },
+  {
+    "id": "runtime-held-native-artifact",
+    "file": "extensions/executor/src/runtime_policy.rs",
+    "needle": "        native.unchanged()?;",
+    "replacement": "        let _ = &native;",
+    "test": "adapter_and_native_artifact_drift_each_block_queued_effects",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "changed adapter/native artifact emitted a native frame"
+  },
+  {
+    "id": "runtime-executor-artifact-record",
+    "file": "extensions/executor/src/eligibility.rs",
+    "needle": "                && r.executor_sha256 == facts.executor_sha256",
+    "replacement": "                && true",
+    "test": "executor_artifact_record_cannot_carry_to_another_build",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "qualification from another executor build emitted a native frame"
+  },
+  {
+    "id": "runtime-startup-cloexec",
+    "file": "extensions/executor/src/supervisor.rs",
+    "needle": "libc::F_SETFD, flags | libc::FD_CLOEXEC",
+    "replacement": "libc::F_SETFD, flags & !libc::FD_CLOEXEC",
+    "test": "real_acp_bootstrap_uses_inherited_lease_and_observed_model_before_brief",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs",
+    "assertion": "native child inherited the broker startup socket identity"
+  },
+  {
+    "id": "runtime-buffered-continue-starvation",
+    "file": "extensions/executor/src/runtime_process.rs",
+    "needle": "        let mut ready = [",
+    "replacement": "        if buffered { continue; }\n        let mut ready = [",
+    "test": "continuous_native_frames_service_attach_and_strict_steer_before_batch_end",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs",
+    "assertion": "strict steer was delayed until the native batch-end marker was processed"
+  },
+  {
+    "id": "runtime-human-confirmation-id",
+    "file": "extensions/executor/src/approval.rs",
+    "needle": "self.approval_id != args.approval_id",
+    "replacement": "false",
+    "test": "human_confirmation_id_is_bound_before_native_consumption",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "unmatched human confirmation consumed a native request"
+  },
+  {
+    "id": "runtime-human-confirmation-digest",
+    "file": "extensions/executor/src/approval.rs",
+    "needle": "self.operation_digest != args.operation_digest",
+    "replacement": "false",
+    "test": "human_confirmation_digest_is_bound_before_native_consumption",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "unmatched human confirmation consumed a native request"
+  },
+  {
+    "id": "runtime-human-confirmation-freshness",
+    "file": "extensions/executor/src/approval.rs",
+    "needle": "            || !now\n                .checked_sub(self.confirmed_at)\n                .is_some_and(|age| (0..=30).contains(&age))",
+    "replacement": "            || false",
+    "test": "human_confirmation_freshness_is_checked_before_native_consumption",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "unmatched human confirmation consumed a native request"
+  },
+  {
+    "id": "runtime-human-typed-request-id",
+    "file": "extensions/executor/src/human_operator.rs",
+    "needle": " || fields[1] != pending.approval_id",
+    "replacement": "",
+    "test": "no_blanket_yes_stale_confirmation_or_persistent_permission",
+    "test_module": "human_operator::tests",
+    "test_file": "extensions/executor/src/human_operator.rs",
+    "assertion": "assertion failed"
+  },
+  {
+    "id": "runtime-human-once-wire-option",
+    "file": "extensions/executor/src/acp/transport.rs",
+    "needle": "json!({\"outcome\":\"selected\",\"optionId\":option_id})",
+    "replacement": "json!({\"outcome\":\"selected\",\"optionId\":\"always\"})",
+    "test": "native_approval_requires_current_explicit_confirmation_and_one_use_option",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "allow-once decision was widened on the native wire"
+  },
+  {
+    "id": "runtime-native-method-permission-fallback",
+    "file": "extensions/executor/src/acp/transport.rs",
+    "needle": "if request.method != \"session/request_permission\" {",
+    "replacement": "if false && request.method != \"session/request_permission\" {",
+    "test": "failed_or_denied_native_method_with_permission_shaped_data_cannot_create_review",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "failed or denied native status became a human review request"
+  },
+  {
+    "id": "runtime-cancel-submitted-as-terminal",
+    "file": "extensions/executor/src/lifecycle.rs",
+    "needle": "UPDATE native_operations SET state='submitted',rpc_id=?1 WHERE admission_id=?2 AND state='submitting'",
+    "replacement": "UPDATE native_operations SET state=CASE WHEN json_extract(command,'$.command')='cancel' THEN 'turn_ended' ELSE 'submitted' END,rpc_id=?1 WHERE admission_id=?2 AND state='submitting'",
+    "test": "cancel_notification_submission_never_confirms_quiescence_or_ends_the_session",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "cancel submission was promoted to confirmed quiescence or session end"
+  },
+  {
+    "id": "runtime-strict-steer-wire-method",
+    "file": "extensions/executor/src/acp/transport.rs",
+    "needle": "                    \"_session/steering\",",
+    "replacement": "                    \"session/prompt\",",
+    "test": "strict_steer_refuses_idle_and_sends_only_the_no_new_turn_extension",
+    "test_module": "acp::tests",
+    "test_file": "extensions/executor/src/acp/tests.rs",
+    "assertion": "strict steering used a prompt fallback instead of injection"
+  },
+  {
+    "id": "runtime-pending-steer-finish-fence",
+    "file": "extensions/executor/src/acp/transport.rs",
+    "needle": "                    || self\n                        .pending\n                        .iter()\n                        .any(|p| matches!(p.operation, Operation::Steer(_)))",
+    "replacement": "",
+    "test": "steer_reply_cannot_cross_a_finished_turn_or_allow_a_new_prompt",
+    "test_module": "acp::tests",
+    "test_file": "extensions/executor/src/acp/tests.rs",
+    "assertion": "unfinished steering crossed the finish/start turn fence"
+  },
+  {
+    "id": "runtime-idle-steer-prompt-fallback",
+    "file": "extensions/executor/src/acp/transport.rs",
+    "needle": "            } => {\n                self.turn_matches(&native_session_id, &turn_id)?;\n                if !self.mode_observed",
+    "replacement": "            } => {\n                if self.turn_matches(&native_session_id, &turn_id).is_err() {\n                    return self.begin(Command::Prompt { native_session_id, turn_id, text });\n                }\n                if !self.mode_observed",
+    "test": "strict_steer_refuses_idle_and_sends_only_the_no_new_turn_extension",
+    "test_module": "acp::tests",
+    "test_file": "extensions/executor/src/acp/tests.rs",
+    "assertion": "idle strict steer created a native turn"
+  },
+  {
+    "id": "runtime-unwired-required-capabilities",
+    "file": "extensions/executor/src/runtime_policy.rs",
+    "needle": "        if resolved.required_capabilities.iter().any(|capability| {",
+    "replacement": "        if false && resolved.required_capabilities.iter().any(|capability| {",
+    "test": "mandatory_provenance_or_confirmed_interrupt_cannot_be_advertised_into_support",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "unimplemented native proof was advertised into admission/support"
+  },
+  {
+    "id": "runtime-background-not-completed",
+    "file": "extensions/executor/src/execution.rs",
+    "needle": "        \"background\" => (\n            SessionState::Background,\n            Outcome::Working,",
+    "replacement": "        \"background\" => (\n            SessionState::Background,\n            Outcome::Completed,",
+    "test": "native_turn_end_is_journal_background_not_a_completed_task_result",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "native/model completion was promoted to completed task proof"
+  },
+  {
+    "id": "runtime-outgoing-sdk-admission",
+    "file": "extensions/executor/src/content.rs",
+    "needle": "if store.admit_outgoing(binding, kind, &request_key).is_err() {",
+    "replacement": "if false && store.admit_outgoing(binding, kind, &request_key).is_err() {",
+    "test": "real_caller_revocation_refuses_next_call_while_adapter_remains_current",
+    "test_module": "content::tests",
+    "test_file": "extensions/executor/src/content_tests.rs",
+    "assertion": "revoked caller content reached SDK"
+  },
+  {
+    "id": "runtime-terminal-prelaunch-exclusion",
+    "file": "extensions/executor/src/execution.rs",
+    "needle": "    if failed {",
+    "replacement": "    if false && failed {",
+    "test": "prelaunch_failed_request_is_terminal_and_does_not_block_one_slot_after_restart",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs",
+    "assertion": "direct controller reopened a terminal failed admission"
+  },
+  {
+    "id": "runtime-reconnect-capability",
+    "file": "extensions/executor/src/eligibility.rs",
+    "needle": "                    .all(|c| r.capabilities.contains(c))",
+    "replacement": "                    .all(|_| true)",
+    "test": "reconnect_requires_qualified_capability_before_admission",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "unqualified reconnect created an effect admission"
+  },
+  {
+    "id": "runtime-env-clear",
+    "file": "extensions/executor/src/launch_environment.rs",
+    "needle": "command.env_clear().envs(self.snapshot()?);",
+    "replacement": "command.envs(self.snapshot()?);",
+    "test": "environment_is_fixed_and_has_no_arbitrary_provider_or_model_passthrough",
+    "test_module": "launch_environment::tests",
+    "test_file": "extensions/executor/src/launch_environment.rs",
+    "assertion": "assertion"
+  },
+  {
+    "id": "runtime-real-home-canonical",
+    "file": "extensions/executor/src/launch_environment.rs",
+    "needle": "if configured != actual || !metadata.is_dir()",
+    "replacement": "if false || !metadata.is_dir()",
+    "test": "owned_alternate_home_is_refused_and_canonical_alias_is_allowed",
+    "test_module": "launch_environment::tests",
+    "test_file": "extensions/executor/src/launch_environment.rs",
+    "assertion": "assertion"
+  },
+  {
+    "id": "runtime-adapter-revoked",
+    "file": "extensions/executor/src/eligibility.rs",
+    "needle": "            !r.revoked",
+    "replacement": "            true",
+    "test": "queued_bus_content_survives_eligibility_loss_without_native_effect_or_relaunch",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "revoked eligibility submitted queued bus content"
+  }
+]
