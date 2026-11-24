@@ -101,7 +101,27 @@ fn ready() -> Driver {
     );
     driver.observe(reply(mode.id, json!({}))).unwrap();
     driver.observe(mode_update("default")).unwrap();
+    select_model(&mut driver, "fixture-model", "default");
     driver
+}
+fn select_model(driver: &mut Driver, model: &str, mode: &str) {
+    let request = request(
+        driver
+            .begin(Command::SetModel {
+                native_session_id: "native".into(),
+                model_id: model.into(),
+            })
+            .unwrap(),
+    );
+    driver
+        .observe(reply(
+            request.id,
+            json!({"configOptions":[
+                {"id":"model","type":"select","currentValue":model},
+                {"id":"mode","type":"select","currentValue":mode}
+            ]}),
+        ))
+        .unwrap();
 }
 fn prompt(driver: &mut Driver, turn: &str) -> Request {
     request(
@@ -236,6 +256,7 @@ fn new_session_mode_and_set_mode_ack_are_not_observed_manual_mode() {
     );
     driver.observe(mode_update("default")).unwrap();
     assert!(driver.human_mode_observed());
+    select_model(&mut driver, "fixture-model", "default");
     prompt(&mut driver, "t");
 }
 
@@ -312,6 +333,7 @@ fn pinned_config_option_updates_observe_exact_mode_values_not_titles() {
             .unwrap();
         assert!(matches!(&events[..],[Event::ModeObserved {mode_id,..}] if mode_id==mode));
         assert!(driver.human_mode_observed());
+        select_model(&mut driver, "fixture-model", mode);
         prompt(&mut driver, "t");
     }
 }
@@ -339,6 +361,210 @@ fn load_uses_recorded_native_id_and_requires_mode_selection_again() {
         .unwrap();
     assert_eq!(driver.native_session_id(), Some("native"));
     assert!(!driver.human_mode_observed());
+    assert_eq!(driver.observed_model_id(), None);
+}
+
+#[test]
+fn model_selection_uses_exact_native_config_id_and_observed_readback() {
+    for (harness, mode) in [(Harness::Claude, "default"), (Harness::Codex, "read-only")] {
+        let mut driver = session(harness);
+        let mode_request = request(
+            driver
+                .begin(Command::SetMode {
+                    native_session_id: "native".into(),
+                    mode_id: mode.into(),
+                })
+                .unwrap(),
+        );
+        driver.observe(reply(mode_request.id, json!({}))).unwrap();
+        let model_request = request(
+            driver
+                .begin(Command::SetModel {
+                    native_session_id: "native".into(),
+                    model_id: "selected-model".into(),
+                })
+                .unwrap(),
+        );
+        assert_eq!(model_request.method, "session/set_config_option");
+        assert_eq!(
+            model_request.params.as_ref().unwrap(),
+            &json!({"sessionId":"native","configId":"model","value":"selected-model"})
+        );
+        assert_eq!(driver.observed_model_id(), None);
+        let events = driver
+            .observe(reply(
+                model_request.id,
+                json!({"configOptions":[
+                    {"id":"mode","type":"select","currentValue":mode},
+                    {"id":"model","type":"select","currentValue":"selected-model"}
+                ]}),
+            ))
+            .unwrap();
+        assert!(events.iter().any(
+            |event| matches!(event,Event::ModelObserved {model_id,..} if model_id=="selected-model")
+        ));
+        assert_eq!(driver.observed_model_id(), Some("selected-model"));
+        prompt(&mut driver, "model-turn");
+    }
+}
+
+#[test]
+fn unchanged_model_is_reobserved_from_the_response_without_a_notification() {
+    let mut driver = ready();
+    assert_eq!(driver.observed_model_id(), Some("fixture-model"));
+    let selection = request(
+        driver
+            .begin(Command::SetModel {
+                native_session_id: "native".into(),
+                model_id: "fixture-model".into(),
+            })
+            .unwrap(),
+    );
+    assert_eq!(driver.observed_model_id(), None);
+    assert!(!driver.human_mode_observed());
+    driver
+        .observe(reply(
+            selection.id,
+            json!({"configOptions":[
+                {"id":"model","type":"select","currentValue":"fixture-model"},
+                {"id":"mode","type":"select","currentValue":"default"}
+            ]}),
+        ))
+        .unwrap();
+    assert_eq!(driver.observed_model_id(), Some("fixture-model"));
+    assert!(driver.human_mode_observed());
+    prompt(&mut driver, "t");
+}
+
+#[test]
+fn blank_ack_wrong_model_and_display_name_cannot_enable_a_prompt() {
+    let mut driver = ready();
+    let request = request(
+        driver
+            .begin(Command::SetModel {
+                native_session_id: "native".into(),
+                model_id: "selected-model".into(),
+            })
+            .unwrap(),
+    );
+    driver.observe(reply(request.id, json!({}))).unwrap();
+    assert_eq!(driver.observed_model_id(), None);
+    assert!(driver
+        .begin(Command::Prompt {
+            native_session_id: "native".into(),
+            turn_id: "t".into(),
+            text: "fixture".into()
+        })
+        .is_err());
+    let update = |options: Value| {
+        Frame::Notification(Notification {
+            jsonrpc: "2.0".into(),
+            method: "session/update".into(),
+            params: Some(json!({
+        "sessionId":"native","update":{"sessionUpdate":"config_option_update","configOptions":options}})),
+        })
+    };
+    driver
+        .observe(update(
+            json!([{"id":"other","name":"Model","type":"select","currentValue":"selected-model"}]),
+        ))
+        .unwrap();
+    assert_eq!(driver.observed_model_id(), None);
+    driver
+        .observe(update(json!([
+            {"id":"mode","type":"select","currentValue":"default"},
+            {"id":"model","type":"select","currentValue":"wrong-model"}
+        ])))
+        .unwrap();
+    assert_eq!(driver.observed_model_id(), Some("wrong-model"));
+    assert_eq!(
+        driver
+            .begin(Command::Prompt {
+                native_session_id: "native".into(),
+                turn_id: "t".into(),
+                text: "fixture".into()
+            })
+            .unwrap_err(),
+        Error::Model
+    );
+    driver
+        .observe(update(
+            json!([{"id":"model","type":"select","currentValue":"selected-model"}]),
+        ))
+        .unwrap();
+    prompt(&mut driver, "t");
+}
+
+#[test]
+fn observed_ambient_model_without_explicit_selection_is_not_applied() {
+    let mut driver = session(Harness::Claude);
+    let mode = request(
+        driver
+            .begin(Command::SetMode {
+                native_session_id: "native".into(),
+                mode_id: "default".into(),
+            })
+            .unwrap(),
+    );
+    driver.observe(reply(mode.id, json!({}))).unwrap();
+    driver.observe(mode_update("default")).unwrap();
+    driver.observe(Frame::Notification(Notification { jsonrpc:"2.0".into(),method:"session/update".into(),params:Some(json!({
+        "sessionId":"native","update":{"sessionUpdate":"config_option_update","configOptions":[{"id":"model","type":"select","currentValue":"ambient-model"}]}})) })).unwrap();
+    assert_eq!(driver.observed_model_id(), None);
+    assert_eq!(
+        driver
+            .begin(Command::Prompt {
+                native_session_id: "native".into(),
+                turn_id: "t".into(),
+                text: "fixture".into()
+            })
+            .unwrap_err(),
+        Error::Model
+    );
+}
+
+#[test]
+fn model_selection_refuses_active_and_unproven_harnesses_and_resets_after_loss() {
+    let mut driver = ready();
+    let active = prompt(&mut driver, "a");
+    let selection = || Command::SetModel {
+        native_session_id: "native".into(),
+        model_id: "selected-model".into(),
+    };
+    assert_eq!(driver.begin(selection()).unwrap_err(), Error::Model);
+    driver
+        .observe(reply(active.id, json!({"stopReason":"cancelled"})))
+        .unwrap();
+    assert_eq!(driver.begin(selection()).unwrap_err(), Error::Model);
+    assert_eq!(driver.observed_model_id(), Some("fixture-model"));
+    driver.transport_lost();
+    assert_eq!(driver.observed_model_id(), None);
+    assert!(!driver.human_mode_observed());
+    let mut agy = session(Harness::Agy);
+    assert_eq!(agy.begin(selection()).unwrap_err(), Error::Unsupported);
+}
+
+#[test]
+fn malformed_model_readback_does_not_invent_a_native_selection() {
+    let mut driver = ready();
+    let selected = request(
+        driver
+            .begin(Command::SetModel {
+                native_session_id: "native".into(),
+                model_id: "selected-model".into(),
+            })
+            .unwrap(),
+    );
+    assert_eq!(
+        driver
+            .observe(reply(
+                selected.id,
+                json!({"configOptions":[{"id":"model","type":"select","currentValue":5}]})
+            ))
+            .unwrap_err(),
+        Error::Protocol
+    );
+    assert_eq!(driver.observed_model_id(), None);
 }
 
 #[test]
@@ -571,6 +797,181 @@ fn genuine_permission_keeps_exact_options_raw_fields_and_unproven_provenance() {
         }
         _ => panic!("genuine structured request missing"),
     }
+}
+
+#[test]
+fn outstanding_permission_is_an_immutable_snapshot_of_a_live_native_request() {
+    let mut driver = ready();
+    prompt(&mut driver, "a");
+    assert!(driver
+        .outstanding_permission(&RequestId::Number(88))
+        .is_none());
+    driver.observe(permission(88)).unwrap();
+    let mut copy = driver
+        .outstanding_permission(&RequestId::Number(88))
+        .unwrap();
+    if let Event::PendingPermission {
+        request_id,
+        raw,
+        turn_id,
+        ..
+    } = &mut copy
+    {
+        *request_id = RequestId::Number(89);
+        *raw = json!({"untrusted":"replacement"});
+        *turn_id = "forged-turn".into();
+    }
+    let forged: Event = serde_json::from_value(serde_json::to_value(copy).unwrap()).unwrap();
+    assert!(matches!(
+        forged,
+        Event::PendingPermission {
+            request_id: RequestId::Number(89),
+            ..
+        }
+    ));
+    assert!(driver
+        .outstanding_permission(&RequestId::Number(89))
+        .is_none());
+    match driver
+        .outstanding_permission(&RequestId::Number(88))
+        .unwrap()
+    {
+        Event::PendingPermission {
+            request_id,
+            raw,
+            turn_id,
+            ..
+        } => {
+            assert_eq!(request_id, RequestId::Number(88));
+            assert_eq!(turn_id, "a");
+            assert_eq!(raw["toolCall"]["toolCallId"], "tool-1");
+        }
+        _ => panic!("live native permission snapshot lost"),
+    }
+    driver
+        .answer_permission(RequestId::Number(88), PermissionDecision::Cancel)
+        .unwrap();
+    assert!(driver
+        .outstanding_permission(&RequestId::Number(88))
+        .is_none());
+}
+
+#[test]
+fn cancel_clears_human_eligibility_immediately_and_late_native_requests_stay_cancelled() {
+    let mut driver = ready();
+    let active = prompt(&mut driver, "a");
+    driver.observe(permission(88)).unwrap();
+    assert!(driver
+        .begin(Command::Cancel {
+            native_session_id: "other".into(),
+            turn_id: "a".into()
+        })
+        .is_err());
+    assert!(driver
+        .outstanding_permission(&RequestId::Number(88))
+        .is_some());
+    assert!(driver
+        .begin(Command::Cancel {
+            native_session_id: "native".into(),
+            turn_id: "other".into()
+        })
+        .is_err());
+    assert!(driver
+        .outstanding_permission(&RequestId::Number(88))
+        .is_some());
+    driver
+        .begin(Command::Cancel {
+            native_session_id: "native".into(),
+            turn_id: "a".into(),
+        })
+        .unwrap();
+    assert!(driver
+        .outstanding_permission(&RequestId::Number(88))
+        .is_none());
+    assert!(driver
+        .answer_permission(
+            RequestId::Number(88),
+            PermissionDecision::SelectOnce {
+                option_id: "once".into()
+            }
+        )
+        .is_err());
+    for id in [88, 99] {
+        let events = driver.observe(permission(id)).unwrap();
+        match &events[..] {
+            [Event::PermissionAutoCancelled {
+                request_id,
+                response: Frame::Success(response),
+            }] => {
+                assert_eq!(*request_id, RequestId::Number(id));
+                assert_eq!(response.id, RequestId::Number(id));
+                assert_eq!(response.result, json!({"outcome":{"outcome":"cancelled"}}));
+            }
+            _ => panic!("cancelled turn reopened a human decision opportunity"),
+        }
+        assert!(driver
+            .outstanding_permission(&RequestId::Number(id))
+            .is_none());
+        assert!(driver
+            .answer_permission(
+                RequestId::Number(id),
+                PermissionDecision::SelectOnce {
+                    option_id: "once".into()
+                }
+            )
+            .is_err());
+    }
+    assert_eq!(driver.active_turn_id(), Some("a"));
+    assert_eq!(
+        driver.confirm_turn_quiescent("native", "a"),
+        Err(Error::Turn)
+    );
+    driver
+        .observe(reply(active.id, json!({"stopReason":"cancelled"})))
+        .unwrap();
+    assert!(matches!(
+        &driver.observe(permission(100)).unwrap()[..],
+        [Event::PermissionAutoCancelled { .. }]
+    ));
+    assert!(driver
+        .outstanding_permission(&RequestId::Number(100))
+        .is_none());
+}
+
+#[test]
+fn an_unknown_turn_cannot_reopen_human_eligibility() {
+    let mut driver = ready();
+    let active = prompt(&mut driver, "a");
+    driver.observe(permission(88)).unwrap();
+    driver
+        .observe(Frame::Failure(Failure {
+            jsonrpc: "2.0".into(),
+            id: active.id,
+            error: RpcError {
+                code: -32603,
+                message: "unknown".into(),
+                data: None,
+            },
+        }))
+        .unwrap();
+    assert!(driver
+        .outstanding_permission(&RequestId::Number(88))
+        .is_none());
+    assert!(matches!(
+        &driver.observe(permission(89)).unwrap()[..],
+        [Event::PermissionAutoCancelled { .. }]
+    ));
+    assert!(driver
+        .outstanding_permission(&RequestId::Number(89))
+        .is_none());
+    assert!(driver
+        .answer_permission(
+            RequestId::Number(89),
+            PermissionDecision::SelectOnce {
+                option_id: "once".into()
+            }
+        )
+        .is_err());
 }
 
 #[test]
