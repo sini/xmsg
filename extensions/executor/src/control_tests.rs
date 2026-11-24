@@ -827,6 +827,7 @@ fn template() -> DispatchTemplate {
         reason: "unproven fixture".into(),
     };
     DispatchTemplate {
+        lifecycle_verbs: Vec::new(),
         team_id: "team-a".into(),
         profile_id: "safe".into(),
         resolved: ResolvedDispatch {
@@ -1422,5 +1423,356 @@ fn cross_kind_grant_has_no_admission_effect() {
     assert_grant_refused(
         &f,
         grant_arm_request(Verb::Steer, addressed_turn("session-a", 1, "turn-a")),
+    );
+}
+
+#[test]
+fn owner_emergency_disable_blocks_new_effect_admissions_without_agent_authority() {
+    let grants = vec![
+        grant(Verb::Send, "session-a", 1),
+        grant(Verb::Status, "session-a", 1),
+        grant(Verb::Stop, "session-a", 1),
+    ];
+    let f = fixture(config(grants.clone()));
+    let command = AdminCommand::DisableRuntime {
+        request_id: "disable-now".into(),
+        expected_revision: 1,
+    };
+    assert_eq!(
+        f.service.admin(peer(), HUMAN, command.clone(), 100),
+        Err(ErrorCode::CredentialDenied)
+    );
+    assert_eq!(f.service.admin(peer(), OWNER, command, 100), Ok(2));
+    let request = ControlRequest {
+        version: crate::protocol::CONTROL_VERSION,
+        request_id: "after-disable".into(),
+        target: Some(Target::Execution {
+            session_id: "session-a".into(),
+            generation: 1,
+        }),
+        action: Action::Send(SendArgs {
+            text: "must remain queued".into(),
+            prefer_live: None,
+        }),
+        deadline: Some(200),
+    };
+    let result = f.service.lifecycle(peer(), request, 101);
+    let rows: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        rows, 0,
+        "emergency disable permitted a new effect admission"
+    );
+    assert!(
+        matches!(result.unwrap().receipt.authorization, Authorization::Denied {code} if code=="profile_denied")
+    );
+    let mut replacement = config(grants);
+    replacement.revision = 3;
+    assert_eq!(
+        f.service.admin(
+            peer(),
+            OWNER,
+            AdminCommand::ReplacePolicy {
+                request_id: "policy-after-disable".into(),
+                expected_revision: 2,
+                configuration: replacement.clone(),
+            },
+            102
+        ),
+        Ok(3)
+    );
+    for (id, action) in [
+        (
+            "inspect-disabled",
+            Action::Status(crate::protocol::ReadArgs {
+                max_events: 1,
+                max_text_bytes: 1024,
+            }),
+        ),
+        ("stop-disabled", Action::Stop(crate::protocol::EmptyArgs {})),
+    ] {
+        let reply = f
+            .service
+            .lifecycle(
+                peer(),
+                ControlRequest {
+                    version: crate::protocol::CONTROL_VERSION,
+                    request_id: id.into(),
+                    target: Some(Target::Execution {
+                        session_id: "session-a".into(),
+                        generation: 1,
+                    }),
+                    action,
+                    deadline: Some(200),
+                },
+                103,
+            )
+            .unwrap();
+        assert!(matches!(
+            reply.receipt.authorization,
+            Authorization::Allowed { .. }
+        ));
+    }
+    let reopened = ControlService::open(
+        &f._dir.path().join("journal.db"),
+        uid(),
+        replacement,
+        ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        crate::journal::runtime_disabled(&reopened.journal.lock().unwrap().db).unwrap(),
+        "restart or policy replacement cleared emergency disable"
+    );
+    let audit: i64 = reopened
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM audit WHERE event='runtime_disabled'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(audit, 1);
+}
+
+fn delegated_fixture(verbs: Vec<Verb>) -> Fixture {
+    let mut configuration = config(vec![Grant {
+        principal: "worker".into(),
+        verb: Verb::Dispatch,
+        target: GrantTarget::Team {
+            team_id: "team-a".into(),
+        },
+    }]);
+    let mut selected = template();
+    selected.lifecycle_verbs = verbs;
+    configuration.defaults.push(selected);
+    fixture(configuration)
+}
+
+fn delegated_send(request_id: &str, generation: u64) -> ControlRequest {
+    ControlRequest {
+        version: crate::protocol::CONTROL_VERSION,
+        request_id: request_id.into(),
+        target: Some(Target::Execution {
+            session_id: "session-1".into(),
+            generation,
+        }),
+        action: Action::Send(SendArgs {
+            text: "content".into(),
+            prefer_live: None,
+        }),
+        deadline: Some(200),
+    }
+}
+
+#[test]
+fn explicit_dispatch_delegation_is_exact_and_replay_does_not_widen_it() {
+    let f = delegated_fixture(vec![Verb::Send]);
+    let request = ControlRequest::dispatch("dispatch-once".into(), "brief".into());
+    let first = f.service.lifecycle(peer(), request.clone(), 100).unwrap();
+    let replay = f.service.lifecycle(peer(), request, 101).unwrap();
+    assert!(replay.historical && replay.replayed);
+    let rows: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM session_delegations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        rows, 1,
+        "explicit template did not materialize one exact delegation"
+    );
+    assert_eq!(
+        first.dispatch.as_ref().unwrap().delegated_verbs,
+        vec![Verb::Send]
+    );
+    assert_eq!(replay.dispatch.unwrap().delegated_verbs, vec![Verb::Send]);
+    let reply = f
+        .service
+        .lifecycle(peer(), delegated_send("send-delegated", 1), 102)
+        .unwrap();
+    assert!(matches!(
+        reply.receipt.authorization,
+        Authorization::Allowed { .. }
+    ));
+}
+
+#[test]
+fn absent_dispatch_delegation_confers_no_lifecycle_authority() {
+    let f = delegated_fixture(vec![]);
+    f.service
+        .lifecycle(
+            peer(),
+            ControlRequest::dispatch("dispatch".into(), "brief".into()),
+            100,
+        )
+        .unwrap();
+    let reply = f
+        .service
+        .lifecycle(peer(), delegated_send("send-denied", 1), 101)
+        .unwrap();
+    let rows: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "creation silently granted lifecycle authority");
+    assert!(
+        matches!(reply.receipt.authorization, Authorization::Denied {code} if code=="grant_denied")
+    );
+}
+
+#[test]
+fn delegated_grant_cannot_outlive_its_owner_template_revision() {
+    let f = delegated_fixture(vec![Verb::Send]);
+    f.service
+        .lifecycle(
+            peer(),
+            ControlRequest::dispatch("dispatch".into(), "brief".into()),
+            100,
+        )
+        .unwrap();
+    let mut replacement = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT body FROM configuration", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .map(|s| serde_json::from_str::<OwnerConfig>(&s).unwrap())
+        .unwrap();
+    replacement.revision = 2;
+    replacement.defaults[0].lifecycle_verbs.clear();
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            AdminCommand::ReplacePolicy {
+                request_id: "revoke-delegation".into(),
+                expected_revision: 1,
+                configuration: replacement,
+            },
+            101,
+        )
+        .unwrap();
+    let reply = f
+        .service
+        .lifecycle(peer(), delegated_send("send-after-revoke", 1), 102)
+        .unwrap();
+    let rows: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        rows, 1,
+        "policy replacement left orphan delegated authority"
+    );
+    assert!(
+        matches!(reply.receipt.authorization, Authorization::Denied {code} if code=="grant_denied")
+    );
+}
+
+#[test]
+fn dispatch_template_refuses_approval_dispatch_and_duplicate_verbs() {
+    for verbs in [
+        vec![Verb::Approve],
+        vec![Verb::Dispatch],
+        vec![Verb::Send, Verb::Send],
+    ] {
+        let mut configuration = config(vec![]);
+        let mut selected = template();
+        selected.lifecycle_verbs = verbs;
+        configuration.defaults.push(selected);
+        assert_eq!(
+            configuration.validate(),
+            Err(ErrorCode::InvalidConfiguration)
+        );
+    }
+}
+
+#[test]
+fn delegated_grant_refuses_a_different_attested_principal() {
+    let mut f = delegated_fixture(vec![Verb::Send]);
+    f.service
+        .lifecycle(
+            peer(),
+            ControlRequest::dispatch("dispatch".into(), "brief".into()),
+            100,
+        )
+        .unwrap();
+    f.service.attestor = Box::new(FakeAttestor {
+        principal: "other-worker".into(),
+        wrong_binding: false,
+    });
+    let reply = f
+        .service
+        .lifecycle(peer(), delegated_send("other-principal", 1), 101)
+        .unwrap();
+    let rows: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "delegation crossed attested principal");
+    assert!(
+        matches!(reply.receipt.authorization, Authorization::Denied {code} if code=="grant_denied")
+    );
+}
+
+#[test]
+fn delegated_grant_refuses_a_new_current_generation_without_redelegation() {
+    let f = delegated_fixture(vec![Verb::Send]);
+    f.service
+        .lifecycle(
+            peer(),
+            ControlRequest::dispatch("dispatch".into(), "brief".into()),
+            100,
+        )
+        .unwrap();
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .execute("UPDATE sessions SET generation=2 WHERE id='session-1'", [])
+        .unwrap();
+    let reply = f
+        .service
+        .lifecycle(peer(), delegated_send("new-generation", 2), 101)
+        .unwrap();
+    let rows: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1, "old delegation crossed current generation");
+    assert!(
+        matches!(reply.receipt.authorization, Authorization::Denied {code} if code=="grant_denied")
     );
 }
