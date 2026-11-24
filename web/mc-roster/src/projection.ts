@@ -27,6 +27,16 @@ export interface SubRecord {
 
 export type ConnectionBadge = "Unknown" | "Live" | "Delayed" | "Reconnecting" | "Stale";
 
+export const CLIENT_DEFAULTS = {
+  tick_interval_ms: 15_000,
+  stale_after_ms: 45_000,
+  max_server_message_bytes: 262_144,
+  snapshot_max_bytes: DEFAULT_SNAPSHOT_MAX_BYTES,
+  reconnect_base_ms: 1_000,
+  reconnect_cap_ms: 30_000,
+  reconnect_max_attempts: 8,
+} as const;
+
 const NON_ELIGIBLE_STATUS = new Set([
   "removed_retained",
   "loading",
@@ -113,6 +123,7 @@ export class RosterStore {
 
   wsOpen = false;
   reconnecting = false;
+  reconnectExhausted = false;
   stoppedAuth = false;
   stoppedIncompatible = false;
   defectMessage: string | null = null;
@@ -121,10 +132,10 @@ export class RosterStore {
   clientAtServerMs = 0;
   lastServerMessageAtMs = 0;
   lastRealEventAtMs = 0;
-  tickIntervalMs = 15_000;
-  staleAfterMs = 60_000;
-  maxServerMessageBytes = 262_144;
-  snapshotMaxBytes = DEFAULT_SNAPSHOT_MAX_BYTES;
+  tickIntervalMs: number = CLIENT_DEFAULTS.tick_interval_ms;
+  staleAfterMs: number = CLIENT_DEFAULTS.stale_after_ms;
+  maxServerMessageBytes: number = CLIENT_DEFAULTS.max_server_message_bytes;
+  snapshotMaxBytes: number = CLIENT_DEFAULTS.snapshot_max_bytes;
   capabilities: string[] = [];
 
   private initialFleetApplied = false;
@@ -215,6 +226,7 @@ export class RosterStore {
 
   connectionBadge(nowClientMs: number): ConnectionBadge {
     if (this.stoppedAuth || this.stoppedIncompatible) return "Unknown";
+    if (this.reconnectExhausted) return "Stale";
     const fleetSub = this.subs.get("fleet");
     if (this.reconnecting) {
       if (this.lastServerMessageAtMs && nowClientMs - this.lastServerMessageAtMs >= this.staleAfterMs) {
@@ -225,6 +237,9 @@ export class RosterStore {
     if (!this.wsOpen || !fleetSub || !fleetSub.synced) return "Unknown";
     if (this.lastServerMessageAtMs && nowClientMs - this.lastServerMessageAtMs >= this.staleAfterMs) {
       return "Stale";
+    }
+    if (this.lastServerMessageAtMs && nowClientMs - this.lastServerMessageAtMs > 2 * this.tickIntervalMs) {
+      return "Unknown";
     }
     const allNodes = this.nodeOrder.map((n) => this.nodes.get(n)).filter((n): n is NodeView => Boolean(n));
     const eligible = allNodes.filter((n) => !NON_ELIGIBLE_STATUS.has(n.status));

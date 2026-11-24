@@ -1,10 +1,10 @@
-import { RosterStore } from "./projection.ts";
+import { CLIENT_DEFAULTS, RosterStore } from "./projection.ts";
 import { DecodeError, decodeServerMessage, utf8ByteLength } from "./protocol.ts";
 import { RosterRenderer } from "./render.ts";
 
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_CAP_MS = 30_000;
-const RECONNECT_MAX_ATTEMPTS = 12;
+const RECONNECT_BASE_MS = CLIENT_DEFAULTS.reconnect_base_ms;
+const RECONNECT_CAP_MS = CLIENT_DEFAULTS.reconnect_cap_ms;
+const RECONNECT_MAX_ATTEMPTS = CLIENT_DEFAULTS.reconnect_max_attempts;
 
 class MissionControlClient {
   private readonly store = new RosterStore();
@@ -41,6 +41,7 @@ class MissionControlClient {
   private manualReconnect(): void {
     if (this.store.stoppedAuth || this.store.stoppedIncompatible) return;
     this.backoffAttempt = 0;
+    this.store.reconnectExhausted = false;
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -99,6 +100,7 @@ class MissionControlClient {
       this.openedThisAttempt = true;
       this.store.wsOpen = true;
       this.store.reconnecting = false;
+      this.store.reconnectExhausted = false;
       this.store.defectMessage = null;
 
       this.sendJson({
@@ -255,10 +257,7 @@ class MissionControlClient {
   private scheduleBackoff(extraMs: number): void {
     if (this.backoffAttempt >= RECONNECT_MAX_ATTEMPTS) {
       this.store.reconnecting = false;
-      this.store.lastServerMessageAtMs = Math.min(
-        this.store.lastServerMessageAtMs || Date.now() - this.store.staleAfterMs,
-        Date.now() - this.store.staleAfterMs,
-      );
+      this.store.reconnectExhausted = true;
       this.renderNow();
       return;
     }

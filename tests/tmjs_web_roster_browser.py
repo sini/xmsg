@@ -565,12 +565,14 @@ def main():
                 assert len(state.ws_conns) == conns_before + 1
                 fleet_resumes = [f for f in state.client_frames if f.get("type") == "subscribe" and f.get("sub") == "fleet"]
                 assert fleet_resumes and fleet_resumes[-1].get("cursor") == "fleet_c1", f"expected cursor resume, got {fleet_resumes}"
-                # tick must not reset node source age, and 61s silence (> staleAfterMs=60s) -> Stale
+                # tick must not reset node source age; > 2*tick (31s) -> Unknown; >= staleAfterMs (46s) -> Stale
                 ws_send_text(state.ws_conns[-1], json.dumps({"v": 1, "type": "tick", "server_at": 1795000030000}))
                 page.clock.run_for(15000)
                 node_hdr = page.locator("[data-node='laptop-a'] .mc-node-header").text_content() or ""
                 assert "source 0s ago" not in node_hdr, f"tick reset source age: {node_hdr}"
-                page.clock.run_for(61000)
+                page.clock.run_for(16000)
+                page.wait_for_selector("[data-connection-badge='Unknown']", timeout=5000)
+                page.clock.run_for(15000)
                 page.wait_for_selector("[data-connection-badge='Stale']", timeout=5000)
 
                 # Refresh live state before 4401/4403/4409
@@ -654,6 +656,13 @@ def main():
                 page.clock.run_for(2500)
                 page.wait_for_timeout(200)
                 assert state.ws_attempts >= 2, f"503 probe must resume backoff, attempts={state.ws_attempts}"
+                # Exhaust all 8 reconnect_max_attempts (1 initial + 8 retries = 9 total) -> Stale + manual Reconnect
+                for _ in range(10):
+                    page.clock.run_for(31000)
+                    page.wait_for_timeout(80)
+                page.wait_for_selector("[data-connection-badge='Stale']", timeout=5000)
+                assert page.locator("button:has-text('Reconnect')").count() == 1, "exhausted reconnect must show manual Reconnect button"
+                assert state.ws_attempts == 9, f"expected 1 initial + 8 reconnect_max_attempts = 9, got {state.ws_attempts}"
                 ctx.close()
                 state.ws_upgrade_status = 101
                 state.probe_status = 200

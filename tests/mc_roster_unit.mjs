@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { RosterStore } from "../web/mc-roster/src/projection.ts";
+import { CLIENT_DEFAULTS, RosterStore } from "../web/mc-roster/src/projection.ts";
 import { DecodeError, decodeServerMessage, parseStrictJson } from "../web/mc-roster/src/protocol.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -396,4 +396,68 @@ test("SP13 connection-state erratum: non-delivering delayed + eligible live -> L
     "Reconnecting",
     "empty fleet after 1006 close must read Reconnecting",
   );
+});
+
+test("SP defaults table and 2*tick / stale_after_ms / reconnectExhausted projection invariants", () => {
+  // Exact spec defaults table (xmsg-tmjs-session-protocol.md §2.9 / §2.12 / lines 903-922)
+  assert.deepEqual(CLIENT_DEFAULTS, {
+    tick_interval_ms: 15_000,
+    stale_after_ms: 45_000,
+    max_server_message_bytes: 262_144,
+    snapshot_max_bytes: 4 * 1024 * 1024,
+    reconnect_base_ms: 1_000,
+    reconnect_cap_ms: 30_000,
+    reconnect_max_attempts: 8,
+  });
+
+  const store = new RosterStore();
+  assert.equal(store.tickIntervalMs, 15_000);
+  assert.equal(store.staleAfterMs, 45_000);
+  assert.equal(store.maxServerMessageBytes, 262_144);
+  assert.equal(store.snapshotMaxBytes, 4 * 1024 * 1024);
+
+  store.wsOpen = true;
+  store.allocSub("fleet");
+  store.applyMessage(
+    decodeServerMessage(
+      JSON.stringify({
+        v: 1,
+        type: "snapshot",
+        sub: "fleet",
+        part: 0,
+        final: true,
+        stream_epoch: "ep_t",
+        cursor: "c_t",
+        server_at: 10_000,
+        truncated: false,
+        nodes: [
+          {
+            node: "n1",
+            status: "healthy",
+            delivery: "live",
+            history_hidden: false,
+            endpoints: [],
+            endpoints_truncated: false,
+            exchanges: [],
+            source_gaps: [],
+          },
+        ],
+      }),
+    ),
+    256,
+    10_000,
+  );
+  // Within 2 * tick_interval_ms (30,000 ms) -> Live
+  assert.equal(store.connectionBadge(40_000), "Live");
+  // Silent past 2 * tick_interval_ms (30,001 ms) and < stale_after_ms (45,000 ms) -> Unknown (age kept)
+  assert.equal(store.connectionBadge(40_001), "Unknown");
+  assert.equal(store.lastServerMessageAtMs, 10_000);
+  // Silent >= stale_after_ms (45,000 ms) -> Stale
+  assert.equal(store.connectionBadge(55_000), "Stale");
+
+  // After reconnect_max_attempts exhausted -> Stale (not Unknown)
+  store.wsOpen = false;
+  store.reconnecting = false;
+  store.reconnectExhausted = true;
+  assert.equal(store.connectionBadge(15_000), "Stale");
 });
