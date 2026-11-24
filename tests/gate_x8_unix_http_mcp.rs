@@ -426,6 +426,7 @@ async fn test_oracle_3_reply_only_mcp() {
         vec![
             "read_attachment",
             "list",
+            "tag",
             "send",
             "reply",
             "replies",
