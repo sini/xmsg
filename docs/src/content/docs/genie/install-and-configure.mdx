@@ -154,8 +154,14 @@ Every credential path must be outside the Nix store; the module checks.
 
 The images contain no credentials and configure no bus or deployment. A pod pairs a genie
 container with an xmsg container in [leaf mode](/concepts/hubs-and-leaves/#leaf-node-mode---leaf),
-sharing a runtime directory. `genie-guard` already runs this way. See
-[Kubernetes & Helm](/operations/helm-and-kubernetes/) for the xmsg side.
+sharing a runtime directory. For `genie-guard`, layer
+[`examples/helm/genie-guard-values.yaml`](https://github.com/sini/genie-agent/blob/main/examples/helm/genie-guard-values.yaml)
+from `genie-agent` onto [`charts/xmsg`](https://github.com/sini/xmsg/tree/main/charts/xmsg) (see
+[Kubernetes & Helm](/operations/helm-and-kubernetes/#leaf-sidecar) for the xmsg side):
+
+```sh
+helm install genie-guard path/to/xmsg/charts/xmsg -n genie -f examples/helm/genie-guard-values.yaml
+```
 
 For root in a pod:
 

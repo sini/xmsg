@@ -230,6 +230,10 @@ leaf:
 helm install my-app ./charts/xmsg -n my-app -f leaf-values.yaml
 ```
 
+For a concrete application overlay, `genie-agent` ships
+[`examples/helm/genie-guard-values.yaml`](https://github.com/sini/genie-agent/blob/main/examples/helm/genie-guard-values.yaml)
+to pair `genie-guard` with the leaf sidecar (`leaf.containers` and `leaf.volumes`).
+
 Each hub entry becomes `{"address", "ca": "/etc/xmsg/tls/ca.crt", "identities": [identity],
 "allow": ["list"]}`. The hub's own `peers.json` needs a matching entry for the leaf, with
 `"leaf": true` and the leaf's SPIFFE identity; see
