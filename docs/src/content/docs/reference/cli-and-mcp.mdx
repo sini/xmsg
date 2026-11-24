@@ -180,6 +180,11 @@ parser as `check-peers`. Optional saved enrollment metadata supplies expiry and 
 checks; its CA probe makes a TLS handshake only. Doctor does not repair files, initialize
 or migrate a database, register a service, renew credentials or send messages. It does not
 call the ordinary recipient listing or enrollment-pending endpoints, which can change daemon state.
+The [pi](/harnesses/pi/#finding-the-daemon), [opencode](/harnesses/opencode/#finding-the-daemon)
+and [Hermes](/harnesses/hermes/#finding-the-daemon) plugins call `xmsg doctor --json` to discover
+the daemon's managed sockets. Doctor also checks `install.endpoint_pins`
+(<Status id="xmsg.install-contract" />) against `owner.json`, failing when the daemon recorded
+different endpoints and nothing answers at the resolved ones.
 
 The planned liveness check aggregates **process** evidence as `live`, `gone` or `unknown`,
 with counts by catalogue state and observation reason. A historical `seen` row with

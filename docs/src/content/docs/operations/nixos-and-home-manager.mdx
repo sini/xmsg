@@ -230,6 +230,8 @@ programs.xmsg.federation = {
 
 ## NixOS system services
 
+<Status id="nixos.instances" />
+
 `nixosModules.xmsg` provides `services.xmsg.instances.<name>` for running isolated system-user
 `xmsg serve` daemons (`xmsg-<name>.service`). Each instance gets its own `0700` `RuntimeDirectory`
 and `StateDirectory`, pinned sockets by default, `ProtectProc = "invisible"`, and an evaluation

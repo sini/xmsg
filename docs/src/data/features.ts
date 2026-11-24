@@ -370,7 +370,17 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		id: 'nixos.module-options',
 		title: 'NixOS and Home Manager module options',
 		owner: 'sini',
-		evidence: [{ path: 'nix/modules/home-manager.nix', anchor: 'stableExecutable = mkOption' }],
+		evidence: [
+			{ path: 'nix/modules/home-manager.nix', anchor: 'stableExecutable = mkOption' },
+			{ path: 'nix/modules/home-manager.nix', anchor: 'sockets.dir = mkOption' },
+		],
+	},
+	'nixos.instances': {
+		id: 'nixos.instances',
+		title: 'NixOS system-user xmsg serve instances',
+		owner: 'sini',
+		evidence: [{ path: 'nix/modules/nixos.nix', anchor: 'options.services.xmsg.instances = mkOption' }],
+		plannedSince: '2026-11-23',
 	},
 	'fleet-observer.retention': {
 		id: 'fleet-observer.retention',
@@ -392,6 +402,7 @@ export const FEATURES: Record<string, FeatureEntry> = {
 			{ path: 'src/install_paths.rs', anchor: 'pub fn resolve_install(' },
 			{ path: 'src/runtime_lock.rs', anchor: 'pub fn bind_and_publish_socket(' },
 			{ path: 'src/doctor_install.rs', anchor: 'pub fn inspect_install(' },
+			{ path: 'src/doctor_install.rs', anchor: 'fn endpoint_pins_check(' },
 			{ path: 'src/storage.rs', anchor: 'pub fn init_db(' },
 		],
 		plannedSince: '2026-11-21',

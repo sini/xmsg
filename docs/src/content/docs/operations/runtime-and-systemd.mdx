@@ -363,6 +363,8 @@ service wait, bounded, until `agent.sock` accepts. With systemd, tie the service
 
 ## NixOS system-service instances
 
+<Status id="nixos.instances" />
+
 For dedicated system-user daemons on NixOS (such as isolated worker or service tiers),
 `nixosModules.xmsg` provides `services.xmsg.instances.<name>`:
 
