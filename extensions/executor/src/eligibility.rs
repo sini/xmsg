@@ -3,7 +3,8 @@ use crate::{
     control::ErrorCode,
 };
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct AdapterQualification {
     pub(crate) key: QualificationKey,
     pub(crate) adapter_sha256: String,
@@ -79,6 +80,10 @@ impl Eligibility {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn fixture_records(&self) -> Vec<AdapterQualification> {
+        self.records.clone()
+    }
     #[cfg(test)]
     pub(crate) fn fixture(records: Vec<AdapterQualification>) -> Self {
         Self { records }

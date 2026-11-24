@@ -35,7 +35,7 @@ pub(crate) struct NativeSubmission {
 
 pub(crate) fn initialize(db: &Connection) -> Result<(), ErrorCode> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS native_bindings(session_id TEXT NOT NULL,generation INTEGER NOT NULL,binding TEXT NOT NULL,turn_sequence INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(session_id,generation));
-      CREATE TABLE IF NOT EXISTS native_operations(admission_id INTEGER PRIMARY KEY,session_id TEXT NOT NULL,generation INTEGER NOT NULL,transport_epoch TEXT NOT NULL,enqueued_sequence INTEGER NOT NULL,state TEXT NOT NULL,command TEXT);").map_err(storage)
+      CREATE TABLE IF NOT EXISTS native_operations(admission_id INTEGER PRIMARY KEY,session_id TEXT NOT NULL,generation INTEGER NOT NULL,transport_epoch TEXT NOT NULL,enqueued_sequence INTEGER NOT NULL,state TEXT NOT NULL,command TEXT,rpc_id TEXT);").map_err(storage)
 }
 
 fn storage(_: impl std::fmt::Display) -> ErrorCode {
@@ -113,6 +113,145 @@ fn addressed(target: &Target) -> Result<(&str, u64), ErrorCode> {
 }
 
 impl Journal {
+    pub(crate) fn observe_native(
+        &mut self,
+        native: &NativeBinding,
+        driver: &Driver,
+        event: &crate::acp::Event,
+        rpc: Option<&crate::framing::RequestId>,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+    ) -> Result<Option<crate::approval::NativePending>, ErrorCode> {
+        if matches!(event, crate::acp::Event::PendingPermission { .. }) {
+            return self.permission_event(native, driver, event, clock);
+        }
+        let policy = self.runtime_policy.clone();
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        if binding(&tx, &native.identity.session_id, native.identity.generation)? != *native {
+            return Err(ErrorCode::PendingMismatch);
+        }
+        let generation = integer(native.identity.generation)?;
+        let active: Option<String> = tx
+            .query_row(
+                "SELECT active_turn FROM sessions WHERE id=?1 AND generation=?2",
+                params![native.identity.session_id, generation],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?
+            .ok_or(ErrorCode::StaleGeneration)?;
+        let mut selected = journal::resolved_for_target(
+            &tx,
+            &Target::Execution {
+                session_id: native.identity.session_id.clone(),
+                generation: native.identity.generation,
+            },
+        )?;
+        if matches!(event, crate::acp::Event::SteeringOutcome { .. })
+            && !selected
+                .required_capabilities
+                .contains(&Capability::StrictSteer)
+        {
+            selected.required_capabilities.push(Capability::StrictSteer);
+        }
+        let configuration = journal::config(&tx)?;
+        let qualified = policy.as_deref().is_some_and(|p| {
+            p.require_at(
+                &selected,
+                configuration.revision,
+                clock,
+                journal::runtime_disabled(&tx).unwrap_or(true),
+            )
+            .is_ok()
+        });
+        let at = clock()?;
+        let encoded=serde_json::to_string(&serde_json::json!({"observed_at":at,"transport_epoch":native.transport_epoch,"native_event":event})).map_err(storage)?;
+        let bytes:i64=tx.query_row("SELECT COALESCE(SUM(length(CAST(event AS BLOB))),0) FROM execution_events WHERE session_id=?1 AND generation=?2",params![native.identity.session_id,generation],|r|r.get(0)).map_err(storage)?;
+        if bytes
+            .checked_add(i64::try_from(encoded.len()).map_err(storage)?)
+            .is_none_or(|n| n > i64::from(selected.budget.max_content_bytes))
+        {
+            return Err(ErrorCode::ResourceLimit);
+        }
+        let cursor:i64=tx.query_row("SELECT MAX(e.cursor,COALESCE((SELECT MAX(v.cursor) FROM execution_events v WHERE v.session_id=e.session_id AND v.generation=e.generation),0))+1 FROM executions e WHERE e.session_id=?1 AND e.generation=?2",params![native.identity.session_id,generation],|r|r.get(0)).map_err(storage)?;
+        tx.execute(
+            "INSERT INTO execution_events VALUES(?1,?2,?3,?4)",
+            params![native.identity.session_id, generation, cursor, encoded],
+        )
+        .map_err(storage)?;
+        tx.execute(
+            "UPDATE executions SET cursor=?1 WHERE session_id=?2 AND generation=?3",
+            params![cursor, native.identity.session_id, generation],
+        )
+        .map_err(storage)?;
+        match event {
+            crate::acp::Event::PromptFinished {
+                turn_id,
+                quiescence_unproven,
+                ..
+            } => {
+                if active.as_deref() != Some(turn_id.as_str()) {
+                    return Err(ErrorCode::StaleTurn);
+                }
+                let key = serde_json::to_string(rpc.ok_or(ErrorCode::PendingMismatch)?)
+                    .map_err(storage)?;
+                let changed=tx.execute("UPDATE native_operations SET state=?1 WHERE session_id=?2 AND generation=?3 AND transport_epoch=?4 AND rpc_id=?5 AND state='submitted' AND json_extract(command,'$.command')='prompt' AND json_extract(command,'$.turn_id')=?6",params![if qualified && !quiescence_unproven {"turn_ended"} else {"unknown"},native.identity.session_id,generation,native.transport_epoch,key,turn_id]).map_err(storage)?;
+                if changed != 1 {
+                    return Err(ErrorCode::PendingMismatch);
+                }
+                tx.execute("UPDATE approvals SET consumed=1 WHERE session_id=?1 AND generation=?2 AND turn_id=?3",params![native.identity.session_id,generation,turn_id]).map_err(storage)?;
+                tx.execute("UPDATE native_pending SET state=?1 WHERE session_id=?2 AND generation=?3 AND turn_id=?4 AND state IN('pending','decision_recorded')",params![if qualified && !quiescence_unproven {"turn_ended"} else {"unknown"},native.identity.session_id,generation,turn_id]).map_err(storage)?;
+                if qualified && !quiescence_unproven {
+                    tx.execute("UPDATE sessions SET active_turn=NULL,state='background' WHERE id=?1 AND generation=?2 AND active_turn=?3",params![native.identity.session_id,generation,turn_id]).map_err(storage)?;
+                } else {
+                    mark_unknown(&tx, native)?;
+                }
+            }
+            crate::acp::Event::SteeringOutcome {
+                turn_id, outcome, ..
+            } => {
+                if active.as_deref() != Some(turn_id.as_str()) {
+                    return Err(ErrorCode::StaleTurn);
+                }
+                let key = serde_json::to_string(rpc.ok_or(ErrorCode::PendingMismatch)?)
+                    .map_err(storage)?;
+                let state = if qualified {
+                    match outcome {
+                        crate::acp::SteeringOutcome::Injected => "injected",
+                        crate::acp::SteeringOutcome::PromptRequired => "not_injected",
+                        crate::acp::SteeringOutcome::Unknown => "unknown",
+                    }
+                } else {
+                    "unknown"
+                };
+                let changed=tx.execute("UPDATE native_operations SET state=?1 WHERE session_id=?2 AND generation=?3 AND transport_epoch=?4 AND rpc_id=?5 AND state='submitted' AND json_extract(command,'$.command')='steer'",params![state,native.identity.session_id,generation,native.transport_epoch,key]).map_err(storage)?;
+                if changed != 1 {
+                    return Err(ErrorCode::PendingMismatch);
+                }
+            }
+            crate::acp::Event::RequestFailed { turn_id, .. } => {
+                if turn_id.is_some() {
+                    mark_unknown(&tx, native)?;
+                }
+                if let Some(rpc) = rpc {
+                    tx.execute("UPDATE native_operations SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND rpc_id=?4",params![native.identity.session_id,generation,native.transport_epoch,serde_json::to_string(rpc).map_err(storage)?]).map_err(storage)?;
+                }
+            }
+            crate::acp::Event::ModeObserved { mode_id, .. } if mode_id != &native.native_mode => {
+                mark_unknown(&tx, native)?
+            }
+            crate::acp::Event::ModelObserved { model_id, .. }
+                if model_id != &native.native_model_id =>
+            {
+                mark_unknown(&tx, native)?
+            }
+            _ => {}
+        }
+        tx.commit().map_err(storage)?;
+        Ok(None)
+    }
     pub(crate) fn native_transport_unknown(
         &mut self,
         native: &NativeBinding,
@@ -147,6 +286,7 @@ impl Journal {
         clock: &dyn Fn() -> Result<i64, ErrorCode>,
         writer: &mut crate::supervisor::DeadlineIo<'_, impl std::io::Write + std::os::fd::AsRawFd>,
     ) -> Result<bool, ErrorCode> {
+        writer.limit_to(std::time::Instant::now() + std::time::Duration::from_secs(2));
         let Some(submission) = self.reserve_native(id, driver, epoch, clock)? else {
             return Ok(false);
         };
@@ -195,7 +335,13 @@ impl Journal {
                 return Err(ErrorCode::RequestConflict);
             }
             crate::framing::write_frame(writer, &frame).map_err(|_| ErrorCode::Storage)?;
-            tx.execute("UPDATE native_operations SET state='submitted' WHERE admission_id=?1 AND state='submitting'",[id]).map_err(storage)?;
+            let rpc = match &frame {
+                crate::framing::Frame::Request(r) => {
+                    Some(serde_json::to_string(&r.id).map_err(storage)?)
+                }
+                _ => None,
+            };
+            tx.execute("UPDATE native_operations SET state='submitted',rpc_id=?1 WHERE admission_id=?2 AND state='submitting'",params![rpc,id]).map_err(storage)?;
             tx.commit().map_err(storage)
         })();
         if let Err(error) = result {
@@ -413,7 +559,7 @@ impl Journal {
             )
             .map_err(storage)?;
         tx.execute(
-            "INSERT INTO native_operations VALUES(?1,?2,?3,?4,?5,'queued',NULL)",
+            "INSERT INTO native_operations VALUES(?1,?2,?3,?4,?5,'queued',NULL,NULL)",
             params![
                 id,
                 session,
@@ -597,4 +743,17 @@ impl Journal {
             command,
         }))
     }
+}
+
+fn mark_unknown(tx: &rusqlite::Transaction<'_>, native: &NativeBinding) -> Result<(), ErrorCode> {
+    let generation = integer(native.identity.generation)?;
+    tx.execute(
+        "UPDATE sessions SET state='unknown' WHERE id=?1 AND generation=?2",
+        params![native.identity.session_id, generation],
+    )
+    .map_err(storage)?;
+    tx.execute("UPDATE executions SET state='unknown' WHERE session_id=?1 AND generation=?2 AND state!='stopped'",params![native.identity.session_id,generation]).map_err(storage)?;
+    tx.execute("UPDATE approvals SET consumed=1 WHERE id IN(SELECT approval_id FROM native_pending WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('pending','decision_recorded'))",params![native.identity.session_id,generation,native.transport_epoch]).map_err(storage)?;
+    tx.execute("UPDATE native_pending SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('pending','decision_recorded')",params![native.identity.session_id,generation,native.transport_epoch]).map_err(storage)?;
+    Ok(())
 }

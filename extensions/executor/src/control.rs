@@ -16,6 +16,8 @@ use std::{
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
+    #[error("pre_launch_failed")]
+    PreLaunchFailed,
     #[error("peer_uid")]
     PeerUid,
     #[error("attestation_unavailable")]
@@ -167,6 +169,24 @@ pub struct ControlReply {
     pub receipt: OperationReceipt,
     pub dispatch: Option<AdmittedDispatch>,
     pub decision: Option<crate::protocol::ApproveArgs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_launch_failure: Option<PreLaunchFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PreLaunchFailure {
+    Failed {
+        admission_id: i64,
+        code: ErrorCode,
+        submission: PreLaunchSubmission,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreLaunchSubmission {
+    NotAttempted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
