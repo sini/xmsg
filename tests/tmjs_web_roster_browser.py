@@ -598,8 +598,8 @@ def main():
                 page.wait_for_timeout(150)
                 page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
                 assert len(state.ws_conns) == conns_before + 1
-                fleet_4403 = [f for f in state.client_frames if f.get("type") == "subscribe" and f.get("sub") == "fleet"]
-                assert fleet_4403 and "cursor" not in fleet_4403[-1], f"4403 must clear cursor, got {fleet_4403}"
+                subs_4403 = [f for f in state.client_frames if f.get("type") == "subscribe"]
+                assert len(subs_4403) >= 2 and all("cursor" not in f for f in subs_4403), f"4403 must clear all cursors, got {subs_4403}"
 
                 # Second 4403 where re-admit upgrade fails -> stops at re-authenticate
                 state.ws_upgrade_status = 403

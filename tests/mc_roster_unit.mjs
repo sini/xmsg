@@ -297,10 +297,20 @@ test("WR-4b / WR-5a / WR-5d projection invariants (removed_retained, retired sub
   assert.equal(applied, false, "late snapshot for retired detail sub must be ignored");
   assert.equal(store.nodes.get("old-node")?.status, "removed_retained");
 
-  // m15: 4403 reauth clears cursors so resume does not carry the old cursor
+  // m15 / n03: 4403 reauth clears cursors on EVERY sub (fleet, attention, node)
+  const attSub = store.allocSub("attention");
+  attSub.cursor = "c_att";
+  attSub.streamEpoch = "ep_att";
+  attSub.synced = true;
+  const nodeSub = store.allocSub("node", "old-node");
+  nodeSub.cursor = "c_n";
+  nodeSub.streamEpoch = "ep_n";
+  nodeSub.synced = true;
   store.clearAllForReauth();
-  const fleetSub = store.subs.get("fleet");
-  assert.equal(fleetSub?.cursor, undefined);
-  assert.equal(fleetSub?.streamEpoch, undefined);
-  assert.equal(fleetSub?.synced, false);
+  assert.ok(store.subs.size >= 3);
+  for (const rec of store.subs.values()) {
+    assert.equal(rec.cursor, undefined, `sub ${rec.sub} cursor must be cleared`);
+    assert.equal(rec.streamEpoch, undefined, `sub ${rec.sub} streamEpoch must be cleared`);
+    assert.equal(rec.synced, false, `sub ${rec.sub} synced must be cleared`);
+  }
 });
