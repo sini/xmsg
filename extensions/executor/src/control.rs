@@ -73,6 +73,8 @@ pub struct DispatchTemplate {
     pub team_id: String,
     pub profile_id: String,
     pub resolved: ResolvedDispatch,
+    #[serde(default)]
+    pub lifecycle_verbs: Vec<crate::protocol::Verb>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +101,21 @@ impl OwnerConfig {
             }
         }
         for d in &self.defaults {
+            for (index, verb) in d.lifecycle_verbs.iter().enumerate() {
+                if !matches!(
+                    verb,
+                    crate::protocol::Verb::Send
+                        | crate::protocol::Verb::Steer
+                        | crate::protocol::Verb::Interrupt
+                        | crate::protocol::Verb::Resume
+                        | crate::protocol::Verb::Stop
+                        | crate::protocol::Verb::Status
+                        | crate::protocol::Verb::Result
+                ) || d.lifecycle_verbs[..index].contains(verb)
+                {
+                    return Err(ErrorCode::InvalidConfiguration);
+                }
+            }
             let p = self
                 .profiles
                 .iter()
@@ -126,6 +143,10 @@ mod tests;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AdminCommand {
+    DisableRuntime {
+        request_id: String,
+        expected_revision: u64,
+    },
     ReplacePolicy {
         request_id: String,
         expected_revision: u64,
@@ -153,6 +174,8 @@ pub struct ControlReply {
 pub struct AdmittedDispatch {
     pub session_id: String,
     pub resolved: ResolvedDispatch,
+    #[serde(default)]
+    pub delegated_verbs: Vec<crate::protocol::Verb>,
 }
 
 pub struct ControlService {

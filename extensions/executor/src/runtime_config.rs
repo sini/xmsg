@@ -104,6 +104,45 @@ impl PinnedExecutable {
 }
 
 impl RuntimeConfig {
+    pub(crate) fn program_for(
+        &self,
+        resolved: &crate::capability::ResolvedDispatch,
+    ) -> Result<&ProgramConfig, ErrorCode> {
+        self.programs
+            .iter()
+            .find(|p| p.pin_id == resolved.qualification.pin_id)
+            .ok_or(ErrorCode::InvalidConfiguration)
+    }
+
+    pub fn effective_digest(
+        &self,
+        resolved: &crate::capability::ResolvedDispatch,
+    ) -> Result<String, ErrorCode> {
+        let program = self.program_for(resolved)?;
+        let workspace = self
+            .workspaces
+            .iter()
+            .find(|w| {
+                w.repo_id == resolved.workspace.repo_identity
+                    && w.destination_selector == resolved.workspace.destination_selector
+                    && w.base_revision == resolved.workspace.base_revision
+            })
+            .ok_or(ErrorCode::InvalidConfiguration)?;
+        let bytes = serde_json::to_vec(&(
+            &self.paths,
+            program,
+            workspace,
+            &resolved.harness,
+            &resolved.model,
+            &resolved.environment,
+            &resolved.profile,
+            &resolved.workspace,
+            &resolved.budget,
+        ))
+        .map_err(invalid)?;
+        Ok(hex::encode(Sha256::digest(bytes)))
+    }
+
     pub fn validate(&self) -> Result<(), ErrorCode> {
         self.control.validate()?;
         if self.version != 1 {

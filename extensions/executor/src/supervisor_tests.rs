@@ -330,6 +330,7 @@ fn fixture() -> Fixture {
             team_id: "team-a".into(),
             profile_id: "safe".into(),
             resolved,
+            lifecycle_verbs: Vec::new(),
         }],
     };
     let service = ControlService::open(
