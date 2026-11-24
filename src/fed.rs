@@ -1966,9 +1966,20 @@ pub fn split_peer_ref(r: &str) -> Option<(&str, &str)> {
 // Pin Extraction & Normalization
 // -----------------------------------------------------------------------------
 
-/// Startup: cancels every open pairing intent, ending its capacity reservation.
-pub fn cancel_pairing_intents(conn: &rusqlite::Connection) -> Result<usize, String> {
-    crate::pairing::store::cancel_open_intents(conn).map_err(|e| e.to_string())
+/// Serve start: cancels every open pairing intent (no ceremony survives a restart), then
+/// applies the store to the first policy generation. A failed cancel is logged and never
+/// blocks serving or revocation; an unreadable store still refuses to start.
+pub fn startup_pairing_authority(
+    conn: &rusqlite::Connection,
+    peers: &mut PeersMap,
+    own_cert_der: &[u8],
+) -> Result<(), String> {
+    if let Err(e) = crate::pairing::store::cancel_open_intents(conn) {
+        tracing::warn!("pairing: cancelling open intents at startup failed: {e}");
+    }
+    peers
+        .apply_pairing_authority(conn, own_cert_der)
+        .map(|_| ())
 }
 
 pub fn normalize_pin(pin: &str) -> String {
@@ -7525,6 +7536,8 @@ pub struct CredentialReloader {
     last_good: Mutex<Option<FileInputs>>,
     #[cfg(test)]
     after_snapshot: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    after_store_snapshot: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// The parsed file inputs of the installed generation, kept so a policy-only rebuild reads
@@ -7626,6 +7639,8 @@ impl CredentialReloader {
             last_good: Mutex::new(None),
             #[cfg(test)]
             after_snapshot: Mutex::new(None),
+            #[cfg(test)]
+            after_store_snapshot: Mutex::new(None),
         };
 
         // Populate initial configuration and hashes
@@ -7925,6 +7940,8 @@ impl CredentialReloader {
             crate::pairing::store::merge_snapshot(&conn, &mut merged)
                 .map_err(|e| AppError::Internal(format!("pairing authority: {e}")))?;
         }
+        #[cfg(test)]
+        Self::run_hook(&self.after_store_snapshot);
         let dyn_tls = self.build_from_inputs(&inputs, &merged)?;
         if !self.install(&merged, dyn_tls, None, None) {
             return Ok(None);
@@ -7952,6 +7969,14 @@ impl CredentialReloader {
         };
         self.publish_store_locked()?;
         Ok(revision)
+    }
+
+    #[cfg(test)]
+    fn run_hook(hook: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>) {
+        let hook = hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     #[cfg(test)]

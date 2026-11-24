@@ -965,3 +965,107 @@ fn a_block_cancels_the_devices_open_intents_and_their_reservations() {
         Err(StoreError::IntentUnavailable)
     ));
 }
+
+#[test]
+fn activation_refuses_after_the_intent_expires_inside_the_ceremony_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = file_db(&dir);
+    let (us, peer) = (Device::new(), Device::new());
+    let mut req = request(&peer, PairingProfile::Contact);
+    req.expires_at = NOW + 5;
+    let intent = reserve_intent(&conn, &req, NOW).unwrap();
+    reserve_capacity(&conn, &intent.intent_id, NOW).unwrap();
+    let ceremony = Ceremony {
+        us: &us,
+        peer: &peer,
+        grant_id: intent.grant_id,
+        profile: PairingProfile::Contact,
+        exporter: [3; 32],
+    };
+    // The ceremony's signed window runs to NOW+60; the local intent ended at NOW+5.
+    assert!(
+        matches!(
+            activate(
+                &conn,
+                &us.id,
+                &intent.intent_id,
+                &ceremony.receipts(),
+                NOW + 10
+            ),
+            Err(StoreError::IntentUnavailable)
+        ),
+        "an expired intent activated inside the ceremony window"
+    );
+    assert!(!send_ok(&conn, &us, &peer));
+}
+
+#[test]
+fn an_intent_expired_in_real_time_still_holds_its_reservation() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = file_db(&dir);
+    // Times long before the real clock, so the SQLite clock sees every intent as expired.
+    let past = 1_000_000;
+    fill_manual_slots(&conn, MAX_MANUAL_GRANTS - 1);
+    let mut req = request(&Device::new(), PairingProfile::Contact);
+    req.expires_at = past + 100;
+    let intent = reserve_intent(&conn, &req, past).unwrap();
+    reserve_capacity(&conn, &intent.intent_id, past).unwrap();
+    assert_eq!(slots_used(&conn, None).unwrap(), MAX_MANUAL_GRANTS);
+    let mut next = request(&Device::new(), PairingProfile::Contact);
+    next.expires_at = past + 100;
+    assert!(
+        matches!(
+            reserve_intent(&conn, &next, past),
+            Err(StoreError::GrantsFull)
+        ),
+        "a reservation lapsed on the real clock"
+    );
+}
+
+#[test]
+fn two_reservers_at_the_last_slot_admit_exactly_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = file_db(&dir);
+    fill_manual_slots(&conn, MAX_MANUAL_GRANTS - 3);
+    let intents: Vec<_> = (0..2)
+        .map(|_| {
+            reserve_intent(
+                &conn,
+                &request(&Device::new(), PairingProfile::Contact),
+                NOW,
+            )
+            .unwrap()
+        })
+        .collect();
+    fill_manual_slots_from(&conn, MAX_MANUAL_GRANTS);
+    fill_manual_slots_from(&conn, MAX_MANUAL_GRANTS + 1);
+    assert_eq!(slots_used(&conn, None).unwrap(), MAX_MANUAL_GRANTS - 1);
+    drop(conn);
+    let barrier = Arc::new(Barrier::new(2));
+    let threads: Vec<_> = intents
+        .iter()
+        .map(|intent| {
+            let (barrier, path, id) = (
+                barrier.clone(),
+                dir.path().join("xmsg.db"),
+                intent.intent_id,
+            );
+            std::thread::spawn(move || {
+                let conn = Connection::open(path).unwrap();
+                conn.busy_timeout(Duration::from_secs(10)).unwrap();
+                barrier.wait();
+                reserve_capacity(&conn, &id, NOW)
+            })
+        })
+        .collect();
+    let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    assert_eq!(
+        results.iter().filter(|r| r.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
+    assert!(results
+        .iter()
+        .any(|r| matches!(r, Err(StoreError::GrantsFull))));
+    assert_eq!(slots_used(&file_db(&dir), None).unwrap(), MAX_MANUAL_GRANTS);
+}

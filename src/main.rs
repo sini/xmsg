@@ -2022,12 +2022,7 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
             .map_err(|e| format!("failed to load peers file: {e}"))?;
         {
             let conn = db.lock().unwrap_or_else(|e| e.into_inner());
-            // No ceremony survives a restart, so no intent or capacity reservation does either.
-            if let Err(e) = xmsg::fed::cancel_pairing_intents(&conn) {
-                tracing::warn!("pairing: cancelling open intents at startup failed: {e}");
-            }
-            peers
-                .apply_pairing_authority(&conn, &cert_der)
+            xmsg::fed::startup_pairing_authority(&conn, &mut peers, &cert_der)
                 .map_err(|e| format!("failed to apply pairing authority: {e}"))?;
         }
         let peers_arc = Arc::new(peers);

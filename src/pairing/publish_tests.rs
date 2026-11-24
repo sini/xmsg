@@ -71,8 +71,7 @@ fn start(dir: TempDir, peer_cert: Vec<u8>, peer_id: DeviceId) -> Node {
     let mut peers = PeersMap::load_from_file(&peers_path).unwrap();
     let probe = rusqlite::Connection::open(dir.path().join("xmsg.db")).unwrap();
     crate::storage::init_db(&probe).unwrap();
-    cancel_pairing_intents(&probe).unwrap();
-    peers.apply_pairing_authority(&probe, &cert).unwrap();
+    startup_pairing_authority(&probe, &mut peers, &cert).unwrap();
     drop(probe);
     let fs = fed_state(&dir, Arc::new(peers.clone()), &cert, &[]);
     let reloader = Arc::new(
@@ -353,4 +352,157 @@ fn a_file_rebuild_imports_a_new_pin_and_records_the_snapshot_revision() {
         store::authority_revision(&conn).unwrap(),
         "the installed generation does not carry its snapshot revision"
     );
+}
+
+/// Installs a one-shot barrier pause into a reloader hook: the first caller reaching it
+/// signals `reached` and waits for `release`.
+fn pause_once(hook: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>) -> (Arc<Barrier>, Arc<Barrier>) {
+    let reached = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let armed = Arc::new(AtomicBool::new(true));
+    let (r, l) = (reached.clone(), release.clone());
+    *hook.lock().unwrap() = Some(Arc::new(move || {
+        if armed.swap(false, Ordering::SeqCst) {
+            r.wait();
+            l.wait();
+        }
+    }));
+    (reached, release)
+}
+
+#[test]
+fn unblock_proves_against_a_pin_a_concurrent_file_rebuild_installs() {
+    let node = node();
+    let (_, _, other_pin) = generate_self_signed_ed25519("other").unwrap();
+    let other = device_id_from_pin(&other_pin).unwrap();
+    store::block_device(&node.fs.db.lock().unwrap(), &other, 0).unwrap();
+    node.reloader.check_and_reload().unwrap();
+    // The new peers file pins the blocked key; its rebuild pauses after its snapshot.
+    let pin = format!("sha256:{}", hex::encode(node.peer_id));
+    let mut peers: serde_json::Value = serde_json::from_str(&peers_json(&pin, "")).unwrap();
+    peers["other"] =
+        serde_json::json!({"address": "192.0.2.11:7788", "pin": other_pin, "allow": ["send"]});
+    node.rewrite_peers(&peers.to_string());
+    let (reached, release) = pause_once(&node.reloader.after_snapshot);
+    let rebuild = {
+        let reloader = node.reloader.clone();
+        std::thread::spawn(move || reloader.check_and_reload())
+    };
+    reached.wait();
+    let unblock = {
+        let reloader = node.reloader.clone();
+        std::thread::spawn(move || reloader.unblock_device(&other))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    release.wait();
+    rebuild.join().unwrap().unwrap();
+    assert!(
+        unblock.join().unwrap().is_err(),
+        "unblock proved against a stale file while a rebuild installed a pin for the key"
+    );
+    assert!(store::blocked_devices(&node.fs.db.lock().unwrap())
+        .unwrap()
+        .contains(&other));
+}
+
+#[test]
+fn a_store_publication_cannot_install_stale_file_inputs_over_a_newer_file_generation() {
+    let node = node();
+    node.block();
+    // A tick with no file change publishes the block; it pauses after its store snapshot.
+    let (reached, release) = pause_once(&node.reloader.after_store_snapshot);
+    let tick = {
+        let reloader = node.reloader.clone();
+        std::thread::spawn(move || reloader.check_and_reload())
+    };
+    reached.wait();
+    let pin = format!("sha256:{}", hex::encode(node.peer_id));
+    let (_, _, desk_pin) = generate_self_signed_ed25519("desk").unwrap();
+    let mut peers: serde_json::Value = serde_json::from_str(&peers_json(&pin, "")).unwrap();
+    peers["desk"] =
+        serde_json::json!({"address": "192.0.2.10:7788", "pin": desk_pin, "allow": ["send"]});
+    node.rewrite_peers(&peers.to_string());
+    let rebuild = {
+        let reloader = node.reloader.clone();
+        std::thread::spawn(move || reloader.check_and_reload())
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    release.wait();
+    tick.join().unwrap().unwrap();
+    rebuild.join().unwrap().unwrap();
+    assert!(
+        node.fs.current_peers().get("desk").is_some(),
+        "a store publication from older file inputs replaced a newer file generation"
+    );
+    assert!(node.denied());
+}
+
+#[test]
+fn a_policy_only_publication_reads_no_file() {
+    let node = node();
+    for name in ["cert.pem", "key.pem", "peers.json"] {
+        std::fs::remove_file(node.dir.path().join(name)).unwrap();
+    }
+    let revision = node.block();
+    assert_eq!(
+        node.reloader.publish_store().unwrap(),
+        Some(revision),
+        "the policy-only publication needed the credential or peers files"
+    );
+    assert!(node.denied());
+}
+
+#[test]
+fn a_failed_startup_cancel_neither_blocks_serving_nor_revocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("xmsg.db")).unwrap();
+    crate::storage::init_db(&conn).unwrap();
+    let (cert, _, pin) = generate_self_signed_ed25519("own").unwrap();
+    let (_, _, peer_pin) = generate_self_signed_ed25519("laptop").unwrap();
+    let peer = device_id_from_pin(&peer_pin).unwrap();
+    let exposure = crate::pairing::codec::ExposurePolicy {
+        profile: crate::pairing::codec::PairingProfile::Contact,
+        target_selectors: vec!["inbox".into()],
+        principal_selectors: vec!["alice".into()],
+        max_body_bytes: 1,
+        max_attachment_bytes: 1,
+        rate_burst: 1,
+        rate_per_minute: 1,
+    };
+    let now = crate::storage::now_epoch_secs();
+    let open = store::reserve_intent(
+        &conn,
+        &store::IntentRequest {
+            peer,
+            exposure,
+            grant_not_after: None,
+            revision: 1,
+            expires_at: now + 60,
+            replaces: None,
+        },
+        now,
+    )
+    .unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_cancel BEFORE UPDATE OF state ON pairing_intents
+         WHEN NEW.state = 'cancelled'
+         BEGIN SELECT RAISE(ABORT, 'injected startup cancel failure'); END;",
+    )
+    .unwrap();
+    assert!(
+        store::cancel_open_intents(&conn).is_err(),
+        "the fault was not injected"
+    );
+    let mut peers = PeersMap::load_from_json(&peers_json(&peer_pin, "")).unwrap();
+    startup_pairing_authority(&conn, &mut peers, &cert)
+        .expect("a failed startup cancel stopped the node from serving");
+    assert_eq!(
+        peers.authority_revision,
+        store::authority_revision(&conn).unwrap()
+    );
+    let _ = (open, pin);
+    // Revocation still works while the cancel keeps failing.
+    store::remove(&conn, &[0x42; 16], now).unwrap();
+    let (_, _, other_pin) = generate_self_signed_ed25519("other").unwrap();
+    store::block_device(&conn, &device_id_from_pin(&other_pin).unwrap(), now).unwrap();
 }
