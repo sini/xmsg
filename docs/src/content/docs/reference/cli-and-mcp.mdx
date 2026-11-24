@@ -834,3 +834,27 @@ unavailable result. macOS requires qualification on the exact OS, kernel and
 runtime in use. For example, use `xmsg serve --help` to inspect the socket
 options; a real team pilot remains separate work. See the
 [executor boundary](/reference/executor-contracts/#daemon-caller-attribution-bridge).
+
+
+## Optional executor CLI
+
+<Status id="teams.executor-contracts" />
+
+`xmsg-executor` is built separately from `xmsg`. Its staged commands are:
+
+| Command | Purpose |
+| --- | --- |
+| `check-config --config <absolute-file>` | Validate owner configuration without enabling runtime execution. |
+| `serve --config <absolute-file>` | Run the optional private broker/control sockets; qualification remains default-deny. |
+| `call --config <absolute-file>` | Read one strict, bounded `LifecycleCall` JSON object from stdin on a fresh identity-attested connection. No role credential or claimed principal is sent. |
+| `human --config <absolute-file> --session <id> --generation <N>` | Query current native asks and explicitly confirm a once-only choice on the controlling terminal. No `--yes` or chat approval. |
+| `owner-disable --config <absolute-file> --expected-revision <N>` | Persist an emergency fence through the separately authenticated owner channel; stopping remains unconfirmed until observed. |
+| `content-mcp --socket <absolute-path>` | Content-only stdio sidecar, with text `list`, `send` and `reply` for its owned execution. |
+
+The caller and adapter registries are empty; these commands do not provide an
+activation flag, install adapters or qualify a native effect. There is no public
+control-MCP endpoint. The content sidecar is separate from the ordinary six
+`xmsg mcp` tools above and has no `inbox`, `replies`, attachments, `as_agent`,
+lifecycle, owner or approval operation. See the
+[executor reference](/reference/executor-contracts/) for configuration, receipts
+and the default-off boundary.

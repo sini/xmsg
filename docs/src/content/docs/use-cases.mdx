@@ -154,18 +154,41 @@ recipes remain unproven for every harness, so the command never launches or
 prints a suggested resume command. For a remote match, run the locator on its
 node when you need a native ID or local terminal detail.
 
-## Plan a mixed-harness team
+## Inspect the optional executor boundary
 
-[Teams](/concepts/teams/) is planned as an optional extension: a Claude parent
-will dispatch separate Codex and Antigravity teammates, communicate through the
-bus, and use typed, separately granted lifecycle controls. Human-only local
-parity comes before the dedicated reviewer lane.
+<Status id="teams.executor-contracts" />
 
-The foundation is developer-facing contracts, fake ACP fixtures and a
-fail-closed library control journal. There is no team launcher to run, and real
-lifecycle requests cannot pass the unavailable attestor yet. Ordinary
-[`xmsg send`](/reference/cli-and-mcp/) remains messaging; a body saying
-“interrupt this teammate” does not invoke a future interrupt operation.
+[Teams](/concepts/teams/) adds separate lifecycle control to messaging, but the
+caller and adapter registries currently remain empty/default-deny. To inspect a
+source-built executor with an existing private owner configuration:
+
+```sh
+xmsg-executor check-config --config /srv/team/executor.json
+```
+
+Success means only `configuration valid; runtime activation unavailable`. It
+neither starts a harness nor qualifies the owner configuration. Do not invent
+qualification records or put credentials in the request.
+
+A bounded read request uses the credential-free per-call facade. With the
+configured private broker already running, this example requests journal status:
+
+```sh
+printf '%s\n' '{"request":{"version":1,"request_id":"inspect-1","verb":"status","target":{"kind":"session","session_id":"session-1"},"args":{"max_events":1,"max_text_bytes":1024}}}' |
+  xmsg-executor call --config /srv/team/executor.json
+```
+
+It still needs actual per-call attribution and an explicit current status grant;
+with the shipped unqualified bridge it refuses rather than returning a forged
+identity or launching work. A same-UID process, parent label or bus message is not
+that grant. See [executor commands](/reference/executor-contracts/#optional-executor-commands).
+
+A future real Claude-parent → Codex/Antigravity pilot needs separately reviewed
+artifacts/runtime and capability evidence, protected caller policy and owner
+provisioning. Its spend bound combines a hard provider account/project cap with
+executor wall-time/content-byte limits. Ordinary [`xmsg send`](/reference/cli-and-mcp/)
+remains messaging: “interrupt this teammate” in a message is content, not an
+interrupt operation.
 
 ## Poll for open attention items from a script
 
