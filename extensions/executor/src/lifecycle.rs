@@ -111,7 +111,7 @@ impl Journal {
         driver: &mut Driver,
         epoch: &str,
         clock: &dyn Fn() -> Result<i64, ErrorCode>,
-        writer: &mut impl std::io::Write,
+        writer: &mut crate::supervisor::DeadlineIo<'_, impl std::io::Write + std::os::fd::AsRawFd>,
     ) -> Result<bool, ErrorCode> {
         let Some(submission) = self.reserve_native(id, driver, epoch, clock)? else {
             return Ok(false);

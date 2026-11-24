@@ -324,13 +324,15 @@ struct ChildManifest {
     backend: PathBuf,
     python: PathBuf,
 }
-struct DeadlineIo<'a, T: AsRawFd> {
+pub(crate) struct DeadlineIo<'a, T: AsRawFd> {
     inner: &'a mut T,
     expires: std::time::Instant,
     original_flags: i32,
+    #[cfg(test)]
+    before_poll: Option<Box<dyn FnOnce() + Send>>,
 }
 impl<'a, T: AsRawFd> DeadlineIo<'a, T> {
-    fn new(inner: &'a mut T, expires: std::time::Instant) -> std::io::Result<Self> {
+    pub(crate) fn new(inner: &'a mut T, expires: std::time::Instant) -> std::io::Result<Self> {
         let fd = inner.as_raw_fd();
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
@@ -340,9 +342,19 @@ impl<'a, T: AsRawFd> DeadlineIo<'a, T> {
             inner,
             expires,
             original_flags: flags,
+            #[cfg(test)]
+            before_poll: None,
         })
     }
-    fn ready(&self, event: i16) -> std::io::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn fixture_before_poll(&mut self, callback: impl FnOnce() + Send + 'static) {
+        self.before_poll = Some(Box::new(callback));
+    }
+    fn ready(&mut self, event: i16) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(callback) = self.before_poll.take() {
+            callback();
+        }
         loop {
             let left = self
                 .expires
