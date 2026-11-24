@@ -609,6 +609,7 @@ async fn test_e2e_post_message_pi_queue_full_503() {
                 starttime: my_proc_start,
                 registered_at: 1000,
                 cwd: "/tmp".to_string(),
+                reg: String::new(),
             },
         );
     }

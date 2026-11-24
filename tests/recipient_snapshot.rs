@@ -154,6 +154,7 @@ impl Fixture {
                 starttime: "gone".into(),
                 cwd: "/".into(),
                 registered_at: now,
+                reg: String::new(),
             },
         );
         self.state.svc_store.write().unwrap().insert(
@@ -355,6 +356,7 @@ async fn snapshot_is_bounded_sorted_and_registered_records_win_duplicates() {
             starttime: "gone".into(),
             cwd: "/".into(),
             registered_at: 2000,
+            reg: String::new(),
         },
     );
     let (status, value) = fixture.get("?read_only=true").await;

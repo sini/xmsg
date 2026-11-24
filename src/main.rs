@@ -1712,16 +1712,17 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
     apply_context_policy(&conn)?;
     xmsg::session_context::reset(&conn)?;
 
-    let db = Arc::new(Mutex::new(conn));
-    let (notify_tx, _) = broadcast::channel(1024);
-    let (pi_notify_tx, _) = broadcast::channel(1024);
-    let (svc_notify_tx, _) = broadcast::channel(1024);
-
     let agy_config = xmsg::agy::AgyConfig {
         trusted_agy_exes: args.agy_exes,
         agy_exe_strict: args.agy_exe_strict,
         ..Default::default()
     };
+    xmsg::session_context::sweep_startup_tags(&conn, &agy_config.proc_root)?;
+
+    let db = Arc::new(Mutex::new(conn));
+    let (notify_tx, _) = broadcast::channel(1024);
+    let (pi_notify_tx, _) = broadcast::channel(1024);
+    let (svc_notify_tx, _) = broadcast::channel(1024);
     let agy_store = xmsg::agy::new_agy_store();
     let pi_store = xmsg::pi::new_pi_store();
     let svc_store = xmsg::svc::new_svc_store();

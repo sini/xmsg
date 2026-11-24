@@ -36,6 +36,7 @@ pub struct AgySessionInfo {
     pub credentials: Option<AgyCredentials>,
     pub registered_at: i64,
     pub label: Option<String>,
+    pub reg: String,
 }
 
 impl AgySessionInfo {
@@ -54,6 +55,7 @@ impl AgySessionInfo {
             credentials,
             registered_at: crate::storage::now_epoch_secs(),
             label: Some("agy".to_string()),
+            reg: format!("mint:{}", crate::claim::mint_uuid_v4()),
         }
     }
 
@@ -89,6 +91,7 @@ impl From<AgyCredentials> for AgySessionInfo {
             credentials: Some(c),
             registered_at: 0,
             label: Some("agy".to_string()),
+            reg: format!("mint:{}", crate::claim::mint_uuid_v4()),
         }
     }
 }

@@ -29,6 +29,13 @@ impl InstanceClaim {
             format!("{}~{}", self.id, self.suffix)
         }
     }
+
+    pub fn reg(&self) -> String {
+        format!(
+            "claude:{}:{}:{}",
+            self.pid, self.proc_start, self.created_at
+        )
+    }
 }
 
 pub fn cmp_proc_start(a: &str, b: &str) -> Ordering {

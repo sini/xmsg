@@ -164,6 +164,7 @@ impl PostAuthFixture {
                             starttime: "fixture".into(),
                             cwd: String::new(),
                             registered_at: now,
+                            reg: String::new(),
                         },
                     );
                 }

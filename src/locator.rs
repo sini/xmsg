@@ -521,6 +521,7 @@ pub(crate) mod tests {
                     starttime: "unknown".into(),
                     cwd: "/private/work".into(),
                     registered_at: 1,
+                    reg: String::new(),
                 },
             );
         }

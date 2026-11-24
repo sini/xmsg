@@ -269,6 +269,7 @@ fn cell_minor_2_empty_starttime_not_alive() {
         }),
         registered_at: 0,
         label: None,
+        reg: String::new(),
     };
 
     let alive = is_agy_session_alive(&proc_root, &info);

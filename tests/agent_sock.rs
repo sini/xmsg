@@ -404,6 +404,7 @@ async fn context_updates_require_the_attested_session() {
             starttime: get_self_proc_start(),
             cwd: "/private/workspace".into(),
             registered_at: start,
+            reg: String::new(),
         },
     );
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -884,6 +885,7 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
                 starttime: "100".to_string(),
                 cwd: "/".to_string(),
                 registered_at: 1000,
+                reg: String::new(),
             },
         );
         let pi_hop1 = resolve_caller_session(

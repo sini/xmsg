@@ -135,6 +135,7 @@ const MESSAGE_STATE_TABLES: &[&str] = &[
     "codex_handoff",
     "codex_roots",
     "locator_metadata",
+    "session_tag",
 ];
 
 pub(crate) const SCHEMA_N: &str = r#"

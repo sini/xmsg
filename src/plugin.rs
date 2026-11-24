@@ -61,6 +61,7 @@ pub const SCHEMA: &str = r#"
             session TEXT NOT NULL,
             registered_at INTEGER NOT NULL,
             pid INTEGER NOT NULL,
+            reg TEXT NOT NULL DEFAULT '',
             UNIQUE (conn, session)
         );
         "#;
@@ -261,6 +262,34 @@ pub fn session(conn: &Connection, address: &str) -> rusqlite::Result<Option<Sess
         row_session,
     )
     .optional()
+}
+
+/// The registration key for a live plugin session `address`.
+pub fn session_reg(conn: &Connection, address: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT reg FROM plugin_sessions WHERE address = ?1",
+        params![address],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
+/// Every live plugin session's `(address, harness) -> reg`.
+pub fn session_regs(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::HashMap<(String, String), String>> {
+    let mut stmt = conn.prepare("SELECT address, harness, reg FROM plugin_sessions")?;
+    let mut out = std::collections::HashMap::new();
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let addr: String = row.get(0)?;
+        let harness: String = row.get(1)?;
+        let reg: String = row.get(2)?;
+        if !reg.is_empty() {
+            out.insert((addr, harness), reg);
+        }
+    }
+    Ok(out)
 }
 
 /// The session `label` held on connection `conn_id`.
@@ -674,9 +703,10 @@ where
                             .map_err(db_err)?;
                         (id, Some(sec))
                     };
+                    let reg = format!("mint:{}", crate::claim::mint_uuid_v4());
                     c.execute(
-                        "INSERT INTO plugin_sessions (address, conn, harness, session, registered_at, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![address, conn_id, &harness, session, now, peer_pid],
+                        "INSERT INTO plugin_sessions (address, conn, harness, session, registered_at, pid, reg) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![address, conn_id, &harness, session, now, peer_pid, reg],
                     )
                     .map_err(db_err)?;
                     crate::locator::record(&c, &address, &harness, &session, env.as_ref())

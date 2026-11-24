@@ -37,6 +37,7 @@ pub struct PiSessionInfo {
     pub starttime: String,
     pub cwd: String,
     pub registered_at: i64,
+    pub reg: String,
 }
 
 impl PiSessionInfo {
@@ -306,6 +307,7 @@ pub async fn handle_pi_connection_peer<
             starttime: starttime.clone(),
             cwd: req.cwd.unwrap_or_else(|| "/".to_string()),
             registered_at: now,
+            reg: format!("mint:{}", crate::claim::mint_uuid_v4()),
         };
         store.write().unwrap().insert(session_id.clone(), info);
     }

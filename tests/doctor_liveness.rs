@@ -150,6 +150,7 @@ impl Fixture {
                 starttime: "exited-process-token".into(),
                 cwd: "/".into(),
                 registered_at: now,
+                reg: String::new(),
             },
         );
     }

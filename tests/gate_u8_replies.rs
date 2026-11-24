@@ -866,6 +866,7 @@ async fn test_u8_cross_harness_push() {
             name: Some("pi-worker".to_string()),
             cwd: "/pi/workspace".to_string(),
             registered_at: 1000,
+            reg: String::new(),
         },
     );
 

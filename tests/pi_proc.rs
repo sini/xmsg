@@ -96,6 +96,7 @@ fn test_is_pi_session_alive_and_pid_recycling() {
         starttime: "11223344".to_string(),
         cwd: "/tmp".to_string(),
         registered_at: 1000,
+        reg: String::new(),
     };
 
     assert!(is_pi_session_alive(&proc_root, &info));
