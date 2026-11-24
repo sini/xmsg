@@ -67,6 +67,10 @@ pub struct RuntimeConfig {
 
 impl PinnedExecutable {
     pub fn verify(&self) -> Result<(), ErrorCode> {
+        self.observe_verified().map(|_| ())
+    }
+
+    pub(crate) fn observe_verified(&self) -> Result<ExecutableArtifact, ErrorCode> {
         if self.sha256.len() != 64
             || !self
                 .sha256
@@ -75,7 +79,24 @@ impl PinnedExecutable {
         {
             return Err(ErrorCode::InvalidConfiguration);
         }
-        let mut file = regular_file(&self.path)?;
+        let observed = ExecutableArtifact::observe(&self.path)?;
+        if observed.sha256 != self.sha256 {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        Ok(observed)
+    }
+}
+
+pub(crate) struct ExecutableArtifact {
+    file: File,
+    path: PathBuf,
+    stamp: FileStamp,
+    pub(crate) sha256: String,
+}
+
+impl ExecutableArtifact {
+    pub(crate) fn observe(path: &Path) -> Result<Self, ErrorCode> {
+        let mut file = regular_file(path)?;
         let before = file.metadata().map_err(invalid)?;
         if before.len() > MAX_PROGRAM || before.mode() & 0o111 == 0 || before.mode() & 0o022 != 0 {
             return Err(ErrorCode::InvalidConfiguration);
@@ -93,10 +114,21 @@ impl PinnedExecutable {
             hash.update(&buffer[..count]);
         }
         let after = file.metadata().map_err(invalid)?;
-        if copied != before.len()
-            || identity(&before) != identity(&after)
-            || hex::encode(hash.finalize()) != self.sha256
-        {
+        if copied != before.len() || identity(&before) != identity(&after) {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        Ok(Self {
+            file,
+            path: path.to_owned(),
+            stamp: identity(&after),
+            sha256: hex::encode(hash.finalize()),
+        })
+    }
+
+    pub(crate) fn unchanged(&self) -> Result<(), ErrorCode> {
+        let held = self.file.metadata().map_err(invalid)?;
+        let current = std::fs::symlink_metadata(&self.path).map_err(invalid)?;
+        if !current.is_file() || identity(&held) != self.stamp || identity(&current) != self.stamp {
             return Err(ErrorCode::InvalidConfiguration);
         }
         Ok(())
@@ -291,7 +323,8 @@ fn regular_file(path: &Path) -> Result<File, ErrorCode> {
     Ok(file)
 }
 
-fn identity(m: &std::fs::Metadata) -> (u64, u64, u64, u32, u32, i64, i64, i64, i64) {
+type FileStamp = (u64, u64, u64, u32, u32, i64, i64, i64, i64);
+fn identity(m: &std::fs::Metadata) -> FileStamp {
     (
         m.dev(),
         m.ino(),
@@ -325,7 +358,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let program = artifact(root.path(), "adapter");
         assert_eq!(program.verify(), Ok(()));
+        let held = program.observe_verified().unwrap();
+        assert_eq!(held.unchanged(), Ok(()));
         std::fs::write(&program.path, b"changed").unwrap();
+        assert_eq!(held.unchanged(), Err(ErrorCode::InvalidConfiguration));
         assert_eq!(program.verify(), Err(ErrorCode::InvalidConfiguration));
     }
 
