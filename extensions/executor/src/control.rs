@@ -211,6 +211,18 @@ impl WallClock for SystemClock {
     }
 }
 impl ControlService {
+    /// Adds the reviewed runtime admission fence without enabling an unqualified tuple.
+    pub fn with_runtime_configuration(
+        self,
+        configuration: crate::runtime_config::RuntimeConfig,
+    ) -> Result<Self, ErrorCode> {
+        let policy = crate::runtime_policy::RuntimePolicy::reviewed(configuration)?;
+        self.journal
+            .lock()
+            .map_err(|_| ErrorCode::Storage)?
+            .runtime_policy = Some(std::sync::Arc::new(policy));
+        Ok(self)
+    }
     #[cfg(test)]
     pub(crate) fn fixture_attributed(mut self, principal: &str) -> Self {
         self.attestor = Box::new(auth::fake::FakeAttestor {

@@ -1862,3 +1862,98 @@ fn removing_dispatch_grant_revokes_only_derived_lifecycle_authority() {
         "explicit owner session grant was removed with delegation"
     );
 }
+
+#[test]
+fn configured_runtime_with_empty_registry_has_zero_dispatch_effects() {
+    use crate::runtime_config::{
+        PinnedExecutable, ProgramConfig, RuntimeConfig, ServicePaths, WorkspaceConfig,
+    };
+    let f = delegated_fixture(vec![Verb::Send]);
+    let mut configuration: OwnerConfig = serde_json::from_str(
+        &f.service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row("SELECT body FROM configuration", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    let pin = crate::capability::builtin_pins()
+        .unwrap()
+        .pins
+        .remove(0)
+        .pin;
+    let q = &mut configuration.defaults[0].resolved.qualification;
+    q.pin_id = pin.id.clone();
+    q.adapter_version = pin.adapter_version;
+    q.runtime_version = pin.runtime_version;
+    q.native_mode = "default".into();
+    let path = |name: &str| f._dir.path().join(name);
+    let runtime = RuntimeConfig {
+        version: 1,
+        control: configuration,
+        paths: ServicePaths {
+            journal: path("journal.db"),
+            lifecycle_socket: path("lifecycle"),
+            owner_socket: path("owner"),
+            human_socket: path("human"),
+            attribution_socket: path("attribution"),
+            runtime_root: path("runtime"),
+            owner_credential_file: path("owner-proof"),
+            human_credential_file: path("human-proof"),
+        },
+        programs: vec![ProgramConfig {
+            pin_id: pin.id,
+            adapter: PinnedExecutable {
+                path: path("uncreated-adapter"),
+                sha256: "a".repeat(64),
+            },
+            native: PinnedExecutable {
+                path: path("uncreated-native"),
+                sha256: "b".repeat(64),
+            },
+            arguments: vec![],
+            native_mode: "default".into(),
+        }],
+        workspaces: vec![WorkspaceConfig {
+            repo_id: "fixture-repo".into(),
+            repository: path("repo"),
+            approved_root: path("workspaces"),
+            base_revision: "b".repeat(40),
+            destination_selector: "fixture".into(),
+        }],
+    };
+    let Fixture { _dir, service } = f;
+    let service = service.with_runtime_configuration(runtime).unwrap();
+    let reply = service
+        .lifecycle(
+            peer(),
+            ControlRequest::dispatch("unqualified-dispatch".into(), "brief".into()),
+            100,
+        )
+        .unwrap();
+    let journal = service.journal.lock().unwrap();
+    let admissions: i64 = journal
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    let executions: i64 = journal
+        .db
+        .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+        .unwrap();
+    let delegations: i64 = journal
+        .db
+        .query_row("SELECT COUNT(*) FROM session_delegations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        (admissions, executions, delegations),
+        (0, 0, 0),
+        "unqualified runtime created dispatch or authority effects"
+    );
+    assert!(
+        matches!(reply.receipt.authorization,Authorization::Denied {code} if code=="not_supported")
+    );
+}
