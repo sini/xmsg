@@ -11,10 +11,6 @@ struct ProgramArtifacts {
     adapter: Option<ExecutableArtifact>,
     native: Option<ExecutableArtifact>,
 }
-// Trusted core record references await the separately gated activation API.
-struct CallerRecordReference {
-    _activation_review: (),
-}
 fn observe_programs(configuration: &RuntimeConfig) -> Vec<ProgramArtifacts> {
     configuration
         .programs
@@ -32,7 +28,7 @@ pub(crate) struct RuntimePolicy {
     eligibility: Eligibility,
     executor: Option<Arc<ExecutableArtifact>>,
     programs: Vec<ProgramArtifacts>,
-    caller_record: Option<CallerRecordReference>,
+    pub(crate) callers: Arc<crate::caller_admission::CallerAuthority>,
 }
 
 impl RuntimePolicy {
@@ -53,7 +49,7 @@ impl RuntimePolicy {
             eligibility,
             executor,
             programs,
-            caller_record: None,
+            callers: Arc::new(crate::caller_admission::CallerAuthority::reviewed()),
         })
     }
 
@@ -79,9 +75,6 @@ impl RuntimePolicy {
         }
         if self.eligibility.is_empty() {
             return Err(ErrorCode::NotSupported);
-        }
-        if self.caller_record.is_none() {
-            return Err(ErrorCode::AttestationUnavailable);
         }
         let program = self.configuration.program_for(resolved)?;
         if self.configuration.effective_digest(resolved)?
@@ -145,15 +138,27 @@ impl RuntimePolicy {
         executor: Arc<ExecutableArtifact>,
     ) -> Self {
         let programs = observe_programs(&configuration);
+        let callers = Arc::new(crate::caller_admission::CallerAuthority::fixture(
+            &executor.sha256,
+        ));
         Self {
             configuration,
             eligibility: Eligibility::fixture(records),
             executor: Some(executor),
             programs,
-            caller_record: Some(CallerRecordReference {
-                _activation_review: (),
-            }),
+            callers,
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_with_adapter_records(
+        &self,
+        configuration: RuntimeConfig,
+        records: Vec<crate::eligibility::AdapterQualification>,
+        executor: Arc<ExecutableArtifact>,
+    ) -> Self {
+        let mut policy = Self::fixture(configuration, records, executor);
+        policy.callers = self.callers.clone();
+        policy
     }
 }
 

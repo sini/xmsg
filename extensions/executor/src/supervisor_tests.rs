@@ -901,14 +901,14 @@ fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
         let submitted: SupervisorHello = read_frame(&steer).unwrap();
         let attached: SupervisorHello = read_frame(&attach).unwrap();
         let mut notices = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let mut end =
                 accept_fixture(&buffer_barrier, "native batch and strict steer receipts").unwrap();
             end.read_exact(&mut notice).unwrap();
             notices.push(notice[0]);
         }
         notices.sort();
-        assert_eq!(notices, vec![b'E', b'S']);
+        assert_eq!(notices, vec![b'E', b'I', b'S']);
         let journal = service.journal.lock().unwrap();
         let end_cursor: i64 = journal
             .db
@@ -934,9 +934,9 @@ fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
             attached.event_cursor < end_cursor as u64,
             "attach was delayed until the native batch-end marker was processed"
         );
-        assert!(
-            matches!(status.as_str(), "submitted" | "observed"),
-            "strict steer produced no native command"
+        assert_eq!(
+            status, "injected",
+            "strict steer reply was not recorded after its actual observation barrier"
         );
         drop(journal);
         let wire = fs::read_to_string(&trace).unwrap();

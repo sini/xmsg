@@ -125,7 +125,8 @@ fn missing_scope_fields_or_attestor_bindings_refuse_context() {
         &binding,
         123,
     )
-    .unwrap();
+    .unwrap()
+    .fixture_without_attestor_context();
     assert!(matches!(
         TrustedCallerContext::from_attestation(&p),
         Err(MissingTrustProperty::ScopedCallerEvidence)

@@ -16,6 +16,16 @@ use std::{
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
+    #[error("caller_scope_unproven")]
+    CallerScopeUnproven,
+    #[error("caller_policy_store_unproven")]
+    CallerPolicyStoreUnproven,
+    #[error("caller_artifact_unproven")]
+    CallerArtifactUnproven,
+    #[error("caller_qualification_unavailable")]
+    CallerQualificationUnavailable,
+    #[error("caller_reference_unavailable")]
+    CallerReferenceUnavailable,
     #[error("pre_launch_failed")]
     PreLaunchFailed,
     #[error("peer_uid")]
@@ -145,6 +155,12 @@ mod tests;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AdminCommand {
+    RevokeCallerQualification {
+        request_id: String,
+        expected_revision: u64,
+        record_id: String,
+        record_revision: u64,
+    },
     DisableRuntime {
         request_id: String,
         expected_revision: u64,
@@ -387,8 +403,8 @@ impl ControlService {
             .busy_timeout(std::time::Duration::ZERO)
             .map_err(|_| ErrorCode::Storage)?;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            journal.admit_bound(
-                principal.id(),
+            journal.admit_attested_bound(
+                &principal,
                 &input,
                 &call.request,
                 &|| self.clock.now(),
@@ -419,12 +435,10 @@ impl ControlService {
             input_digest: input.clone(),
         };
         let principal = auth::principal(self.attestor.as_ref(), &binding, self.uid)?;
-        self.journal.lock().map_err(|_| ErrorCode::Storage)?.admit(
-            principal.id(),
-            &input,
-            &request,
-            now,
-        )
+        self.journal
+            .lock()
+            .map_err(|_| ErrorCode::Storage)?
+            .admit_attested(&principal, &input, &request, now)
     }
     pub(crate) fn admin(
         &self,

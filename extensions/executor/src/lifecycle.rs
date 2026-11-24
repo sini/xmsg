@@ -157,6 +157,7 @@ impl Journal {
             selected.required_capabilities.push(Capability::StrictSteer);
         }
         let configuration = journal::config(&tx)?;
+        let original:i64=tx.query_row("SELECT admission_id FROM executions WHERE session_id=?1 AND generation=?2 AND identity=?3",params![native.identity.session_id,generation,serde_json::to_string(&native.identity).map_err(storage)?],|r|r.get(0)).optional().map_err(storage)?.ok_or(ErrorCode::StaleGeneration)?;
         let qualified = policy.as_deref().is_some_and(|p| {
             p.require_at(
                 &selected,
@@ -164,6 +165,10 @@ impl Journal {
                 clock,
                 journal::runtime_disabled(&tx).unwrap_or(true),
             )
+            .and_then(|()| {
+                p.callers
+                    .require(&tx, original, configuration.revision, clock()?)
+            })
             .is_ok()
         });
         let at = clock()?;
@@ -412,12 +417,29 @@ impl Journal {
         {
             selected.required_capabilities.push(Capability::StrictSteer);
         }
-        policy.ok_or(ErrorCode::NotSupported)?.require_at(
+        let policy = policy.ok_or(ErrorCode::NotSupported)?;
+        policy.require_at(
             &selected,
             configuration.revision,
             clock,
             journal::runtime_disabled(db)?,
         )?;
+        policy
+            .callers
+            .require(db, admission_id, configuration.revision, clock()?)?;
+        let (session, generation) = addressed(target)?;
+        let original: i64 = db
+            .query_row(
+                "SELECT admission_id FROM executions WHERE session_id=?1 AND generation=?2",
+                params![session, integer(generation)?],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if original != admission_id {
+            policy
+                .callers
+                .require(db, original, configuration.revision, clock()?)?;
+        }
         let at = clock()?;
         if request.deadline.is_some_and(|deadline| deadline <= at) {
             return Err(ErrorCode::DeadlineExpired);
@@ -452,6 +474,11 @@ impl Journal {
         if native.native_mode != selected.qualification.native_mode {
             return Err(ErrorCode::ProfileDenied);
         }
+        self.runtime_policy
+            .as_deref()
+            .ok_or(ErrorCode::NotSupported)?
+            .callers
+            .require(&tx, id, configuration.revision, now)?;
         if self
             .runtime_policy
             .as_deref()

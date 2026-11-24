@@ -225,6 +225,7 @@ pub(crate) fn journal_reports(
     ))
 }
 struct DispatchRecord {
+    admission_id: i64,
     principal: String,
     request: ControlRequest,
     resolved: ResolvedDispatch,
@@ -252,6 +253,7 @@ fn dispatch(tx: &Transaction<'_>, id: i64) -> Result<DispatchRecord, ErrorCode> 
         )
         .map_err(storage)?;
     Ok(DispatchRecord {
+        admission_id: id,
         principal,
         request: serde_json::from_str(&payload).map_err(storage)?,
         resolved: serde_json::from_str(&resolved).map_err(storage)?,
@@ -338,6 +340,9 @@ fn require_launch_eligibility(
             now,
             journal::runtime_disabled(tx)?,
         )?;
+        policy
+            .callers
+            .require(tx, record.admission_id, revision, now)?;
     }
     Ok(())
 }
@@ -379,6 +384,7 @@ impl Journal {
             clock,
             journal::runtime_disabled(&tx)?,
         )?;
+        policy.callers.require(&tx, admission, revision, clock()?)?;
         let mut child =
             xmsg::client::caller_attribution::with_fd_inheritance_gate(|| command.spawn())
                 .map_err(storage)?;
@@ -418,6 +424,7 @@ impl Journal {
             clock,
             journal::runtime_disabled(&tx)?,
         )?;
+        policy.callers.require(&tx, admission, revision, clock()?)?;
         let at = clock()?;
         if row.request.deadline.is_some_and(|d| d <= at) {
             return Err(ErrorCode::DeadlineExpired);
@@ -685,6 +692,9 @@ impl Journal {
         if configuration.revision != identity.policy_revision {
             return Err(ErrorCode::RequestConflict);
         }
+        policy
+            .callers
+            .require(&tx, admission, configuration.revision, now)?;
         policy.require(
             &selected,
             configuration.revision,

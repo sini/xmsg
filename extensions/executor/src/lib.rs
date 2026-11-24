@@ -3,6 +3,8 @@
 pub mod acp;
 pub mod approval;
 #[allow(dead_code)]
+mod caller_admission;
+#[allow(dead_code)]
 mod caller_policy;
 pub mod capability;
 #[allow(dead_code)]
