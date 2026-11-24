@@ -314,3 +314,86 @@ test("WR-4b / WR-5a / WR-5d projection invariants (removed_retained, retired sub
     assert.equal(rec.synced, false, `sub ${rec.sub} synced must be cleared`);
   }
 });
+
+test("SP13 connection-state erratum: non-delivering delayed + eligible live -> Live; empty fleet + 1006 -> Reconnecting", () => {
+  for (const nonDelivering of ["loading", "denied", "unsupported_outbound_only", "unsupported_transport"]) {
+    const store = new RosterStore();
+    store.wsOpen = true;
+    store.allocSub("fleet");
+    store.applyMessage(
+      decodeServerMessage(
+        JSON.stringify({
+          v: 1,
+          type: "snapshot",
+          sub: "fleet",
+          part: 0,
+          final: true,
+          stream_epoch: "ep_sp13",
+          cursor: "c_sp13",
+          server_at: 2000,
+          truncated: false,
+          nodes: [
+            {
+              node: "non-deliv",
+              status: nonDelivering,
+              delivery: "delayed",
+              history_hidden: false,
+              endpoints: [],
+              endpoints_truncated: false,
+              exchanges: [],
+              source_gaps: [],
+            },
+            {
+              node: "live-node",
+              status: "healthy",
+              delivery: "live",
+              history_hidden: false,
+              endpoints: [],
+              endpoints_truncated: false,
+              exchanges: [],
+              source_gaps: [],
+            },
+          ],
+        }),
+      ),
+      512,
+      2000,
+    );
+    assert.equal(
+      store.connectionBadge(2000),
+      "Live",
+      `non-delivering (${nonDelivering}) delayed + eligible live must read Live`,
+    );
+  }
+
+  // (2) empty fleet, then 1006 -> Reconnecting
+  const emptyStore = new RosterStore();
+  emptyStore.wsOpen = true;
+  emptyStore.allocSub("fleet");
+  emptyStore.applyMessage(
+    decodeServerMessage(
+      JSON.stringify({
+        v: 1,
+        type: "snapshot",
+        sub: "fleet",
+        part: 0,
+        final: true,
+        stream_epoch: "ep_empty",
+        cursor: "c_empty",
+        server_at: 3000,
+        truncated: false,
+        nodes: [],
+      }),
+    ),
+    256,
+    3000,
+  );
+  assert.equal(emptyStore.connectionBadge(3000), "Unknown");
+  emptyStore.wsOpen = false;
+  emptyStore.reconnecting = true;
+  assert.equal(
+    emptyStore.connectionBadge(3100),
+    "Reconnecting",
+    "empty fleet after 1006 close must read Reconnecting",
+  );
+});
