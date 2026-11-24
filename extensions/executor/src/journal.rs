@@ -64,6 +64,7 @@ impl Journal {
         .map_err(storage)?;
         crate::execution::initialize(&db)?;
         crate::lifecycle::initialize(&db)?;
+        crate::approval::initialize(&db)?;
         Ok(Self {
             db,
             runtime_policy: None,
@@ -160,6 +161,9 @@ impl Journal {
             let target = target.as_ref().ok_or(ErrorCode::UnknownTarget)?;
             tx.execute("INSERT INTO admissions(principal,request_id,verb,target,policy_revision,payload,resolved) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![principal,request.request_id,serde_json::to_string(&request.action.verb()).map_err(storage)?,serde_json::to_string(target).map_err(storage)?,sql_u64(configuration.revision)?,serde_json::to_string(request).map_err(storage)?,resolved]).map_err(storage)?;
             let id = tx.last_insert_rowid();
+            if matches!(request.action, Action::Interrupt(_)) {
+                crate::approval::cancel_turn(&tx, target)?;
+            }
             let generation = match target {
                 Target::Execution { generation, .. } | Target::Turn { generation, .. } => {
                     *generation
@@ -286,6 +290,7 @@ impl Journal {
         }
         match command {
             AdminCommand::DisableRuntime { .. } => {
+                crate::approval::disable_pending(&tx)?;
                 tx.execute(
                     "UPDATE runtime_control SET disabled=1 WHERE singleton=1",
                     [],
@@ -335,12 +340,30 @@ impl Journal {
         request: ControlRequest,
         now: i64,
     ) -> Result<ControlReply, ErrorCode> {
+        self.human_with_confirmation(request, now, None)
+    }
+    pub(crate) fn human_with_confirmation(
+        &mut self,
+        request: ControlRequest,
+        now: i64,
+        confirmation: Option<crate::approval::HumanConfirmation>,
+    ) -> Result<ControlReply, ErrorCode> {
+        self.human_at(request, confirmation, &|| Ok(now))
+    }
+    pub(crate) fn human_at(
+        &mut self,
+        request: ControlRequest,
+        confirmation: Option<crate::approval::HumanConfirmation>,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+    ) -> Result<ControlReply, ErrorCode> {
         request.validate().map_err(|_| ErrorCode::MalformedFrame)?;
         let input = input_digest(&request)?;
+        let runtime_policy = self.runtime_policy.clone();
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
+        let now = clock()?;
         if let Some(reply) = replay(&tx, "human-channel", &request.request_id, &input)? {
             audit(
                 &tx,
@@ -378,6 +401,13 @@ impl Journal {
             return Err(ErrorCode::StaleTurn);
         }
         profile(&configuration, &current.2)?;
+        let native = crate::approval::prepare_confirmation(
+            &tx,
+            &request,
+            confirmation.as_ref(),
+            clock,
+            runtime_policy.as_deref(),
+        )?;
         let pending:Option<PendingRecord>=tx.query_row("SELECT session_id,generation,turn_id,operation_digest,policy_revision,expires_at,option_id,consumed FROM approvals WHERE id=?1",[&args.approval_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional().map_err(storage)?;
         let p = pending.ok_or(ErrorCode::PendingMismatch)?;
         if p.7 {
@@ -394,11 +424,30 @@ impl Journal {
         {
             return Err(ErrorCode::PendingMismatch);
         }
+        let at = clock()?;
+        if request.deadline.is_some_and(|deadline| deadline <= at) || args.expires_at <= at {
+            return Err(ErrorCode::DeadlineExpired);
+        }
+        if native {
+            crate::approval::prepare_confirmation(
+                &tx,
+                &request,
+                confirmation.as_ref(),
+                clock,
+                runtime_policy.as_deref(),
+            )?;
+        }
         tx.execute(
             "UPDATE approvals SET consumed=1 WHERE id=?1",
             [&args.approval_id],
         )
         .map_err(storage)?;
+        if native {
+            let changed=tx.execute("UPDATE native_pending SET state='decision_recorded' WHERE approval_id=?1 AND state='pending'",[&args.approval_id]).map_err(storage)?;
+            if changed != 1 {
+                return Err(ErrorCode::AlreadyConsumed);
+            }
+        }
         tx.execute(
             "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![
@@ -408,7 +457,15 @@ impl Journal {
                 sql_u64(*generation)?,
                 turn_id,
                 serde_json::to_string(&args.decision).map_err(storage)?,
-                serde_json::to_string(&request).map_err(storage)?
+                if native {
+                    serde_json::to_string(&crate::approval::HumanDecisionCall {
+                        request: request.clone(),
+                        confirmation: confirmation.clone().ok_or(ErrorCode::HumanRequired)?,
+                    })
+                    .map_err(storage)?
+                } else {
+                    serde_json::to_string(&request).map_err(storage)?
+                }
             ],
         )
         .map_err(storage)?;
@@ -446,8 +503,12 @@ impl Journal {
             &tx,
             "human-channel",
             &request.request_id,
-            "fake_pending_decision_consumed",
-            now,
+            if native {
+                "native_pending_decision_consumed"
+            } else {
+                "fake_pending_decision_consumed"
+            },
+            at,
         )?;
         tx.commit().map_err(storage)?;
         Ok(reply)

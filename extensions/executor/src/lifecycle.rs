@@ -22,6 +22,7 @@ pub(crate) struct NativeBinding {
     pub(crate) native_session_id: String,
     pub(crate) transport_epoch: String,
     pub(crate) native_mode: String,
+    pub(crate) native_model_id: String,
     pub(crate) expires_at: i64,
 }
 
@@ -44,7 +45,11 @@ fn integer(value: u64) -> Result<i64, ErrorCode> {
     i64::try_from(value).map_err(storage)
 }
 
-fn binding(db: &Connection, session: &str, generation: u64) -> Result<NativeBinding, ErrorCode> {
+pub(crate) fn binding(
+    db: &Connection,
+    session: &str,
+    generation: u64,
+) -> Result<NativeBinding, ErrorCode> {
     let raw: String = db
         .query_row(
             "SELECT binding FROM native_bindings WHERE session_id=?1 AND generation=?2",
@@ -57,7 +62,10 @@ fn binding(db: &Connection, session: &str, generation: u64) -> Result<NativeBind
     serde_json::from_str(&raw).map_err(storage)
 }
 
-fn effect_request(db: &Connection, id: i64) -> Result<(String, ControlRequest, Target), ErrorCode> {
+pub(crate) fn effect_request(
+    db: &Connection,
+    id: i64,
+) -> Result<(String, ControlRequest, Target), ErrorCode> {
     let row: Option<(String, String, String, Option<String>)> = db
         .query_row(
             "SELECT principal,payload,target,session_id FROM admissions WHERE id=?1",
@@ -105,6 +113,32 @@ fn addressed(target: &Target) -> Result<(&str, u64), ErrorCode> {
 }
 
 impl Journal {
+    pub(crate) fn native_transport_unknown(
+        &mut self,
+        native: &NativeBinding,
+    ) -> Result<(), ErrorCode> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        if binding(&tx, &native.identity.session_id, native.identity.generation)? != *native {
+            return Err(ErrorCode::PendingMismatch);
+        }
+        tx.execute(
+            "UPDATE sessions SET state='unknown' WHERE id=?1 AND generation=?2",
+            params![
+                native.identity.session_id,
+                integer(native.identity.generation)?
+            ],
+        )
+        .map_err(storage)?;
+        tx.execute("UPDATE executions SET state='unknown' WHERE session_id=?1 AND generation=?2 AND identity=?3 AND state!='stopped'",params![native.identity.session_id,integer(native.identity.generation)?,serde_json::to_string(&native.identity).map_err(storage)?]).map_err(storage)?;
+        tx.execute("UPDATE native_operations SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('submitting','submitted')",params![native.identity.session_id,integer(native.identity.generation)?,native.transport_epoch]).map_err(storage)?;
+        tx.execute("UPDATE approvals SET consumed=1 WHERE id IN(SELECT approval_id FROM native_pending WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('pending','decision_recorded'))",params![native.identity.session_id,integer(native.identity.generation)?,native.transport_epoch]).map_err(storage)?;
+        tx.execute("UPDATE native_pending SET state='unknown' WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state IN('pending','decision_recorded')",params![native.identity.session_id,integer(native.identity.generation)?,native.transport_epoch]).map_err(storage)?;
+        tx.commit().map_err(storage)
+    }
+
     pub(crate) fn submit_native(
         &mut self,
         id: i64,
@@ -191,7 +225,7 @@ impl Journal {
         Ok(())
     }
 
-    fn require_native_effect(
+    pub(crate) fn require_native_effect(
         policy: Option<&crate::runtime_policy::RuntimePolicy>,
         db: &rusqlite::Transaction<'_>,
         principal: &str,
@@ -268,6 +302,17 @@ impl Journal {
         let selected = crate::execution::revalidate_dispatch(&tx, id, now)?;
         let configuration = journal::config(&tx)?;
         if native.native_mode != selected.qualification.native_mode {
+            return Err(ErrorCode::ProfileDenied);
+        }
+        if self
+            .runtime_policy
+            .as_deref()
+            .ok_or(ErrorCode::NotSupported)?
+            .configuration
+            .program_for(&selected)?
+            .native_model_id
+            != native.native_model_id
+        {
             return Err(ErrorCode::ProfileDenied);
         }
         self.runtime_policy
@@ -428,6 +473,17 @@ impl Journal {
         {
             return Err(ErrorCode::ProfileDenied);
         }
+        if driver.observed_model_id() != Some(native.native_model_id.as_str())
+            || policy
+                .as_deref()
+                .ok_or(ErrorCode::NotSupported)?
+                .configuration
+                .program_for(&selected)?
+                .native_model_id
+                != native.native_model_id
+        {
+            return Err(ErrorCode::ProfileDenied);
+        }
         let active: Option<String> = tx
             .query_row(
                 "SELECT active_turn FROM sessions WHERE id=?1 AND generation=?2",
@@ -435,6 +491,16 @@ impl Journal {
                 |r| r.get(0),
             )
             .map_err(storage)?;
+        let state: String = tx
+            .query_row(
+                "SELECT state FROM sessions WHERE id=?1 AND generation=?2",
+                params![session, integer(generation)?],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if state == "cancelling" && !matches!(request.action, Action::Interrupt(_)) {
+            return Err(ErrorCode::StaleTurn);
+        }
         if active.as_deref() != driver.active_turn_id() {
             return Err(ErrorCode::StaleTurn);
         }

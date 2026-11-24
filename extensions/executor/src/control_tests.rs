@@ -1892,6 +1892,7 @@ fn configured_runtime_with_empty_registry_has_zero_dispatch_effects() {
     q.runtime_version = pin.runtime_version;
     q.native_mode = "default".into();
     let path = |name: &str| f._dir.path().join(name);
+    let model = configuration.defaults[0].resolved.model.clone();
     let runtime = RuntimeConfig {
         version: 1,
         control: configuration,
@@ -1917,6 +1918,8 @@ fn configured_runtime_with_empty_registry_has_zero_dispatch_effects() {
             },
             arguments: vec![],
             native_mode: "default".into(),
+            model,
+            native_model_id: "fixture-native-model".into(),
         }],
         workspaces: vec![WorkspaceConfig {
             repo_id: "fixture-repo".into(),

@@ -232,6 +232,17 @@ impl ControlService {
         self
     }
     #[cfg(test)]
+    pub(crate) fn fixture_time(mut self, at: i64) -> Self {
+        struct Fixed(i64);
+        impl WallClock for Fixed {
+            fn now(&self) -> i64 {
+                self.0
+            }
+        }
+        self.clock = Box::new(Fixed(at));
+        self
+    }
+    #[cfg(test)]
     pub(crate) fn fixture_call_count(&self) -> u64 {
         self.next_call.load(Ordering::Relaxed)
     }
@@ -398,12 +409,7 @@ impl ControlService {
         command: AdminCommand,
         now: i64,
     ) -> Result<u64, ErrorCode> {
-        if peer.uid != self.uid {
-            return Err(ErrorCode::PeerUid);
-        }
-        if !self.credentials.verify(credential, CredentialRole::Owner) {
-            return Err(ErrorCode::CredentialDenied);
-        }
+        self.authorize_role(peer, credential, CredentialRole::Owner)?;
         self.journal
             .lock()
             .map_err(|_| ErrorCode::Storage)?
@@ -416,16 +422,44 @@ impl ControlService {
         request: ControlRequest,
         now: i64,
     ) -> Result<ControlReply, ErrorCode> {
-        if peer.uid != self.uid {
-            return Err(ErrorCode::PeerUid);
-        }
-        if !self.credentials.verify(credential, CredentialRole::Human) {
-            return Err(ErrorCode::CredentialDenied);
-        }
+        self.authorize_role(peer, credential, CredentialRole::Human)?;
         self.journal
             .lock()
             .map_err(|_| ErrorCode::Storage)?
             .human(request, now)
+    }
+
+    fn authorize_role(
+        &self,
+        peer: PeerWitness,
+        credential: &[u8],
+        role: CredentialRole,
+    ) -> Result<(), ErrorCode> {
+        if peer.uid != self.uid {
+            return Err(ErrorCode::PeerUid);
+        }
+        if !self.credentials.verify(credential, role) {
+            return Err(ErrorCode::CredentialDenied);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn native_human(
+        &self,
+        peer: PeerWitness,
+        credential: &[u8],
+        call: crate::approval::HumanDecisionCall,
+    ) -> Result<ControlReply, ErrorCode> {
+        self.authorize_role(peer, credential, CredentialRole::Human)?;
+        let mut journal = self.journal.lock().map_err(|_| ErrorCode::Storage)?;
+        journal.human_at(call.request, Some(call.confirmation), &|| {
+            let at = self.clock.now();
+            if at <= 0 {
+                Err(ErrorCode::DeadlineExpired)
+            } else {
+                Ok(at)
+            }
+        })
     }
 }
 
