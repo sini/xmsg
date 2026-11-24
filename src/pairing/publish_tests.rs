@@ -329,3 +329,28 @@ fn unblock_proves_against_the_installed_file_policy_under_the_publication() {
         .unwrap()
         .contains(&node.peer_id));
 }
+
+#[test]
+fn a_file_rebuild_imports_a_new_pin_and_records_the_snapshot_revision() {
+    let node = node();
+    let own = device_id_from_pin(
+        &spki_sha256_from_der(&node.reloader.last_good().unwrap().certs[0]).unwrap(),
+    )
+    .unwrap();
+    let (_, _, second_pin) = generate_self_signed_ed25519("desk").unwrap();
+    let second = device_id_from_pin(&second_pin).unwrap();
+    let pin = format!("sha256:{}", hex::encode(node.peer_id));
+    let mut peers: serde_json::Value = serde_json::from_str(&peers_json(&pin, "")).unwrap();
+    peers["desk"] =
+        serde_json::json!({"address": "192.0.2.10:7788", "pin": second_pin, "allow": ["reply"]});
+    node.rewrite_peers(&peers.to_string());
+    assert!(node.reloader.check_and_reload().unwrap());
+    let conn = node.fs.db.lock().unwrap();
+    let grants = store::grants_for(&conn, &own, &second).unwrap();
+    assert_eq!(grants.len(), 1, "the reload did not import the new pin");
+    assert_eq!(
+        node.fs.current_peers().authority_revision,
+        store::authority_revision(&conn).unwrap(),
+        "the installed generation does not carry its snapshot revision"
+    );
+}

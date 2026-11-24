@@ -925,3 +925,43 @@ fn legacy_import_is_idempotent_and_a_changed_pin_reimports_exactly() {
         "an older, wider legacy record outlived a narrowed entry"
     );
 }
+
+#[test]
+fn a_block_cancels_the_devices_open_intents_and_their_reservations() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = file_db(&dir);
+    let (us, peer, other) = (Device::new(), Device::new(), Device::new());
+    let (intent, ceremony) = paired(&conn, &us, &peer);
+    let (unrelated, _) = paired(&conn, &us, &other);
+    assert_eq!(slots_used(&conn, None).unwrap(), 2);
+    block_device(&conn, &peer.id, NOW).unwrap();
+    let state = |id: &[u8; 16]| -> String {
+        conn.query_row(
+            "SELECT state FROM pairing_intents WHERE intent_id = ?1",
+            [&id[..]],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        state(&intent.intent_id),
+        "cancelled",
+        "a block left the device's intent open"
+    );
+    assert_eq!(
+        state(&unrelated.intent_id),
+        "open",
+        "a block cancelled another device's intent"
+    );
+    assert_eq!(
+        slots_used(&conn, None).unwrap(),
+        1,
+        "the blocked intent kept its slot"
+    );
+    // Lifting the block does not revive the cancelled intent.
+    unblock_device(&conn, &peer.id, &PeersMap::empty()).unwrap();
+    assert!(matches!(
+        activate(&conn, &us.id, &intent.intent_id, &ceremony.receipts(), NOW),
+        Err(StoreError::IntentUnavailable)
+    ));
+}

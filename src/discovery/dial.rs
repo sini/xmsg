@@ -136,13 +136,13 @@ fn eligible_candidates(
 
 fn witness(tls: &TlsStream<TcpStream>, peer: &PeerConfig) -> Option<(String, i64)> {
     let leaf = tls.get_ref().1.peer_certificates()?.first()?;
-    if let Some(pin) = &peer.pin {
-        // The pin verifier already refused any other key; re-derive it so presence is keyed
-        // by the key actually proven. Pin mode ignores certificate expiry, so the proof is
-        // bounded only by the presence TTL.
+    if peer.pin.is_some() {
+        // The connector's pin verifier is the one SPKI check: it refuses any other key before
+        // the handshake completes. Presence is keyed by the key it proved. Pin mode ignores
+        // certificate expiry, so the proof is bounded only by the presence TTL.
         let actual = crate::fed::spki_sha256_from_der(leaf.as_ref()).ok()?;
         let not_after = crate::storage::now_epoch_secs().checked_add(super::MAX_TTL_SECS as i64)?;
-        return (crate::fed::normalize_pin(&actual) == *pin).then_some((actual, not_after));
+        return Some((actual, not_after));
     }
     let uris = crate::fed::extract_uri_sans(leaf.as_ref()).ok()?;
     let [uri] = uris.as_slice() else {

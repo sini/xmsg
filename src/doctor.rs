@@ -1170,6 +1170,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pairing_authority_reports_each_revision_state() {
+        let cases = [
+            (
+                serde_json::json!({"committed_revision": 4, "installed_revision": 4}),
+                Status::Pass,
+                "revision 4 is installed",
+            ),
+            (
+                serde_json::json!({"committed_revision": 5, "installed_revision": 4}),
+                Status::Warn,
+                "revision 5 is committed but revision 4 is installed",
+            ),
+            (
+                serde_json::json!({"committed_revision": 3, "installed_revision": 4}),
+                Status::Warn,
+                "below the installed revision 4",
+            ),
+            (
+                serde_json::json!({"committed_revision": null, "installed_revision": 4, "error": "no such table"}),
+                Status::Warn,
+                "unreadable (no such table); the previous generation at revision 4 stays installed",
+            ),
+        ];
+        for (pairing, status, text) in cases {
+            let mut report = Report::new();
+            pairing_authority(&mut report, &pairing);
+            assert_eq!(report.checks.len(), 1);
+            let check = &report.checks[0];
+            assert_eq!(check.id, "pairing.authority");
+            assert!(check.status == status, "{pairing}: wrong status");
+            assert!(check.message.contains(text), "{pairing}: {}", check.message);
+            assert_eq!(check.hint.is_none(), status == Status::Pass, "{pairing}");
+        }
+    }
+
+    #[test]
     fn doctor_reports_stalled_leaf_ack_seconds_only_when_stalled() {
         let mut report = Report::new();
         add_stalled_leaf_ack_checks(&mut report, &serde_json::Value::Null);
