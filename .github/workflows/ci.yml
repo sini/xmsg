@@ -28,6 +28,7 @@ env:
     ci-self-input
     default
     executor-contracts
+    fleet
     hermes-endpoints
     mdformat-plugins
     opencode-endpoints

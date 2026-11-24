@@ -360,3 +360,11 @@ before the hub loads this bundle. A team can admit new user machines without
 adding one peer entry for each host. Existing queued rows survive restart, but a
 send to an admitted name is unknown until that client reconnects; no live reconnect
 latency is promised by the fixture checks.
+
+### Fleet-level relay consent (`lib.fleet`)
+
+When modeling a multi-host fleet with [`lib.fleet`](/operations/fleet-topology/),
+relay rights (`forward` on the hub, `relayed` on each recipient, and `default_route`
+on the leaf) are derived from pairwise consent: `relays.<leaf> = { via = <hub>; to = [ ... ]; }`
+together with `acceptRelayed = [ <hub> ]` on every recipient node (`F7`). Explicitly
+writing `forward`, `relayed`, or `relay` in fleet grants or meshes is refused (`F8`).

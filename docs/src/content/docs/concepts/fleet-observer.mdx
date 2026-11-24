@@ -222,3 +222,10 @@ Attention combines current input and permission blocks, node failures,
 and coverage gaps. A masked or stale endpoint contributes no actionable
 block. An unreachable node has one attention item even when its view is
 also stale. Items keep their IDs while the underlying condition persists.
+
+### Deriving collector sources from `lib.fleet`
+
+[`lib.fleet.collectorSourcesFor`](/operations/fleet-topology/#renderers) derives a
+collector's `{ node; address; identity; ca; }` source list directly from `observe`
+grants (`F5`) so `observedBy` and `collector.sources` cannot drift. Module integration
+(`observeCollector.fleet`) is planned.

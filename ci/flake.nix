@@ -66,6 +66,7 @@
             { pkgs, system, ... }:
             {
               checks.package = xmsg.packages.${system}.default;
+              checks.fleet = xmsg.checks.${system}.fleet;
             };
         }
       ];

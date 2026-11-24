@@ -669,3 +669,8 @@ required-features = ["daemon"]
 name = "claude_adapter"
 path = "tests/claude_adapter.rs"
 required-features = ["daemon"]
+
+[[test]]
+name = "fleet_golden"
+path = "tests/fleet_golden.rs"
+required-features = ["daemon"]

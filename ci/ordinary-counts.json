@@ -28,6 +28,7 @@
     "tests/exe_name_match.rs",
     "tests/fed_p1.rs",
     "tests/federation_deny.rs",
+    "tests/fleet_golden.rs",
     "tests/gate2_agent.rs",
     "tests/gate2_comm.rs",
     "tests/gate2_http.rs",
@@ -130,13 +131,13 @@
       "passed": 1856,
       "failed": 0,
       "ignored": 12,
-      "summaries": 123
+      "summaries": 124
     },
     "darwin": {
       "passed": 1841,
       "failed": 0,
       "ignored": 12,
-      "summaries": 123
+      "summaries": 124
     }
   }
 }

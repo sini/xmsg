@@ -1,0 +1,1 @@
+{"alice.hub":{"address":"10.0.0.2:7788","allow":["send","reply","list"],"ca":"/etc/xmsg/tls/ca.crt","default_route":true,"identities":["spiffe://example.org/host/hub/user/alice"]}}

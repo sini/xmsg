@@ -205,8 +205,9 @@ programs.xmsg.server.federation = {
 
 Each `peers` entry takes the same field names as an entry in the
 [peers file](/concepts/federation/#entry-fields). `pinFromCert` is extra: it computes `pin` at
-build time, and `observeLabels` (boolean, default `false`) emits `observe_labels = true` only
-when enabled and requires `"observe"` in `allow`. These limits apply:
+build time, `observeLabels` (boolean, default `false`) emits `observe_labels = true` only
+when enabled and requires `"observe"` in `allow`, and `defaultRoute` (boolean, default `false`)
+emits `default_route = true` only when true. These limits apply:
 
 - **`address` is optional.** Leave it unset on a `leaf = true` entry, which the hub never dials;
   the rendered entry then has no `address` key. The bare-map form holds no `discovery` key, so
@@ -216,7 +217,7 @@ when enabled and requires `"observe"` in `allow`. These limits apply:
   [hub admission](/concepts/federation/#hub-admission-hub).
 
 The rendered peers file is exposed read-only as `programs.xmsg.server.federation.peersFile`, the
-path `--peers-file` names, for checks that read it. The module has no option for a hand-written peers file. To use `default_route` or `hub`, write
+path `--peers-file` names, for checks that read it. The module has no option for a hand-written peers file. To use `hub`, write
 the peers file yourself and run `xmsg serve --peers-file <path>` outside this module's service.
 
 On NixOS, open the federation port in the firewall with `programs.xmsg.federation`:

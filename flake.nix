@@ -101,8 +101,13 @@
         }
       );
     in
+    let
+      fleetLib = import ./nix/modules/_fleet.nix { inherit (nixpkgs) lib; };
+    in
     {
       inherit packages;
+
+      lib.fleet = fleetLib;
 
       homeManagerModules = rec {
         xmsg = import ./nix/modules/home-manager.nix { inherit packages; };
@@ -116,7 +121,14 @@
 
       checks = forAllSystems (
         pkgs:
-        nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        {
+          fleet = import ./nix/tests/fleet {
+            inherit pkgs;
+            lib = nixpkgs.lib;
+            fleet = fleetLib;
+          };
+        }
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           image =
             pkgs.runCommand "check-image-oracle"
               {

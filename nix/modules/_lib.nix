@@ -75,6 +75,11 @@ let
         default = null;
         description = "`outbound`: this node dials the peer and holds the link open (README 7.6).";
       };
+      defaultRoute = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Route outbound sends for unknown nodes through this peer (the leaf's one hub, src/fed.rs).";
+      };
     };
   };
 
@@ -94,6 +99,7 @@ let
     }
     // lib.optionalAttrs p.leaf { leaf = true; }
     // lib.optionalAttrs p.observeLabels { observe_labels = true; }
+    // lib.optionalAttrs p.defaultRoute { default_route = true; }
     // lib.optionalAttrs (p.principals != [ ]) { inherit (p) principals; };
 
   mkPeersFile =
@@ -128,5 +134,5 @@ let
         '';
 in
 {
-  inherit peerType mkPeersFile;
+  inherit peerType renderPeer mkPeersFile;
 }

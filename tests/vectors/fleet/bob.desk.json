@@ -1,0 +1,1 @@
+{"alice.hub":{"address":"hub.example.net:7788","allow":["send","reply","list"],"ca":"/etc/xmsg/tls/ca.crt","identities":["spiffe://example.org/host/hub/user/alice"]},"alice.laptop":{"address":"laptop.example.net:7788","allow":["send","reply"],"ca":"/etc/xmsg/tls/ca.crt","identities":["spiffe://example.org/host/laptop/user/alice"],"principals":["ci"],"targets":["inbox"]}}

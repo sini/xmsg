@@ -143,6 +143,7 @@ export default defineConfig({
 					label: 'Operations & Platforms',
 					items: [
 						{ label: 'NixOS & Home Manager', slug: 'operations/nixos-and-home-manager' },
+						{ label: 'Fleet Topology', slug: 'operations/fleet-topology' },
 						{ label: 'Runtime, Reloading & Systemd', slug: 'operations/runtime-and-systemd' },
 						{ label: 'Enrollment CA', slug: 'operations/enrollment-ca' },
 						{ label: 'Fleet Observer', slug: 'operations/fleet-observer' },

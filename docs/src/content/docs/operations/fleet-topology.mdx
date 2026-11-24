@@ -1,0 +1,46 @@
+---
+title: Fleet Topology
+description: Pure Nix fleet topology library (lib.fleet) for checking and rendering per-node peer maps, collector sources, and relay reachability.
+---
+
+`lib.fleet` (`xmsg.lib.fleet`) is a pure Nix library that models a fleet's public federation topology once and derives each node's peer map, collector source list, and relay reachability from that single source of truth.
+
+:::note
+Module integration (`programs.xmsg.server.federation.fleet`, `services.xmsg.instances.<name>.federation.fleet`, and `checkFinal`) is planned for the next build unit. Today `lib.fleet` provides the standalone type, admission checks (`lib.fleet.check`), and renderers.
+:::
+
+## Fleet value (`lib.fleet.type`)
+
+A fleet value holds public topology data only (never private keys):
+
+- `trustDomain`: default SPIFFE trust domain for derived node identities.
+- `ca`: default public CA certificate path or store path.
+- `nodes.<name>`: declared `node`, `leaf`, or `collector` entries (`kind`, `address`, `addresses.<network>`, `network`, `identity`, `trustDomain`, `ca`, `from`, `listenPort`, `acceptRelayed`).
+- `meshes`: list of symmetric node meshes (`members`, `allow`, `targets`, `principals`, `observeLabels`, `mailbox`).
+- `grants.<granter>.<grantee>`: directional grants (`allow`, `targets`, `principals`, `observeLabels`, `mailbox`, `replace`).
+- `relays.<leaf>`: pairwise relay routes (`via` hub, `to` recipient nodes).
+
+## Admission checks (`lib.fleet.check`)
+
+`lib.fleet.check fleet` returns a list of `{ assertion; message; }` records enforcing `F1`–`F10`:
+
+- **F1**: every name referenced in `meshes`, `grants`, `relays`, and `acceptRelayed` is declared; no self-grants.
+- **F2**: every node's name matches the name derived from its SPIFFE identity; no `node` is named `<u>.collector`.
+- **F3**: node identities are unique and contain no `*` wildcard.
+- **F4**: leaves link only `node`s (at least one); every `node` has a valid `host:port` (or `[ipv6]:port`) address; leaf-to-hub grants or relays require `mailbox = true` on the hub's grant to the leaf; `mailbox = true` appears only on grants to leaves.
+- **F5**: `observe` grants go only from a user's `node` to that user's `collector`, with `allow = [ "observe" ]` and no `targets`/`principals`; collectors grant nothing and take no part in relays.
+- **F6**: mesh members are `node`s, at least two per mesh.
+- **F7**: relays satisfy pairwise consent (`acceptRelayed` on every `to` node, uniform `to` sets per hub, `send` on `G(H, L)` and `G(R, H)`, non-empty `G(H, R)`).
+- **F8**: explicit grants and meshes do not set `forward`, `relayed`, or `relay`; `observeLabels` requires `observe`; `targets`/`principals` contain no empty strings or retired prefixes (`svc:`, `session:`, `claude:`, `agy:`, `pi:`, `http:`).
+- **F9**: overlapping meshes must agree after normalisation; explicit grants on mesh-covered pairs require `replace = true`, and `replace = true` is forbidden without a covering mesh.
+- **F10**: same-user `node` pairs must be granted in both directions or neither.
+
+## Renderers
+
+Every renderer runs `lib.fleet.check` first and throws if any check fails:
+
+- `lib.fleet.peersFor { fleet; self; }`: Nix attrset matching `peerType`.
+- `lib.fleet.peersRenderedFor { fleet; self; }`: JSON-ready attrset using loader field names (`default_route`, `observe_labels`).
+- `lib.fleet.peersJsonFor { fleet; self; }`: `builtins.toJSON` of `peersRenderedFor`.
+- `lib.fleet.collectorSourcesFor { fleet; self; }`: sorted `{ node; address; identity; ca; }` list for a collector.
+- `lib.fleet.reachableFor { fleet; self; }`: `{ direct; relayed; }` reachability summary for a node or leaf.
