@@ -1,4 +1,5 @@
-use std::sync::{Arc, Barrier};
+use crate::pairing::BoundedBarrier;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -262,7 +263,7 @@ fn p6_concurrent_remove_and_activate_always_end_removed() {
         let (intent, ceremony) = paired(&conn, &us, &peer);
         let receipts = Arc::new(ceremony.receipts());
         drop(conn);
-        let barrier = Arc::new(Barrier::new(2));
+        let barrier = Arc::new(BoundedBarrier::new(2));
         let path = dir.path().to_path_buf();
         let spawn = |remover: bool| {
             let (barrier, path, receipts, us) =
@@ -270,7 +271,7 @@ fn p6_concurrent_remove_and_activate_always_end_removed() {
             std::thread::spawn(move || {
                 let conn = Connection::open(path.join("xmsg.db")).unwrap();
                 conn.busy_timeout(Duration::from_secs(10)).unwrap();
-                barrier.wait();
+                barrier.wait("store_tests remove_vs_activate");
                 if remover {
                     remove(&conn, &intent.grant_id, NOW).map(|_| None)
                 } else {
@@ -1041,7 +1042,7 @@ fn two_reservers_at_the_last_slot_admit_exactly_one() {
     fill_manual_slots_from(&conn, MAX_MANUAL_GRANTS + 1);
     assert_eq!(slots_used(&conn, None).unwrap(), MAX_MANUAL_GRANTS - 1);
     drop(conn);
-    let barrier = Arc::new(Barrier::new(2));
+    let barrier = Arc::new(BoundedBarrier::new(2));
     let threads: Vec<_> = intents
         .iter()
         .map(|intent| {
@@ -1053,7 +1054,7 @@ fn two_reservers_at_the_last_slot_admit_exactly_one() {
             std::thread::spawn(move || {
                 let conn = Connection::open(path).unwrap();
                 conn.busy_timeout(Duration::from_secs(10)).unwrap();
-                barrier.wait();
+                barrier.wait("store_tests reserve_capacity");
                 reserve_capacity(&conn, &id, NOW)
             })
         })

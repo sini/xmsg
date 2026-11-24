@@ -1,7 +1,8 @@
 //! Policy generations published by `CredentialReloader` from the pairing store.
 
+use crate::pairing::BoundedBarrier;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Barrier, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rustls::pki_types::pem::PemObject;
@@ -261,15 +262,15 @@ fn a_generation_older_than_the_installed_one_is_refused_and_records_nothing() {
 #[test]
 fn a_store_publication_waits_for_a_file_rebuild_holding_an_older_snapshot() {
     let node = node();
-    let snapshot_taken = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
+    let snapshot_taken = Arc::new(BoundedBarrier::new(2));
+    let release = Arc::new(BoundedBarrier::new(2));
     let armed = Arc::new(AtomicBool::new(true));
     {
         let (taken, release, armed) = (snapshot_taken.clone(), release.clone(), armed.clone());
         *node.reloader.after_snapshot.lock().unwrap() = Some(Arc::new(move || {
             if armed.swap(false, Ordering::SeqCst) {
-                taken.wait();
-                release.wait();
+                taken.wait("after_snapshot reached");
+                release.wait("after_snapshot release");
             }
         }));
     }
@@ -277,7 +278,7 @@ fn a_store_publication_waits_for_a_file_rebuild_holding_an_older_snapshot() {
         let reloader = node.reloader.clone();
         std::thread::spawn(move || reloader.force_reload())
     };
-    snapshot_taken.wait();
+    snapshot_taken.wait("snapshot_taken");
     // The rebuild holds a snapshot from before this block.
     let revision = node.block();
     let published = Arc::new(AtomicBool::new(false));
@@ -294,7 +295,7 @@ fn a_store_publication_waits_for_a_file_rebuild_holding_an_older_snapshot() {
         !published.load(Ordering::SeqCst),
         "a store publication ran while a file rebuild held the publication"
     );
-    release.wait();
+    release.wait("after_snapshot release (test)");
     file_rebuild.join().unwrap().unwrap();
     store_publication.join().unwrap().unwrap();
     assert_eq!(node.reloader.installed_revision(), revision);
@@ -381,15 +382,17 @@ fn run_while_paused<T: Send + 'static>(
 
 /// Installs a one-shot barrier pause into a reloader hook: the first caller reaching it
 /// signals `reached` and waits for `release`.
-fn pause_once(hook: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>) -> (Arc<Barrier>, Arc<Barrier>) {
-    let reached = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
+fn pause_once(
+    hook: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+) -> (Arc<BoundedBarrier>, Arc<BoundedBarrier>) {
+    let reached = Arc::new(BoundedBarrier::new(2));
+    let release = Arc::new(BoundedBarrier::new(2));
     let armed = Arc::new(AtomicBool::new(true));
     let (r, l) = (reached.clone(), release.clone());
     *hook.lock().unwrap() = Some(Arc::new(move || {
         if armed.swap(false, Ordering::SeqCst) {
-            r.wait();
-            l.wait();
+            r.wait("pause_once reached");
+            l.wait("pause_once release");
         }
     }));
     (reached, release)
@@ -408,7 +411,7 @@ fn no_file_rebuild_installs_while_an_unblock_proves_and_commits() {
         let reloader = node.reloader.clone();
         std::thread::spawn(move || reloader.unblock_device(&other))
     };
-    reached.wait();
+    reached.wait("during_unblock_proof reached");
     // A file edit that pins the blocked key must not install between the proof and the commit.
     let pin = format!("sha256:{}", hex::encode(node.peer_id));
     let mut peers: serde_json::Value = serde_json::from_str(&peers_json(&pin, "")).unwrap();
@@ -423,7 +426,7 @@ fn no_file_rebuild_installs_while_an_unblock_proves_and_commits() {
         !finished_early,
         "a file rebuild installed while an unblock held its proof"
     );
-    release.wait();
+    release.wait("during_unblock_proof release");
     // The unblock proved against the generation it saw, which had no pin for the key.
     unblock.join().unwrap().unwrap();
     rebuild.join().unwrap().unwrap();
@@ -440,7 +443,7 @@ fn a_store_publication_cannot_install_stale_file_inputs_over_a_newer_file_genera
         let reloader = node.reloader.clone();
         std::thread::spawn(move || reloader.check_and_reload())
     };
-    reached.wait();
+    reached.wait("after_store_snapshot reached");
     // A file change that imports nothing, so the newer generation has the same revision.
     let pin = format!("sha256:{}", hex::encode(node.peer_id));
     node.rewrite_peers(&format!(
@@ -451,7 +454,7 @@ fn a_store_publication_cannot_install_stale_file_inputs_over_a_newer_file_genera
         let reloader = node.reloader.clone();
         run_while_paused(move || reloader.check_and_reload())
     };
-    release.wait();
+    release.wait("after_store_snapshot release");
     tick.join().unwrap().unwrap();
     rebuild.join().unwrap().unwrap();
     assert!(
