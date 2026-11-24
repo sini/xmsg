@@ -110,6 +110,120 @@ pub(crate) fn pre_launch_failure(
     })
     .transpose()
 }
+
+pub(crate) fn journal_reports(
+    db: &rusqlite::Connection,
+    target: &Target,
+    now: i64,
+) -> Result<
+    (
+        crate::protocol::StatusReport,
+        crate::protocol::NormalizedResult,
+    ),
+    ErrorCode,
+> {
+    use crate::protocol::{
+        NormalizedResult, ObservationSource, Outcome, SessionState, StatusReport,
+    };
+    let session = match target {
+        Target::Session { session_id }
+        | Target::Execution { session_id, .. }
+        | Target::Turn { session_id, .. } => session_id,
+        _ => return Err(ErrorCode::UnknownTarget),
+    };
+    let (generation, turn, state): (i64, Option<String>, String) = db
+        .query_row(
+            "SELECT generation,active_turn,state FROM sessions WHERE id=?1",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(storage)?
+        .ok_or(ErrorCode::UnknownTarget)?;
+    let generation = u64::try_from(generation).map_err(storage)?;
+    let (status, outcome, summary, remaining) = match state.as_str() {
+        "admitted" | "reserved" | "spawn_intent" => (
+            SessionState::Starting,
+            Outcome::Working,
+            "journal records a starting intent",
+            "await qualified native execution",
+        ),
+        "foreground" | "working" => (
+            SessionState::Working,
+            Outcome::Working,
+            "journal records an active native turn",
+            "verify task outcome and artifacts",
+        ),
+        "needs_human" => (
+            SessionState::NeedsHuman,
+            Outcome::NeedsHuman,
+            "journal records a native request awaiting human review",
+            "check current request eligibility before review",
+        ),
+        "background" => (
+            SessionState::Background,
+            Outcome::Working,
+            "native turn ended; task completion remains unverified",
+            "verify task outcome and artifacts",
+        ),
+        "failed" => (
+            SessionState::Unknown,
+            Outcome::Failed,
+            "journal records a terminal pre-launch failure",
+            "resolve configuration before a deliberately new request",
+        ),
+        "ended" | "stopped" => (
+            SessionState::Stopped,
+            Outcome::Unknown,
+            "journal is terminal; task outcome remains unverified",
+            "verify final outcome and artifacts",
+        ),
+        _ => (
+            SessionState::Unknown,
+            Outcome::Unknown,
+            "execution effect is unknown",
+            "reconcile the owned execution without replacement launch",
+        ),
+    };
+    let resolved: Option<String> = db
+        .query_row(
+            "SELECT resolved FROM admissions WHERE session_id=?1 AND verb='\"dispatch\"'",
+            [session],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    let base = resolved
+        .map(|raw| {
+            serde_json::from_str::<ResolvedDispatch>(&raw)
+                .map(|r| r.workspace.base_revision)
+                .map_err(storage)
+        })
+        .transpose()?;
+    Ok((
+        StatusReport {
+            session_id: session.clone(),
+            generation,
+            turn_id: turn.clone(),
+            state: status,
+            observed_at: now,
+            source: ObservationSource::Journal,
+        },
+        NormalizedResult {
+            session_id: session.clone(),
+            generation,
+            turn_id: turn,
+            outcome,
+            summary: summary.into(),
+            evidence_refs: vec![format!("journal:session:{session}:generation:{generation}")],
+            artifact_refs: vec![],
+            base_revision: base,
+            result_revision: None,
+            remaining_work: vec![remaining.into()],
+            provenance: "journal".into(),
+        },
+    ))
+}
 struct DispatchRecord {
     principal: String,
     request: ControlRequest,

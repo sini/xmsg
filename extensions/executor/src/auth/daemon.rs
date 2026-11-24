@@ -113,7 +113,7 @@ impl HostAttestor for ScopedDaemonAttestor {
             peer_uid,
             peer_pid,
             principal,
-            ..
+            authority_stamp,
         } = reply
         else {
             return Err(ErrorCode::AttestationUnavailable);
@@ -135,6 +135,9 @@ impl HostAttestor for ScopedDaemonAttestor {
         Ok(TrustedPrincipal {
             id: principal,
             binding: binding.clone(),
+            authority_stamp: Some(authority_stamp),
+            attestor_epoch: Some(runtime_epoch),
+            context_digest: Some(returned_context),
         })
     }
 }

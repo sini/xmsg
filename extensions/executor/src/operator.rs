@@ -16,14 +16,51 @@ use std::{
 enum Invocation {
     Serve(PathBuf),
     Check(PathBuf),
-    Runtime { fd: i32, max_wall_ms: u64 },
+    Runtime {
+        fd: i32,
+        max_wall_ms: u64,
+    },
     ContentMcp(PathBuf),
+    Human {
+        config: PathBuf,
+        session: String,
+        generation: u64,
+    },
     Version,
 }
 fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, ErrorCode> {
     let args: Vec<OsString> = arguments.into_iter().collect();
     if args.len() == 1 && args[0] == "--version" {
         return Ok(Invocation::Version);
+    }
+    if args.len() == 7
+        && args[0] == "human"
+        && args[1] == "--config"
+        && args[3] == "--session"
+        && args[5] == "--generation"
+    {
+        let config = PathBuf::from(&args[2]);
+        let session = args[4]
+            .to_str()
+            .ok_or(ErrorCode::MalformedFrame)?
+            .to_owned();
+        let generation = args[6]
+            .to_str()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .ok_or(ErrorCode::MalformedFrame)?;
+        if !config.is_absolute()
+            || session.is_empty()
+            || session.len() > 256
+            || session.chars().any(char::is_control)
+        {
+            return Err(ErrorCode::MalformedFrame);
+        }
+        return Ok(Invocation::Human {
+            config,
+            session,
+            generation,
+        });
     }
     if args.len() == 3 && args[0] == "content-mcp" && args[1] == "--socket" {
         let socket = PathBuf::from(&args[2]);
@@ -80,6 +117,11 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), ErrorCod
         Invocation::ContentMcp(socket) => {
             crate::content::run_stdio(&socket).map_err(|_| ErrorCode::Storage)
         }
+        Invocation::Human {
+            config,
+            session,
+            generation,
+        } => crate::human_operator::run(RuntimeConfig::read(&config)?, session, generation),
         Invocation::Serve(file) => serve(RuntimeConfig::read(&file)?),
         Invocation::Runtime { fd, max_wall_ms } => {
             crate::supervisor::run_inherited(fd, max_wall_ms)
@@ -270,6 +312,29 @@ mod tests {
     }
     #[test]
     fn entrypoints_refuse_activation_flags_and_unowned_standard_descriptors() {
+        assert!(matches!(
+            parse(args(&[
+                "human",
+                "--config",
+                "/fixture/config",
+                "--session",
+                "session-1",
+                "--generation",
+                "1"
+            ])),
+            Ok(Invocation::Human { generation: 1, .. })
+        ));
+        assert!(parse(args(&[
+            "human",
+            "--config",
+            "/fixture/config",
+            "--session",
+            "session-1",
+            "--generation",
+            "1",
+            "--yes"
+        ]))
+        .is_err());
         assert_eq!(
             parse(args(&["content-mcp", "--socket", "/fixture/content"])).unwrap(),
             Invocation::ContentMcp("/fixture/content".into())

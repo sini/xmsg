@@ -878,6 +878,169 @@ fn genuine_content_prompt_permission_uses_original_dispatch_not_bus_identity() {
 }
 
 #[test]
+fn human_pending_query_is_authenticated_current_and_does_not_confirm_intent() {
+    let mut f = fixture();
+    let call = pending_decision(&mut f);
+    let query = crate::approval::HumanPendingQuery {
+        operation: crate::approval::HumanQueryKind::Pending,
+        session_id: "session-1".into(),
+        generation: 1,
+    };
+    let before: (String, i64) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT option_id,consumed FROM approvals", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert!(matches!(
+        f.service.pending_human(peer(), OWNER, query.clone()),
+        Err(ErrorCode::CredentialDenied)
+    ));
+    let pending = f
+        .service
+        .pending_human(peer(), HUMAN, query.clone())
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.approval_id, call.confirmation.approval_id);
+    assert_eq!(pending.operation_digest, call.confirmation.operation_digest);
+    std::thread::scope(|scope| {
+        use std::io::Write;
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let handler = scope.spawn(|| f.service.handle_native_human_connection(server));
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        client.write_all(HUMAN).unwrap();
+        client.write_all(b"\n").unwrap();
+        client
+            .write_all(&serde_json::to_vec(&query).unwrap())
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        let bytes = crate::unix::line(
+            &mut std::io::BufReader::new(client),
+            crate::framing::MAX_FRAME_BYTES,
+        )
+        .unwrap();
+        let crate::unix::WireReply::Ok {result:Some(actual)}=serde_json::from_slice::<crate::unix::WireReply<Option<crate::approval::NativePending>>>(&bytes).unwrap() else {panic!("genuine native query expected")};
+        assert_eq!(actual.approval_id, pending.approval_id);
+        handler.join().unwrap().unwrap();
+    });
+    let after: (String, i64) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT option_id,consumed FROM approvals", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "listing native asks changed or consumed human intent"
+    );
+    let count: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM decisions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let native = binding(&f.service.journal.lock().unwrap().db, "session-1", 1).unwrap();
+    f.service
+        .journal
+        .lock()
+        .unwrap()
+        .native_transport_unknown(&native)
+        .unwrap();
+    assert!(
+        f.service
+            .pending_human(peer(), HUMAN, query)
+            .unwrap()
+            .is_none(),
+        "lost transport remained a human-eligible ask"
+    );
+}
+
+#[test]
+fn human_credential_without_exact_per_request_confirmation_has_no_decision_effect() {
+    let mut f = fixture();
+    let _call = pending_decision(&mut f);
+    let pending = f
+        .service
+        .pending_human(
+            peer(),
+            HUMAN,
+            crate::approval::HumanPendingQuery {
+                operation: crate::approval::HumanQueryKind::Pending,
+                session_id: "session-1".into(),
+                generation: 1,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let confirmation = crate::human_operator::confirm(
+        &pending,
+        &mut std::io::Cursor::new(b"confirm other-request 1\n"),
+        &mut Vec::new(),
+        &|| Ok(103),
+    );
+    if let Ok(call) = &confirmation {
+        let _ = f.service.native_human(peer(), HUMAN, call.clone());
+    }
+    let (decisions, consumed): (i64, i64) = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM decisions),(SELECT SUM(consumed) FROM approvals)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (decisions, consumed),
+        (0, 0),
+        "human credential was treated as per-request human intent"
+    );
+    assert!(confirmation.is_err());
+}
+
+#[test]
+fn native_turn_end_is_journal_background_not_a_completed_task_result() {
+    let mut f = fixture();
+    finish_initial_brief(&mut f);
+    let journal = f.service.journal.lock().unwrap();
+    let (status, result) = crate::execution::journal_reports(
+        &journal.db,
+        &Target::Execution {
+            session_id: "session-1".into(),
+            generation: 1,
+        },
+        104,
+    )
+    .unwrap();
+    assert_eq!(
+        result.outcome,
+        crate::protocol::Outcome::Working,
+        "native/model completion was promoted to completed task proof"
+    );
+    assert_eq!(status.state, crate::protocol::SessionState::Background);
+    assert_eq!(status.source, crate::protocol::ObservationSource::Journal);
+    assert_eq!(result.provenance, "journal");
+    assert!(result.artifact_refs.is_empty());
+    assert!(!result.remaining_work.is_empty());
+}
+
+#[test]
 fn qualified_fake_queue_submits_one_real_serialized_frame_once() {
     let mut f = fixture();
     let id = queue(&f);
