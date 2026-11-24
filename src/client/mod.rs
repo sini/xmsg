@@ -7,10 +7,8 @@ pub(crate) mod wire;
 
 pub use origin::Origin;
 pub use wire::{AttachRequest, AttachmentRef};
-pub use wire::{
-    ListCoverage, ListResult, NodeStatus, Recipient, Registration, ReplyRecord, SendResult,
-    TagResult,
-};
+pub use wire::{ListResult, NodeStatus, Recipient, Registration, ReplyRecord, SendResult};
+pub use wire::{ListCoverage, TagResult};
 
 use health::RegistrationHealth;
 use std::os::fd::AsRawFd;
