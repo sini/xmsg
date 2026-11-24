@@ -7538,6 +7538,8 @@ pub struct CredentialReloader {
     after_snapshot: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     #[cfg(test)]
     after_store_snapshot: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    during_unblock_proof: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// The parsed file inputs of the installed generation, kept so a policy-only rebuild reads
@@ -7641,6 +7643,8 @@ impl CredentialReloader {
             after_snapshot: Mutex::new(None),
             #[cfg(test)]
             after_store_snapshot: Mutex::new(None),
+            #[cfg(test)]
+            during_unblock_proof: Mutex::new(None),
         };
 
         // Populate initial configuration and hashes
@@ -7962,6 +7966,8 @@ impl CredentialReloader {
                 "no installed generation to prove an unblock against".into(),
             ));
         };
+        #[cfg(test)]
+        Self::run_hook(&self.during_unblock_proof);
         let revision = {
             let conn = fs.db.lock().unwrap_or_else(|e| e.into_inner());
             crate::pairing::store::unblock_device(&conn, device, &inputs.peers)

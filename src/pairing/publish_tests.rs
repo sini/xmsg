@@ -359,7 +359,7 @@ fn a_file_rebuild_imports_a_new_pin_and_records_the_snapshot_revision() {
 /// finishes at once.
 fn run_while_paused<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
-) -> std::thread::JoinHandle<T> {
+) -> (std::thread::JoinHandle<T>, bool) {
     let started = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
     let (s, f) = (started.clone(), finished.clone());
@@ -376,7 +376,7 @@ fn run_while_paused<T: Send + 'static>(
     while !finished.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    handle
+    (handle, finished.load(Ordering::SeqCst))
 }
 
 /// Installs a one-shot barrier pause into a reloader hook: the first caller reaching it
@@ -396,37 +396,38 @@ fn pause_once(hook: &Mutex<Option<Arc<dyn Fn() + Send + Sync>>>) -> (Arc<Barrier
 }
 
 #[test]
-fn unblock_proves_against_a_pin_a_concurrent_file_rebuild_installs() {
+fn no_file_rebuild_installs_while_an_unblock_proves_and_commits() {
     let node = node();
     let (_, _, other_pin) = generate_self_signed_ed25519("other").unwrap();
     let other = device_id_from_pin(&other_pin).unwrap();
     store::block_device(&node.fs.db.lock().unwrap(), &other, 0).unwrap();
     node.reloader.check_and_reload().unwrap();
-    // The new peers file pins the blocked key; its rebuild pauses after its snapshot.
+    // The unblock pauses after reading the installed file inputs, before its proof.
+    let (reached, release) = pause_once(&node.reloader.during_unblock_proof);
+    let unblock = {
+        let reloader = node.reloader.clone();
+        std::thread::spawn(move || reloader.unblock_device(&other))
+    };
+    reached.wait();
+    // A file edit that pins the blocked key must not install between the proof and the commit.
     let pin = format!("sha256:{}", hex::encode(node.peer_id));
     let mut peers: serde_json::Value = serde_json::from_str(&peers_json(&pin, "")).unwrap();
     peers["other"] =
         serde_json::json!({"address": "192.0.2.11:7788", "pin": other_pin, "allow": ["send"]});
     node.rewrite_peers(&peers.to_string());
-    let (reached, release) = pause_once(&node.reloader.after_snapshot);
-    let rebuild = {
+    let (rebuild, finished_early) = {
         let reloader = node.reloader.clone();
-        std::thread::spawn(move || reloader.check_and_reload())
+        run_while_paused(move || reloader.check_and_reload())
     };
-    reached.wait();
-    let unblock = {
-        let reloader = node.reloader.clone();
-        run_while_paused(move || reloader.unblock_device(&other))
-    };
-    release.wait();
-    rebuild.join().unwrap().unwrap();
     assert!(
-        unblock.join().unwrap().is_err(),
-        "unblock proved against a stale file while a rebuild installed a pin for the key"
+        !finished_early,
+        "a file rebuild installed while an unblock held its proof"
     );
-    assert!(store::blocked_devices(&node.fs.db.lock().unwrap())
-        .unwrap()
-        .contains(&other));
+    release.wait();
+    // The unblock proved against the generation it saw, which had no pin for the key.
+    unblock.join().unwrap().unwrap();
+    rebuild.join().unwrap().unwrap();
+    assert!(node.fs.current_peers().get("other").is_some());
 }
 
 #[test]
@@ -446,7 +447,7 @@ fn a_store_publication_cannot_install_stale_file_inputs_over_a_newer_file_genera
         r#"{{"peers": {}, "deny": {{"uris": ["spiffe://example.test/host/gone/user/owner"]}}}}"#,
         peers_json(&pin, "")
     ));
-    let rebuild = {
+    let (rebuild, _) = {
         let reloader = node.reloader.clone();
         run_while_paused(move || reloader.check_and_reload())
     };
