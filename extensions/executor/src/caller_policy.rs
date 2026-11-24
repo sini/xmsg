@@ -48,13 +48,7 @@ impl TrustedCallerContext {
             .context_digest()
             .ok_or(MissingTrustProperty::ScopedCallerEvidence)?;
         let binding = principal.binding();
-        if !bounded_text(principal.id(), 1024)
-            || binding.call_nonce == 0
-            || binding.peer.pid.is_none_or(|pid| pid == 0)
-            || !hex_digest(&binding.input_digest, 64)
-        {
-            return Err(MissingTrustProperty::ScopedCallerEvidence);
-        }
+        checked_binding(principal.id(), binding)?;
         let scope = checked_scope(stamp, epoch, context_digest)?;
         Ok(Self {
             principal: principal.id().to_owned(),
@@ -66,6 +60,20 @@ impl TrustedCallerContext {
     pub(crate) fn principal(&self) -> &str {
         &self.principal
     }
+}
+
+fn checked_binding(
+    principal: &str,
+    binding: &crate::auth::CallBinding,
+) -> Result<(), MissingTrustProperty> {
+    if !bounded_text(principal, 1024)
+        || binding.call_nonce == 0
+        || binding.peer.pid.is_none_or(|pid| pid == 0)
+        || !hex_digest(&binding.input_digest, 64)
+    {
+        return Err(MissingTrustProperty::ScopedCallerEvidence);
+    }
+    Ok(())
 }
 
 fn checked_scope(
@@ -106,7 +114,7 @@ fn checked_scope(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct CallerRuntimeFacts {
     pub(crate) host: String,
     pub(crate) uid: u32,
@@ -198,6 +206,7 @@ impl CallerRecordReference {
         serde_json::json!({
             "record_id":self.record.id,"record_revision":self.record.revision,
             "policy_revision":self.record.policy_revision,"expires_at":self.record.expires_at,
+            "runtime":self.record.runtime,
             "context":{"principal":self.context.principal,"peer_uid":self.context.peer_uid,
                 "binding":{"peer_uid":binding.peer.uid,"peer_pid":binding.peer.pid,"call_nonce":binding.call_nonce,"input_digest":binding.input_digest},
                 "scope":{"source":source,"matched_pid":scope.matched_pid,"matched_start":scope.matched_start,
@@ -224,6 +233,9 @@ impl CallerEligibility {
             store: PolicyStoreEvidence::Unavailable,
             records: vec![],
         }
+    }
+    pub(crate) fn require_protected_store(&self) -> Result<(), MissingTrustProperty> {
+        self.protected()
     }
     fn protected(&self) -> Result<(), MissingTrustProperty> {
         match self.store {
@@ -399,6 +411,91 @@ impl CallerEligibility {
             .ok_or(MissingTrustProperty::ExactCallerQualification)?;
         record.incarnation = Arc::new(());
         Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_restore(
+        &self,
+        receipt: &serde_json::Value,
+        expected_principal: &str,
+        expected_input_digest: &str,
+        runtime: &CallerRuntimeFacts,
+        policy_revision: u64,
+        now: i64,
+    ) -> Result<(TrustedCallerContext, CallerRecordReference), MissingTrustProperty> {
+        use serde_json::Value;
+        self.require_protected_store()?;
+        let missing = MissingTrustProperty::ExactCallerQualification;
+        fn text(value: &Value) -> Option<&str> {
+            value.as_str()
+        }
+        fn integer(value: &Value) -> Option<u64> {
+            value.as_u64()
+        }
+        fn optional_integer(value: &Value) -> Option<Option<u64>> {
+            if value.is_null() {
+                Some(None)
+            } else {
+                value.as_u64().map(Some)
+            }
+        }
+        let saved_context = receipt.get("context").ok_or(missing)?;
+        let principal = text(&saved_context["principal"]).ok_or(missing)?;
+        let saved_binding = saved_context.get("binding").ok_or(missing)?;
+        if principal != expected_principal
+            || text(&saved_binding["input_digest"]) != Some(expected_input_digest)
+            || !hex_digest(expected_input_digest, 64)
+            || receipt.get("runtime") != Some(&serde_json::to_value(runtime).map_err(|_| missing)?)
+        {
+            return Err(missing);
+        }
+        let uid = u32::try_from(integer(&saved_context["peer_uid"]).ok_or(missing)?)
+            .map_err(|_| missing)?;
+        let binding_uid = u32::try_from(integer(&saved_binding["peer_uid"]).ok_or(missing)?)
+            .map_err(|_| missing)?;
+        if uid != binding_uid {
+            return Err(missing);
+        }
+        let binding = crate::auth::CallBinding {
+            peer: crate::auth::PeerWitness {
+                uid,
+                pid: Some(
+                    u32::try_from(integer(&saved_binding["peer_pid"]).ok_or(missing)?)
+                        .map_err(|_| missing)?,
+                ),
+            },
+            call_nonce: integer(&saved_binding["call_nonce"]).ok_or(missing)?,
+            input_digest: text(&saved_binding["input_digest"]).ok_or(missing)?.into(),
+        };
+        checked_binding(principal, &binding)?;
+        let saved_scope = saved_context.get("scope").ok_or(missing)?;
+        let stamp = xmsg::client::caller_attribution::AuthorityStamp {
+            source: text(&saved_scope["source"]).ok_or(missing)?.into(),
+            matched_pid: u32::try_from(integer(&saved_scope["matched_pid"]).ok_or(missing)?)
+                .map_err(|_| missing)?,
+            matched_start: text(&saved_scope["matched_start"]).ok_or(missing)?.into(),
+            registration_digest: text(&saved_scope["registration_digest"])
+                .ok_or(missing)?
+                .into(),
+            root_generation: optional_integer(&saved_scope["root_generation"]).ok_or(missing)?,
+            child_generation: optional_integer(&saved_scope["child_generation"]).ok_or(missing)?,
+        };
+        let scope = checked_scope(
+            &stamp,
+            text(&saved_scope["attestor_epoch"]).ok_or(missing)?,
+            text(&saved_scope["context_digest"]).ok_or(missing)?,
+        )?;
+        let context = TrustedCallerContext {
+            principal: principal.into(),
+            peer_uid: uid,
+            binding,
+            scope,
+        };
+        let reference = self.qualify(&context, runtime, policy_revision, now)?;
+        self.revalidate(&reference, &context, runtime, policy_revision, now)?;
+        if reference.journal_receipt() != *receipt {
+            return Err(missing);
+        }
+        Ok((context, reference))
     }
     #[cfg(test)]
     fn fixture_record_mut(&mut self, id: &str) -> &mut CallerQualification {

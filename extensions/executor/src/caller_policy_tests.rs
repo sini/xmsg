@@ -366,3 +366,205 @@ fn journal_receipt_is_only_immutable_diagnostic_data() {
         Ok(())
     );
 }
+
+#[test]
+fn explicit_trusted_fixture_restore_uses_normal_current_record_checks() {
+    let (provider, context, reference) =
+        CallerEligibility::fixture_integration("worker", runtime()).unwrap();
+    let receipt = reference.journal_receipt();
+    assert_eq!(
+        receipt["runtime"]["caller_artifact_sha256"],
+        runtime().caller_artifact_sha256
+    );
+    let (restored, restored_reference) = provider
+        .fixture_restore(
+            &receipt,
+            "worker",
+            &context.binding.input_digest,
+            &runtime(),
+            1,
+            100,
+        )
+        .unwrap();
+    assert_eq!(restored, context);
+    assert_eq!(restored_reference.journal_receipt(), receipt);
+    let recreated = CallerEligibility::fixture_integration("worker", runtime())
+        .unwrap()
+        .0;
+    assert!(recreated
+        .revalidate(&reference, &context, &runtime(), 1, 100)
+        .is_err());
+    let (restored, new_reference) = recreated
+        .fixture_restore(
+            &receipt,
+            "worker",
+            &context.binding.input_digest,
+            &runtime(),
+            1,
+            100,
+        )
+        .unwrap();
+    assert_eq!(
+        recreated.revalidate(&new_reference, &restored, &runtime(), 1, 100),
+        Ok(())
+    );
+}
+#[test]
+fn fixture_restore_refuses_tampered_principal() {
+    let (p, c, r) = CallerEligibility::fixture_integration("worker", runtime()).unwrap();
+    let mut receipt = r.journal_receipt();
+    receipt["context"]["principal"] = serde_json::json!("parent");
+    assert!(p
+        .fixture_restore(
+            &receipt,
+            "worker",
+            &c.binding.input_digest,
+            &runtime(),
+            1,
+            100
+        )
+        .is_err());
+}
+#[test]
+fn fixture_restore_refuses_input_digest_not_recomputed_from_admission() {
+    let (p, c, r) = CallerEligibility::fixture_integration("worker", runtime()).unwrap();
+    let mut receipt = r.journal_receipt();
+    receipt["context"]["binding"]["input_digest"] = serde_json::json!("1".repeat(64));
+    assert!(p
+        .fixture_restore(
+            &receipt,
+            "worker",
+            &c.binding.input_digest,
+            &runtime(),
+            1,
+            100
+        )
+        .is_err());
+    assert!(p
+        .fixture_restore(
+            &r.journal_receipt(),
+            "worker",
+            &"2".repeat(64),
+            &runtime(),
+            1,
+            100
+        )
+        .is_err());
+}
+#[test]
+fn fixture_restore_refuses_changed_record_revision_or_identity() {
+    let (p, c, r) = CallerEligibility::fixture_integration("worker", runtime()).unwrap();
+    for key in ["record_id", "record_revision"] {
+        let mut receipt = r.journal_receipt();
+        receipt[key] = if key == "record_id" {
+            serde_json::json!("other-record")
+        } else {
+            serde_json::json!(2)
+        };
+        assert!(p
+            .fixture_restore(
+                &receipt,
+                "worker",
+                &c.binding.input_digest,
+                &runtime(),
+                1,
+                100
+            )
+            .is_err());
+    }
+}
+#[test]
+fn fixture_restore_refuses_changed_scope() {
+    let (p, c, r) = CallerEligibility::fixture_integration("worker", runtime()).unwrap();
+    let mut receipt = r.journal_receipt();
+    receipt["context"]["scope"]["matched_start"] = serde_json::json!("replacement");
+    assert!(p
+        .fixture_restore(
+            &receipt,
+            "worker",
+            &c.binding.input_digest,
+            &runtime(),
+            1,
+            100
+        )
+        .is_err());
+}
+#[test]
+fn fixture_restore_refuses_changed_runtime_tuple() {
+    let (p, c, r) = CallerEligibility::fixture_integration("worker", runtime()).unwrap();
+    let mut receipt = r.journal_receipt();
+    receipt["runtime"]["caller_mode"] = serde_json::json!("other-mode");
+    assert!(p
+        .fixture_restore(
+            &receipt,
+            "worker",
+            &c.binding.input_digest,
+            &runtime(),
+            1,
+            100
+        )
+        .is_err());
+    let mut other = runtime();
+    other.caller_configuration_sha256 = "1".repeat(64);
+    assert!(p
+        .fixture_restore(
+            &r.journal_receipt(),
+            "worker",
+            &c.binding.input_digest,
+            &other,
+            1,
+            100
+        )
+        .is_err());
+}
+#[test]
+fn fixture_restore_refuses_missing_revoked_expired_or_unprotected_record() {
+    let (mut p, c, r) = CallerEligibility::fixture_integration("worker", runtime()).unwrap();
+    let receipt = r.journal_receipt();
+    p.records.clear();
+    assert!(p
+        .fixture_restore(
+            &receipt,
+            "worker",
+            &c.binding.input_digest,
+            &runtime(),
+            1,
+            100
+        )
+        .is_err());
+    let (mut p, c, r) = CallerEligibility::fixture_integration("worker", runtime()).unwrap();
+    let receipt = r.journal_receipt();
+    p.fixture_revoke(&r).unwrap();
+    assert!(p
+        .fixture_restore(
+            &receipt,
+            "worker",
+            &c.binding.input_digest,
+            &runtime(),
+            1,
+            100
+        )
+        .is_err());
+    let (p, c, r) = CallerEligibility::fixture_integration("worker", runtime()).unwrap();
+    assert!(p
+        .fixture_restore(
+            &r.journal_receipt(),
+            "worker",
+            &c.binding.input_digest,
+            &runtime(),
+            1,
+            i64::MAX
+        )
+        .is_err());
+    assert!(matches!(
+        CallerEligibility::reviewed().fixture_restore(
+            &r.journal_receipt(),
+            "worker",
+            &c.binding.input_digest,
+            &runtime(),
+            1,
+            100
+        ),
+        Err(MissingTrustProperty::ProtectedPolicyStore)
+    ));
+}
