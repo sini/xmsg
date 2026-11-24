@@ -33,6 +33,8 @@ session = "fake-native-session"
 model = "fake-model"
 mode = "default"
 fairness = len(sys.argv) > 3 and sys.argv[3] == "fairness"
+unsupported = len(sys.argv) > 3 and sys.argv[3] == "unsupported"
+prompt_id = None
 
 def configuration():
     return {"configOptions": [
@@ -46,6 +48,12 @@ for raw in sys.stdin:
     with open(trace, "a", encoding="utf-8") as output:
         output.write(json.dumps(frame) + "\n")
         output.flush()
+    if unsupported and frame.get("id") == 900 and "error" in frame:
+        with socket.socket(socket.AF_UNIX) as receipt:
+            receipt.connect(sys.argv[4])
+            receipt.sendall(b"D")
+        print(json.dumps({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}}), flush=True)
+        continue
     if method == "initialize":
         result = {"protocolVersion": 1, "agentCapabilities": {}, "_meta": {"steering": {"supported": True}}}
     elif method == "session/new":
@@ -60,12 +68,18 @@ for raw in sys.stdin:
         model = frame["params"]["value"]
         result = configuration()
     elif method == "session/prompt":
+        prompt_id = frame["id"]
         if len(sys.argv) > 2:
             with socket.socket(socket.AF_UNIX) as barrier:
                 barrier.connect(sys.argv[2])
                 barrier.sendall(b"P")
                 if barrier.recv(1) != b"R":
                     sys.exit(2)
+        if unsupported:
+            print(json.dumps({"jsonrpc": "2.0", "id": 900, "method": "_session/tool_error", "params": {
+                "sessionId": session, "toolCall": {"toolCallId": "failed-tool", "status": "failed", "title": "denied"},
+                "options": [{"optionId": "once", "name": "untrusted retry", "kind": "allow_once"}]}}), flush=True)
+            continue
         if fairness:
             frames = []
             for index in range(8):

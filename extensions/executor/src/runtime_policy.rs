@@ -73,6 +73,16 @@ impl RuntimePolicy {
         if emergency_disabled {
             return Err(ErrorCode::ProfileDenied);
         }
+        if resolved.required_capabilities.iter().any(|capability| {
+            matches!(
+                capability,
+                crate::capability::Capability::ConfirmedInterrupt
+                    | crate::capability::Capability::HumanMandatoryProvenance
+                    | crate::capability::Capability::StoredResume
+            )
+        }) {
+            return Err(ErrorCode::NotSupported);
+        }
         if self.eligibility.is_empty() {
             return Err(ErrorCode::NotSupported);
         }
