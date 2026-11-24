@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use serde_json::json;
@@ -409,7 +411,7 @@ async fn cli_fixture(ca_mode: bool) {
         retained.ingest_snapshot(&node, retained_catalog).unwrap();
     }
     let mut child = Process(
-        Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .args(["observe-collector", "--config"])
             .arg(&config_file)
             .arg("--state-dir")

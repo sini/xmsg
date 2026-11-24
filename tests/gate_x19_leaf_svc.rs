@@ -2,6 +2,8 @@ mod agy_env;
 #[allow(dead_code)]
 mod observe_support;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -1370,7 +1372,7 @@ async fn test_oracle_7_startup_refusal_leaf_with_svc_exe() {
     fs::write(&key_file, key_pem).unwrap();
     fs::write(&peers_file, "{}").unwrap();
 
-    let output = std::process::Command::new(bin)
+    let output = spawn::command(bin)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .args([

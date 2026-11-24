@@ -9,6 +9,8 @@
 //! ancestry, not by its own pid. This test process is never a fake or a service in the
 //! oracles that use it as the anonymous caller.
 
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -90,7 +92,7 @@ impl Node {
         let http_sock = run.join("http.sock");
         let register_sock = run.join("register.sock");
         let exe = std::env::current_exe().unwrap();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut cmd = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
         cmd.scrub_agy_env()
             .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", &run)

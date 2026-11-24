@@ -1,9 +1,11 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use rustls::pki_types::CertificateDer;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -336,7 +338,7 @@ impl Fixture {
     async fn doctor_with_ca(&self, ca: Option<std::path::PathBuf>) -> (Output, Value) {
         let root = self.root.path().to_owned();
         let output = tokio::task::spawn_blocking(move || {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+            let mut command = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
             command
                 .env_remove("XMSG_PEERS_FILE")
                 .env_remove("XMSG_FED_CERT")

@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use serde_json::{json, Value};
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 use std::path::Path;
@@ -163,7 +165,7 @@ impl Fixture {
     async fn report(&self) -> (Output, Value) {
         let root = self.root.path().to_owned();
         let output = tokio::task::spawn_blocking(move || {
-            Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            spawn::command(env!("CARGO_BIN_EXE_xmsg"))
                 .env_remove("XMSG_PEERS_FILE")
                 .env_remove("XMSG_FED_CERT")
                 .env("HOME", root.join("home"))

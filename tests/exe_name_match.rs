@@ -1,9 +1,10 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -121,7 +122,7 @@ impl DoctorHarness {
     async fn run_doctor(&self) -> (std::process::Output, Value) {
         let root = self.root.path().to_owned();
         let out = tokio::task::spawn_blocking(move || {
-            Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            spawn::command(env!("CARGO_BIN_EXE_xmsg"))
                 .env_remove("XMSG_PEERS_FILE")
                 .env_remove("XMSG_FED_CERT")
                 .env("HOME", root.join("home"))
@@ -401,7 +402,7 @@ fn oracle_4_codex_starttime_toctou_guard_holds_in_name_mode() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oracle_5_agy_default_admits_strict_refuses_and_doctor_reports_drift() {
     // Verify CLI flags are wired on `xmsg serve --help`.
-    let help = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let help = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .env_clear()
         .args(["serve", "--help"])
         .env("HOME", "/nonexistent")

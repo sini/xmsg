@@ -5,6 +5,8 @@
 //! hold self-signed keys, and each node's name is whatever xmsg derives from those.
 mod agy_env;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -187,7 +189,7 @@ async fn spawn_node(spec: NodeSpec, prepared: Option<(TempDir, PathBuf)>) -> Res
     }
     args.extend(spec.extra_args.iter().cloned());
 
-    let mut cmd = tokio::process::Command::new(BIN);
+    let mut cmd = spawn::tokio_command(BIN);
     cmd.scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
@@ -410,7 +412,7 @@ fn check_peers(peers: &str, cert: Option<&str>) -> (bool, String) {
     let dir = tempdir().unwrap();
     let f = dir.path().join("peers.json");
     fs::write(&f, peers).unwrap();
-    let mut cmd = std::process::Command::new(BIN);
+    let mut cmd = spawn::command(BIN);
     cmd.arg("check-peers").arg(&f);
     if let Some(cert) = cert {
         let c = dir.path().join("cert.pem");

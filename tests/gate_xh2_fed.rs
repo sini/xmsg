@@ -4,6 +4,8 @@
 
 mod agy_env;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 mod write_exe;
 use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
@@ -370,7 +372,7 @@ async fn start_pair() -> Pair {
 
     // Spawn node B as real xmsg serve process binding --fed-listen 127.0.0.1:0 itself
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let mut child = tokio::process::Command::new(bin)
+    let mut child = spawn::tokio_command(bin)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &sock_dir_b)
         .env("HOME", tmp_b.path())

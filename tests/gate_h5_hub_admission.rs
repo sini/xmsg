@@ -2,6 +2,8 @@
 //! and closed-by-default rules table.
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::net::SocketAddr;
@@ -2144,7 +2146,7 @@ fn grt4_check_peers_reports_ambiguity_without_invalidating_config() {
     }
     let file = temp.path().join("peers.json");
     fs::write(&file, config).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let output = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .arg("check-peers")
         .arg(&file)
         .output()
@@ -2216,7 +2218,7 @@ fn grt4_serve_startup_reports_its_ambiguity_class_once() {
     fs::write(&key_path, grt4_pem("PRIVATE KEY", &key)).unwrap();
     let log = temp.path().join("stderr.log");
     let log_file = fs::File::create(&log).unwrap();
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"));
+    let mut command = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("XMSG_") {
             command.env_remove(key);
@@ -2308,7 +2310,7 @@ fn grt4_offline_warning_escapes_control_characters() {
     config["hub"]["rules"] = serde_json::json!([]);
     let file = temp.path().join("peers.json");
     fs::write(&file, config.to_string()).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let output = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .env("RUST_LOG", "off")
         .arg("check-peers")
         .arg(file)

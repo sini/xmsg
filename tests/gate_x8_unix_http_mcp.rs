@@ -1,4 +1,6 @@
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::io::Cursor;
@@ -186,7 +188,7 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
     let bin = env!("CARGO_BIN_EXE_xmsg");
 
     // Sub-oracle 2A: CLI help shows --listen has NO default value
-    let help_output = Command::new(bin)
+    let help_output = spawn::command(bin)
         .scrub_agy_env()
         .args(["serve", "--help"])
         .output()
@@ -254,7 +256,7 @@ async fn test_oracle_2_no_flag_no_tcp_bound() {
     let agent_sock = temp_dir.path().join("agent.sock");
     let db_path = temp_dir.path().join("db.sqlite");
 
-    let mut server = Command::new(bin)
+    let mut server = spawn::command(bin)
         .scrub_agy_env()
         .env("HOME", temp_dir.path())
         .env("XDG_RUNTIME_DIR", temp_dir.path())
@@ -328,7 +330,7 @@ async fn test_oracle_3_reply_only_mcp() {
     let bin = env!("CARGO_BIN_EXE_xmsg");
 
     // Sub-oracle 3A: CLI help shows --reply-only flag
-    let help_output = Command::new(bin)
+    let help_output = spawn::command(bin)
         .args(["mcp", "--help"])
         .output()
         .expect("run xmsg mcp --help");

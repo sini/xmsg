@@ -1,7 +1,8 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -12,7 +13,7 @@ fn test_register_cli_server_stopped_invariant() {
     let bin = env!("CARGO_BIN_EXE_xmsg");
 
     // Case A: Server not running, env vars missing
-    let output = Command::new(bin)
+    let output = spawn::command(bin)
         .args(["register", "agy"])
         .env_remove("ANTIGRAVITY_CONVERSATION_ID")
         .env_remove("ANTIGRAVITY_LS_ADDRESS")
@@ -33,7 +34,7 @@ fn test_register_cli_server_stopped_invariant() {
     );
 
     // Case B: Server not running, non-existent socket specified
-    let output2 = Command::new(bin)
+    let output2 = spawn::command(bin)
         .args([
             "register",
             "agy",
@@ -151,7 +152,7 @@ async fn test_shipped_binary_register_cli_with_server() {
     assert!(sock_path.exists(), "register.sock never came up in 30s");
 
     // Run xmsg register agy child process (child PID will be descendant of my_pid)
-    let output = Command::new(bin)
+    let output = spawn::command(bin)
         .args(["register", "agy", "--sock", sock_path.to_str().unwrap()])
         .env("ANTIGRAVITY_CONVERSATION_ID", conv_id)
         .env("ANTIGRAVITY_LS_ADDRESS", "localhost:33399")
@@ -189,7 +190,7 @@ async fn test_shipped_binary_register_cli_with_server() {
     // XR1 Oracle 1: When the server refuses registration (e.g., conversation_id has no
     // presence lock file -> server answers `{"status":"error","detail":"..."}`),
     // `xmsg register agy` exits non-zero and prints the server's error text to stderr.
-    let refused_out = Command::new(bin)
+    let refused_out = spawn::command(bin)
         .args(["register", "agy", "--sock", sock_path.to_str().unwrap()])
         .env(
             "ANTIGRAVITY_CONVERSATION_ID",
@@ -231,7 +232,7 @@ async fn test_shipped_binary_register_cli_with_server() {
         }
     });
 
-    let mut hook_child = Command::new(bin)
+    let mut hook_child = spawn::command(bin)
         .args([
             "register",
             "agy",

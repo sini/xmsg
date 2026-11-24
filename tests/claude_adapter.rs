@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -142,7 +144,7 @@ fn environment<'a>(home: &Path, runtime: &Path, lookup: &'a FixtureHomeLookup) -
     }
 }
 fn command(executable: &Path, home: &Path, wrong_runtime: &Path, wrong_db: &Path) -> Command {
-    let mut command = Command::new(executable);
+    let mut command = spawn::command(executable);
     command
         .env_clear()
         .env("HOME", home)

@@ -6,6 +6,9 @@
 //! and no external `PATH` utilities are required.
 #![allow(dead_code)]
 
+#[allow(clippy::duplicate_mod)]
+#[path = "../support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -16,7 +19,7 @@ const WRITE_EXE_TARGET: &str = "XMSG_TEST_WRITE_EXE_TARGET";
 /// place, ensuring this process never opens a write descriptor on `path`.
 pub fn write_exe(path: &Path, contents: impl AsRef<[u8]>) {
     use std::io::Write;
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = spawn::command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "write_exe::writer_child",

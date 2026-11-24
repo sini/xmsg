@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 mod write_exe;
 
 use std::fs;
@@ -864,7 +866,7 @@ fn in_minimal_path_child(test: &str, child_var: &str) -> bool {
         return true;
     }
     assert!(!Path::new("/usr/bin/agy").exists() && !Path::new("/bin/agy").exists());
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = spawn::command(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture"])
         .env(child_var, "1")
         .env("PATH", "/usr/bin:/bin")
@@ -1019,7 +1021,7 @@ fn fixtures_written_by_write_exe_never_hit_etxtbsy_under_concurrent_forks() {
     for i in 0..400 {
         let bin = tmp.path().join(format!("f{i}.sh"));
         write_exe(&bin, "#!/bin/sh\nexit 0\n");
-        let r = std::process::Command::new(&bin).status();
+        let r = spawn::command(&bin).status();
         assert!(
             !matches!(&r, Err(e) if e.raw_os_error() == Some(libc::ETXTBSY)),
             "ETXTBSY on fixture {i}"

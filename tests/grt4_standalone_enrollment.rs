@@ -1,6 +1,8 @@
 #![cfg(feature = "daemon")]
 
 mod notify_ready;
+#[path = "support/spawn.rs"]
+mod spawn;
 
 use base64::Engine;
 use openidconnect::{
@@ -298,7 +300,7 @@ struct Context {
 }
 impl Context {
     fn command(&self, args: &[String]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut command = spawn::tokio_command(env!("CARGO_BIN_EXE_xmsg"));
         command
             .args(args)
             .env_clear()

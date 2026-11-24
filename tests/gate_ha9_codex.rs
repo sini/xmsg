@@ -2,6 +2,8 @@
 //! on both Linux and Darwin (`HA9-A.codex.darwin`).
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 mod write_exe;
 use agy_env::ScrubAgyEnv;
 
@@ -70,7 +72,7 @@ fn codex_subcommand_and_serve_flags_present_and_reach_server_refusal() {
         String::new()
     });
 
-    let mut child = std::process::Command::new(bin)
+    let mut child = spawn::command(bin)
         .args([
             "register",
             "codex",
@@ -112,7 +114,7 @@ fn codex_subcommand_and_serve_flags_present_and_reach_server_refusal() {
     );
 
     // 2. Verify `xmsg serve --codex-exe ... --codex-home ...` parses flags without clap refusal.
-    let out_serve = std::process::Command::new(bin)
+    let out_serve = spawn::command(bin)
         .scrub_agy_env()
         .args([
             "serve",
@@ -235,7 +237,7 @@ fn xf6_close_only_handover_before_new_watch() {
     if std::env::var_os(CHILD).is_none() {
         // Other tests deliberately retain inherited descriptors across fork. Measure
         // the close-only lifecycle in its own exec'd process, as in the standalone probe.
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = spawn::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "xf6_close_only_handover_before_new_watch",
@@ -2308,7 +2310,7 @@ async fn relay_ack_fixture_retains_peer_until_client_close() {
     if std::env::var_os(CHILD).is_none() {
         // Darwin keeps the peer witness until the last copy of the server fd closes, and a
         // concurrent test's fork can hold one; run the forced close in its own exec'd process.
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = spawn::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "relay_ack_fixture_retains_peer_until_client_close",
@@ -3020,7 +3022,7 @@ async fn c15_delivery_races_unknown_state_and_batch_limits() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use xmsg::agent::CODEX_HOOK_UNAVAILABLE_NOTE;
 
     let mut env = CodexTestEnv::new();
@@ -3055,7 +3057,7 @@ async fn c16_codex_hook_fail_open_on_resumed_and_unreachable_and_exit2_mutant() 
 
     let xmsg_bin = PathBuf::from(env!("CARGO_BIN_EXE_xmsg"));
     let invoke_hook_cli = |event: &str, sock: &Path, stdin_json: &str| -> (i32, String, String) {
-        let mut cmd = Command::new(&xmsg_bin);
+        let mut cmd = spawn::command(&xmsg_bin);
         cmd.args([
             "register",
             "codex",
@@ -4718,7 +4720,7 @@ async fn c19_2_live_unlocked_o_rdwr_descriptor_rejected() {
     };
     init_for_state(&env.state, live_cfg);
 
-    let mut child = std::process::Command::new(&my_exe)
+    let mut child = spawn::command(&my_exe)
         .env("XMSG_HA9_C3_CHILD_HELPER", "1")
         .args(["c3_live_child_helper_entry", "--exact", "--nocapture"])
         .stdin(std::process::Stdio::piped())
@@ -4977,7 +4979,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
     // (b) Live distinct-child `LIVE_PROC_ROOT` arm (`N1`, `N3`, `N4`, `Q5`):
     {
         use std::io::{BufRead, Write};
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         let live_dir = tempfile::Builder::new()
             .prefix("xh-l-")
@@ -4996,7 +4998,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
         let test_exe = std::env::current_exe().unwrap();
         let canon_test_exe = fs::canonicalize(&test_exe).unwrap();
 
-        let mut child = Command::new(&canon_test_exe)
+        let mut child = spawn::command(&canon_test_exe)
             .arg("--exact")
             .arg("c19_live_child_helper_entry")
             .arg("--nocapture")
@@ -5396,7 +5398,7 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
     };
     init_for_state(&env.state, live_cfg.clone());
 
-    let mut child = std::process::Command::new(&my_exe)
+    let mut child = spawn::command(&my_exe)
         .env("XMSG_HA9_C3_CHILD_HELPER", "1")
         .args(["c3_live_child_helper_entry", "--exact", "--nocapture"])
         .stdin(std::process::Stdio::piped())
@@ -6249,7 +6251,7 @@ async fn xr7_codex_unrevoke_cli_and_sqlite_first_persistence() {
     let out_unreachable = tokio::task::spawn_blocking({
         let missing_sock = missing_sock.clone();
         move || {
-            std::process::Command::new(bin)
+            spawn::command(bin)
                 .args([
                     "register",
                     "codex",
@@ -6285,7 +6287,7 @@ async fn xr7_codex_unrevoke_cli_and_sqlite_first_persistence() {
     let out_revoke = tokio::task::spawn_blocking({
         let agent_sock = agent_sock.clone();
         move || {
-            std::process::Command::new(bin)
+            spawn::command(bin)
                 .args([
                     "register",
                     "codex",
@@ -6333,7 +6335,7 @@ async fn xr7_codex_unrevoke_cli_and_sqlite_first_persistence() {
     let out_db_fail = tokio::task::spawn_blocking({
         let agent_sock = agent_sock.clone();
         move || {
-            std::process::Command::new(bin)
+            spawn::command(bin)
                 .args([
                     "register",
                     "codex",
@@ -6393,7 +6395,7 @@ async fn xr7_codex_unrevoke_cli_and_sqlite_first_persistence() {
     let out_unrevoke = tokio::task::spawn_blocking({
         let agent_sock = agent_sock.clone();
         move || {
-            std::process::Command::new(bin)
+            spawn::command(bin)
                 .args([
                     "register",
                     "codex",
@@ -8020,7 +8022,7 @@ async fn va41_repeated_failure_logs_only_class_transition_without_values() {
     const CHILD: &str = "XMSG_VA41_LOG_ORACLE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let mut child = Va41Child(
-            std::process::Command::new(std::env::current_exe().unwrap())
+            spawn::command(std::env::current_exe().unwrap())
                 .args([
                     "va41_repeated_failure_logs_only_class_transition_without_values",
                     "--exact",
@@ -8276,7 +8278,7 @@ async fn va41_cli_starts_production_retry_scheduler_without_new_message() {
     let log_path = dir.path().join("daemon.log");
     let log = fs::File::create(&log_path).unwrap();
     let mut child = Va41Child(
-        std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .scrub_agy_env()
             .args(["serve", "--db-path"])
             .arg(&db_path)

@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -544,7 +546,7 @@ async fn test_shipped_binary_mcp_initialize_and_tool_call() {
     let harness = start_mcp_harness().await;
 
     let binary_path = env!("CARGO_BIN_EXE_xmsg");
-    let mut child = std::process::Command::new(binary_path)
+    let mut child = spawn::command(binary_path)
         .arg("mcp")
         // Never the host's own http.sock: list goes to this harness's --xmsg-url.
         .env("XMSG_HTTP_SOCK", "/nonexistent/xmsg-test/http.sock")

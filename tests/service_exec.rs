@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -56,7 +58,7 @@ impl Node {
         let http = run.join("http.sock");
         let register = run.join("register.sock");
         let agent = run.join("agent.sock");
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut cmd = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
         isolated(&mut cmd, dir.path());
         cmd.env("XDG_RUNTIME_DIR", &run)
             .args(["serve", "--db-path"])
@@ -106,7 +108,7 @@ impl Node {
     }
 
     fn service_command(&self, program: &Path, args: &[&str], timeout: u64, cap: usize) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut cmd = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
         isolated(&mut cmd, self.dir.path());
         cmd.current_dir(self.dir.path())
             .env("SYNTHETIC_SECRET", "ENV_CANARY_NOT_FOR_REPLY")
@@ -466,7 +468,7 @@ async fn lost_ack_response_reconnects_without_repeating_reply_or_command() {
         &script,
         "#!/bin/sh\nprintf x >> invocations\nprintf 'retained response\\n'\n",
     );
-    let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+    let mut command = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
     isolated(&mut command, temp.path());
     command
         .current_dir(temp.path())
@@ -564,7 +566,7 @@ async fn permanent_reply_refusal_exits_without_retrying() {
         &script,
         "#!/bin/sh\nprintf x >> invocations\nprintf 'response'\n",
     );
-    let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+    let mut command = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
     isolated(&mut command, temp.path());
     command
         .current_dir(temp.path())
@@ -638,7 +640,7 @@ async fn mailbox_full_reply_retains_stdout_key_and_ack_order_until_recovery() {
         &script,
         "#!/bin/sh\nprintf x >> invocations\nprintf 'retained after capacity refusal\\n'\n",
     );
-    let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+    let mut command = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
     isolated(&mut command, temp.path());
     command
         .current_dir(temp.path())

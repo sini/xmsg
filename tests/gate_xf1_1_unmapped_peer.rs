@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -420,7 +422,7 @@ async fn test_xf1_1_unmapped_peer_pid_namespace_and_ancestry_oracles() {
     let probe_sock_ns = short_sock::sock_path(tmp.path(), "probe_ns");
 
     let mut helper = ChildGuard::new(
-        tokio::process::Command::new(std::env::current_exe().unwrap())
+        spawn::tokio_command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "xf1_1_pidns_server_helper",

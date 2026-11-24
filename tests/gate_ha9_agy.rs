@@ -36,13 +36,15 @@
 //!     (descriptor present, no `presence/<X>.lock`) is refused; `agy_store` holds exactly one entry
 //!     for the `agy` pid; `P`'s send is still labelled `P`.
 
+#[path = "support/spawn.rs"]
+mod spawn;
 mod write_exe;
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -439,7 +441,7 @@ impl AgyTestHarness {
 
 fn run_hook_bin_with_home(home: &Path, event: &str, stdin_str: &str) -> (i32, Value) {
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let mut child = Command::new(bin)
+    let mut child = spawn::command(bin)
         .args(["register", "agy", "--hook", "--event", event])
         .env("HOME", home)
         .env(

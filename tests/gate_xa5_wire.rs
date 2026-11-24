@@ -9,6 +9,8 @@
 //! one stands for a node still on `/fed/v1` (`ee1b6ca`, the deployed release).
 mod agy_env;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
 use std::fs;
@@ -201,7 +203,7 @@ async fn start(
         ]);
     }
 
-    let mut child = tokio::process::Command::new(BIN)
+    let mut child = spawn::tokio_command(BIN)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)

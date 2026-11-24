@@ -1,7 +1,9 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1161,7 +1163,7 @@ fn ao2_stalled_pipe_and_binary_overhead_envelope() {
         return;
     };
     let start = std::time::Instant::now();
-    let mut child = Command::new(&bin)
+    let mut child = spawn::command(&bin)
         .args(["activity", "hook", "claude"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

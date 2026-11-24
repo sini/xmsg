@@ -9,6 +9,8 @@
 mod agy_env;
 #[allow(dead_code)]
 mod observe_support;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
 use std::fs;
@@ -236,7 +238,7 @@ impl Node {
         let http_sock = self.run_dir.join("http.sock");
         let _ = fs::remove_file(&agent_sock);
         let _ = fs::remove_file(&http_sock);
-        let mut child = tokio::process::Command::new(BIN)
+        let mut child = spawn::tokio_command(BIN)
             .scrub_agy_env()
             .env("XDG_RUNTIME_DIR", &self.run_dir)
             .env("HOME", &self.run_dir)

@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -246,7 +248,7 @@ impl Drop for KillChild {
 
 fn spawn_mcp(agent_sock: &Path) -> KillChild {
     KillChild(
-        std::process::Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .arg("mcp")
             .arg("--agent-sock")
             .arg(agent_sock)

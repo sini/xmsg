@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 mod write_exe;
 
 use serde_json::Value;
@@ -6,7 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Child;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -305,7 +307,7 @@ async fn start_test_server(
 
 fn spawn_mcp_child(agent_sock: &Path) -> Child {
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    Command::new(bin)
+    spawn::command(bin)
         .args(["mcp", "--agent-sock", agent_sock.to_str().unwrap()])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

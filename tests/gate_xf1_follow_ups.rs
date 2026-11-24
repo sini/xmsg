@@ -1,5 +1,7 @@
 mod agy_env;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 
 use std::fs;
@@ -86,7 +88,7 @@ fn spawn_std_socket_helper(
     wait_before_connect: bool,
     read_resp: bool,
 ) -> tokio::process::Child {
-    tokio::process::Command::new(std::env::current_exe().unwrap())
+    spawn::tokio_command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "xf1_socket_client_helper",
@@ -770,7 +772,7 @@ where
     let stdout_file = stderr_file.try_clone().unwrap();
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let child = tokio::process::Command::new(bin)
+    let child = spawn::tokio_command(bin)
         .scrub_agy_env()
         .env("RUST_LOG", "info")
         .env("XDG_RUNTIME_DIR", &run_dir)

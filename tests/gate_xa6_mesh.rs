@@ -9,6 +9,8 @@
 //! about the receiving node (the cache's live-only mark, A20, the outbound record), the
 //! nodes are real. An unreachable node is a peers-file entry naming a port nothing
 //! listens on.
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -218,7 +220,7 @@ async fn start(p: Prepared, creds: &Creds, peers: Value, svc: Option<&str>) -> N
         ]);
     }
 
-    let mut child = tokio::process::Command::new(BIN)
+    let mut child = spawn::tokio_command(BIN)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)

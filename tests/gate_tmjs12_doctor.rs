@@ -3,6 +3,8 @@
 //! under a continuously held `serve.lock` (M-S7b).
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 
 use std::collections::BTreeMap;
@@ -10,7 +12,7 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -352,7 +354,7 @@ fn s7_doctor_never_touches_held_serve_lock_and_emits_unredacted_endpoints_withou
             reg_sock.to_str().unwrap(),
         ];
         args.extend(extra_args);
-        let out = Command::new(BIN)
+        let out = spawn::command(BIN)
             .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &clean_xdg)
@@ -386,7 +388,7 @@ fn s7_doctor_never_touches_held_serve_lock_and_emits_unredacted_endpoints_withou
 
     // 3. Healthy live daemon case (daemon itself holds serve.lock continuously):
     let mut serve = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &clean_xdg)
@@ -408,7 +410,7 @@ fn s7_doctor_never_touches_held_serve_lock_and_emits_unredacted_endpoints_withou
     );
     wait_for_socket(&http_sock, &mut serve.0, Duration::from_secs(10));
 
-    let doc_live = Command::new(BIN)
+    let doc_live = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &clean_xdg)
@@ -442,7 +444,7 @@ fn s7_doctor_never_touches_held_serve_lock_and_emits_unredacted_endpoints_withou
     // 4. Unsafe mode case (0755 state root): snapshot unchanged, endpoints_usable = false, install.state_root fails.
     fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
     let before_unsafe = snapshot_excluding_atime(tmp.path());
-    let doc_unsafe = Command::new(BIN)
+    let doc_unsafe = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &clean_xdg)

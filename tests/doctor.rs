@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -154,7 +156,7 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut command = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
         command
             .env_remove("XMSG_PEERS_FILE")
             .env_remove("XMSG_FED_CERT")

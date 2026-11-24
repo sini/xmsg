@@ -13,10 +13,12 @@
 //!   is refused `bad_request`; on `opencode` it is accepted.
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -52,7 +54,7 @@ impl Node {
         let db_path = tmp.path().join("xmsg.db");
         let http_sock = run.join("http.sock");
         let register_sock = run.join("register.sock");
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut cmd = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
         cmd.scrub_agy_env()
             .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", &run)

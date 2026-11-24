@@ -7,6 +7,8 @@
 //! present: `m1_configured_serve_opens_5353` and `m5_receives_a_record_registered_with_dns_sd`.
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use serde_json::{json, Value};
 use std::fs;
@@ -14,7 +16,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
 
@@ -89,7 +91,7 @@ fn serve(discovery: Option<Value>) -> Node {
     fs::write(root.join("peers.json"), peers.to_string()).unwrap();
     let http_sock = run.join("http.sock");
     let agent_sock = run.join("agent.sock");
-    let child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let child = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run)
         .env("HOME", &root)
@@ -220,7 +222,7 @@ fn check_peers(discovery: Value) -> std::process::Output {
         json!({"peers": {}, "discovery": discovery}).to_string(),
     )
     .unwrap();
-    Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .arg("check-peers")
         .arg(&file)
         .output()
@@ -310,7 +312,7 @@ fn doctor_with_health(health: Value) -> Value {
             let _ = write!(stream, "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         }
     });
-    let out = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let out = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .env_remove("XMSG_PEERS_FILE")
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &run)

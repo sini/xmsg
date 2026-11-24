@@ -1,5 +1,7 @@
 mod agy_env;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 mod write_exe;
 use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
@@ -4038,7 +4040,7 @@ async fn test_n5_tls_key_load_failure_fatal_at_startup() {
     std::fs::write(&peers_file, "{}").unwrap();
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let mut child = tokio::process::Command::new(bin)
+    let mut child = spawn::tokio_command(bin)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())
@@ -4249,7 +4251,7 @@ async fn test_n7_f6_bind_fatal() {
     std::fs::write(&peers_file, "{}").unwrap();
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let output = std::process::Command::new(bin)
+    let output = spawn::command(bin)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())
@@ -4299,7 +4301,7 @@ async fn test_n7_f6_unspecified_address_binds() {
     std::fs::write(&peers_file, "{}").unwrap();
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let mut child = std::process::Command::new(bin)
+    let mut child = spawn::command(bin)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())
@@ -4369,7 +4371,7 @@ async fn test_n7_f6_cert_key_required() {
     std::fs::write(&peers_file, "{}").unwrap();
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let output = std::process::Command::new(bin)
+    let output = spawn::command(bin)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", tmp.path())
         .env("HOME", tmp.path())

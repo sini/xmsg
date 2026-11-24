@@ -28,11 +28,13 @@
 //!   binds no name.
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -468,7 +470,7 @@ impl PluginConn {
 }
 
 fn run_hook_stdin(stdin_payload: &str) -> (i32, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let mut child = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .arg("register")
         .arg("claude")
         .arg("--hook")
@@ -1056,7 +1058,7 @@ impl ServeProcess {
         let _ = fs::remove_file(&agent_sock);
         let _ = fs::remove_file(&register_sock);
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        let mut child = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .scrub_agy_env()
             .env("XDG_RUNTIME_DIR", run_dir)
             .env("HOME", run_dir)

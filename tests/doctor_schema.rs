@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -8,7 +10,7 @@ use std::os::unix::{
     net::UnixListener,
 };
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -200,7 +202,7 @@ impl Fixture {
     }
 
     fn report(&self) -> (Output, Value) {
-        let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        let output = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .env_remove("XMSG_PEERS_FILE")
             .env_remove("XMSG_FED_CERT")
             .env("HOME", self.root.path().join("home"))

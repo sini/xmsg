@@ -2,6 +2,8 @@ mod agy_env;
 #[allow(dead_code)]
 mod observe_support;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -218,7 +220,7 @@ async fn spawn_hub_node_observer(
     let http_sock = run_dir.join("http.sock");
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let mut child = tokio::process::Command::new(bin)
+    let mut child = spawn::tokio_command(bin)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
@@ -369,7 +371,7 @@ async fn spawn_client_node_observer(
     let http_sock = run_dir.join("http.sock");
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let mut cmd = tokio::process::Command::new(bin);
+    let mut cmd = spawn::tokio_command(bin);
     cmd.scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir);
@@ -828,7 +830,7 @@ async fn test_oracle_4_off_by_default_no_pull_loop() {
     let http_sock = run_dir.join("http.sock");
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let child = tokio::process::Command::new(bin)
+    let child = spawn::tokio_command(bin)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)

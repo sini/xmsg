@@ -11,6 +11,8 @@
 
 mod agy_env;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 mod write_exe;
 use agy_env::ScrubAgyEnv;
 
@@ -310,7 +312,7 @@ fn discover_child_listen_port(pid: u32) -> Option<u16> {
         }
     }
     for bin in ["/usr/sbin/lsof", "lsof"] {
-        if let Ok(out) = std::process::Command::new(bin)
+        if let Ok(out) = spawn::command(bin)
             .args([
                 "-Pan",
                 "-p",
@@ -423,7 +425,7 @@ async fn start_node_with_bin_and_hold(
         Err(_) => bin_dir.display().to_string(),
     };
 
-    let mut cmd = tokio::process::Command::new(bin_path);
+    let mut cmd = spawn::tokio_command(bin_path);
     cmd.env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
         .env("XMSG_AGY_PRESENCE_DIR", &presence_dir)
@@ -1156,7 +1158,7 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
         libc::flock(_open_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
     }
 
-    let reg_out = Command::new(BIN)
+    let reg_out = spawn::command(BIN)
         .args([
             "register",
             "agy",
@@ -1308,7 +1310,7 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
                 ),
             )
             .unwrap();
-            let mut c = Command::new(BIN)
+            let mut c = spawn::command(BIN)
                 .args([
                     "register",
                     "codex",
@@ -1343,7 +1345,7 @@ async fn test_oracle_2_harness_on_every_kind_live_and_inactive() {
 
         // End `id_codex_closed` via SessionEnd so it transitions to inactive (`closed`)
         {
-            let mut c = Command::new(BIN)
+            let mut c = spawn::command(BIN)
                 .args([
                     "register",
                     "codex",
@@ -1462,7 +1464,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         libc::flock(open_lock_1.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
     }
 
-    let out_1 = Command::new(BIN)
+    let out_1 = spawn::command(BIN)
         .args([
             "register",
             "agy",
@@ -1504,7 +1506,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
     // Custom label registration on `conv_1`: re-register `conv_1` with `--label agy-ops`
     // and verify sender header when `conv_1` sends to a Claude session shows
     // `agy-ops · 1111aaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa@sini.nodea` (NOT the raw UUID twice!).
-    let out_1_custom = Command::new(BIN)
+    let out_1_custom = spawn::command(BIN)
         .args([
             "register",
             "agy",
@@ -1559,7 +1561,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
     // Re-register `conv_1` with default label `"agy"`, and register a second live agy session
     // `conv_2` with default label `"agy"`.
     // Oracle 3b: Now `send(to: "agy")` must fail with `ambiguous` (HTTP 409) naming both candidates!
-    let out_1_reset = Command::new(BIN)
+    let out_1_reset = spawn::command(BIN)
         .args([
             "register",
             "agy",
@@ -1586,7 +1588,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
         libc::flock(open_lock_2.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
     }
 
-    let out_2 = Command::new(BIN)
+    let out_2 = spawn::command(BIN)
         .args([
             "register",
             "agy",
@@ -1632,7 +1634,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
     );
 
     // Disambiguate by re-registering `conv_1` with `--label agy-ops` while `conv_2` keeps `"agy"`
-    let out_1_custom_2 = Command::new(BIN)
+    let out_1_custom_2 = spawn::command(BIN)
         .args([
             "register",
             "agy",
@@ -1662,7 +1664,7 @@ async fn test_oracle_3a_and_3b_agy_label_resolution_ambiguity_and_sender_header(
 
     // Also test `--hook` with `--label work`: when an unregistered conversation invokes the hook,
     // `injectSteps` includes `--label work`.
-    let mut hook_child = Command::new(BIN)
+    let mut hook_child = spawn::command(BIN)
         .args([
             "register",
             "agy",
@@ -1864,7 +1866,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             if let Some(aid) = agent_id {
                 hook_in["agent_id"] = Value::String(aid.to_string());
             }
-            let mut child = Command::new(BIN)
+            let mut child = spawn::command(BIN)
                 .args([
                     "register",
                     "claude",
@@ -1914,7 +1916,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 }
             }
         });
-        let mut child = Command::new(BIN)
+        let mut child = spawn::command(BIN)
             .args([
                 "register",
                 "agy",
@@ -1970,7 +1972,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 "args": args,
             }
         });
-        let mut child = Command::new(BIN)
+        let mut child = spawn::command(BIN)
             .args([
                 "register",
                 "agy",
@@ -2024,7 +2026,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
     };
 
     let call_mcp_sidecar = |mcp_bin: &str, tool_name: &str, arguments: Value| -> Value {
-        let mut child = Command::new(mcp_bin)
+        let mut child = spawn::command(mcp_bin)
             .args([
                 "mcp",
                 "--sessions-dir",
@@ -2208,7 +2210,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
             "agent_id": child_claude,
             "agent_type": "research",
         });
-        let mut c = Command::new(BIN)
+        let mut c = spawn::command(BIN)
             .args([
                 "register",
                 "claude",
@@ -2308,7 +2310,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
         libc::flock(open_lock_agy.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
     }
 
-    let reg_agy = Command::new(BIN)
+    let reg_agy = spawn::command(BIN)
         .args([
             "register",
             "agy",
@@ -2564,7 +2566,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                 json!({ "session_id": root_codex, "agent_id": child_codex, "agent_type": "worker", "turn_id": "t-c10" }),
             ),
         ] {
-            let mut c = Command::new(BIN)
+            let mut c = spawn::command(BIN)
                 .args([
                     "register",
                     "codex",
@@ -2594,7 +2596,7 @@ async fn test_oracle_4_hook_to_pre_deploy_mcp_sidecar_version_skew() {
                                           arguments: Value,
                                           meta: Value|
          -> Value {
-            let mut child = Command::new(mcp_bin)
+            let mut child = spawn::command(mcp_bin)
                 .args([
                     "mcp",
                     "--sessions-dir",
@@ -2770,7 +2772,7 @@ async fn test_darwin_transient_spawn_shadow_settles_on_agy_register() {
         let entered_file = hold_dir.join("darwin-holder-after-first-scan.entered");
         fs::write(&hold_file, b"").unwrap();
 
-        let reg_child = Command::new(BIN)
+        let reg_child = spawn::command(BIN)
             .args(["register", "agy", "--sock", register_sock.to_str().unwrap()])
             .env("ANTIGRAVITY_CONVERSATION_ID", &conv)
             .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:9999")
@@ -2846,7 +2848,7 @@ async fn test_darwin_transient_spawn_shadow_settles_on_agy_register() {
 
     let conv = "3333cccc-cccc-4ccc-8ccc-cccccccccccc";
     let lock_path = node.presence_dir.join(format!("{conv}.lock"));
-    let mut helper = Command::new(&my_exe)
+    let mut helper = spawn::command(&my_exe)
         .args([
             "--exact",
             "test_darwin_transient_spawn_shadow_settles_on_agy_register",

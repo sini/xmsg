@@ -1,5 +1,7 @@
 mod agy_env;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -8,7 +10,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -120,7 +122,7 @@ impl Node {
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(&peers, config.to_string()).unwrap();
         let leaf = extra.contains(&"--leaf");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut command = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
         command.scrub_agy_env().arg("serve");
         if !leaf {
             command.args(["--fed-listen", "127.0.0.1:0"]);

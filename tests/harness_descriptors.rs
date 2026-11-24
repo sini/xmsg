@@ -1,6 +1,8 @@
 //! Acceptance oracles for declared plugin harness descriptors (`--harnesses-file`).
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 
 use axum::body::Body;
@@ -11,7 +13,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{atomic::AtomicU64, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
@@ -58,7 +60,7 @@ impl Daemon {
             path
         });
 
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut cmd = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
         cmd.scrub_agy_env()
             .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", &root)
@@ -616,7 +618,7 @@ fn h3_typed_argv_and_leading_dash_refusal() {
     );
 
     // CLI `xmsg locate` displays inert resume argv without executing anything.
-    let cli_out = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let cli_out = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .scrub_agy_env()
         .args([
             "locate",
@@ -717,7 +719,7 @@ fn h4_default_deny_capabilities_drain_window_and_immediate_security_revocation()
     })
     .to_string();
     daemon.write_harnesses(&edited);
-    let reload_out = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let reload_out = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .scrub_agy_env()
         .args([
             "harness",
@@ -814,7 +816,7 @@ fn h4_default_deny_capabilities_drain_window_and_immediate_security_revocation()
     })
     .to_string();
     daemon.write_harnesses(&removed);
-    let reload_rm = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let reload_rm = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .scrub_agy_env()
         .args([
             "harness",
@@ -858,7 +860,7 @@ fn h4_default_deny_capabilities_drain_window_and_immediate_security_revocation()
     })
     .to_string();
     daemon.write_harnesses(&readded);
-    let reload_re = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let reload_re = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .scrub_agy_env()
         .args([
             "harness",
@@ -883,7 +885,7 @@ fn h4_default_deny_capabilities_drain_window_and_immediate_security_revocation()
     assert_eq!(reg_ws["status"], "ok");
 
     let t_revoke = Instant::now();
-    let rev_out = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let rev_out = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .scrub_agy_env()
         .args([
             "harness",
@@ -927,7 +929,7 @@ fn h4_default_deny_capabilities_drain_window_and_immediate_security_revocation()
     })
     .to_string();
     daemon.write_harnesses(&cfg_add);
-    assert!(Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    assert!(spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .scrub_agy_env()
         .args([
             "harness",
@@ -948,7 +950,7 @@ fn h4_default_deny_capabilities_drain_window_and_immediate_security_revocation()
     })
     .to_string();
     daemon.write_harnesses(&cfg_revoked);
-    assert!(Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    assert!(spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .scrub_agy_env()
         .args([
             "harness",

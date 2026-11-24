@@ -1,10 +1,11 @@
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
-use std::process::Command;
 
 #[test]
 fn list_help_exposes_operator_command() {
-    let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let output = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .args(["list", "--help"])
         .output()
         .unwrap();
@@ -94,7 +95,7 @@ impl Fixture {
         }
         let socket = dir.path().join("run/http.sock");
         let daemon = Process(
-            Command::new(env!("CARGO_BIN_EXE_xmsg"))
+            spawn::command(env!("CARGO_BIN_EXE_xmsg"))
                 .scrub_agy_env()
                 .env("HOME", dir.path())
                 .env("CODEX_HOME", dir.path().join("codex"))
@@ -129,7 +130,7 @@ impl Fixture {
                 && UnixStream::connect(dir.path().join("run/register.sock")).is_ok()
         });
         let receiver = Process(
-            Command::new(std::env::current_exe().unwrap())
+            spawn::command(std::env::current_exe().unwrap())
                 .args(["receiver_process", "--exact", "--nocapture"])
                 .env("XMSG_OPERATOR_RECEIVER", dir.path())
                 .stdout(Stdio::null())
@@ -146,7 +147,7 @@ impl Fixture {
         }
     }
     fn run(&self, args: &[&str], stdin: Option<&str>) -> Output {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        let mut child = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .env("XMSG_HTTP_SOCK", &self.socket)
             .args(args)
             .stdin(Stdio::piped())
@@ -293,7 +294,7 @@ fn operator_round_trip_over_unix_socket() {
 fn address_shaped_sender_is_rejected_before_socket_access() {
     let dir = tempfile::tempdir().unwrap();
     for sender in ["operator@node", "operator/child"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        let output = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .args(["send", "target", "hello", "--from", sender, "--http-sock"])
             .arg(dir.path().join("missing.sock"))
             .output()
@@ -310,7 +311,7 @@ fn address_shaped_sender_is_rejected_before_socket_access() {
 
 #[test]
 fn check_peers_help_explains_validation() {
-    let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let output = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .args(["check-peers", "--help"])
         .output()
         .unwrap();
@@ -347,7 +348,7 @@ fn list_limit_reports_truncation_in_text_and_metadata_in_json() {
         }
     });
     for json_output in [false, true] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut command = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
         command.args([
             "list",
             "--limit",
@@ -376,7 +377,7 @@ fn list_limit_reports_truncation_in_text_and_metadata_in_json() {
     }
     server.join().unwrap();
     for limit in ["0", "501"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        let output = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .args(["list", "--limit", limit])
             .output()
             .unwrap();
@@ -415,7 +416,7 @@ fn locate_requires_both_viewer_config_and_request_for_detail_and_escapes_display
                 write!(reader.get_mut(),"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
                 first
             });
-            let mut command = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+            let mut command = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
             command
                 .args(["locate", "id", "--http-sock"])
                 .arg(&socket)
@@ -490,7 +491,7 @@ fn locate_text_displays_only_local_reach_as_inert_separate_hint() {
         write!(reader.get_mut(),"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
         request
     });
-    let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+    let output = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
         .args(["locate", "id", "--detail", "--http-sock"])
         .arg(&socket)
         .arg("--locate-config")

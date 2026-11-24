@@ -1,8 +1,9 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -152,7 +153,7 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
     // Case 1A: credential-less session => exactly one ephemeralMessage naming absolute exe
     {
         use std::io::Write;
-        let mut child = Command::new(bin)
+        let mut child = spawn::command(bin)
             .args([
                 "register",
                 "agy",
@@ -216,7 +217,7 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
     // Case 1B: credentialed session => prints {}
     {
         use std::io::Write;
-        let mut child = Command::new(bin)
+        let mut child = spawn::command(bin)
             .args([
                 "register",
                 "agy",
@@ -253,7 +254,7 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
     // Case 1C: malformed stdin => prints {} and exits 0
     {
         use std::io::Write;
-        let mut child = Command::new(bin)
+        let mut child = spawn::command(bin)
             .args([
                 "register",
                 "agy",
@@ -291,7 +292,7 @@ async fn oracle_1_hook_credential_less_and_credentialed_and_malformed() {
     // Case 1D: missing conversationId => prints {} and exits 0
     {
         use std::io::Write;
-        let mut child = Command::new(bin)
+        let mut child = spawn::command(bin)
             .args([
                 "register",
                 "agy",

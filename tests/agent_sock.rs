@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::AtomicU64;
@@ -959,7 +961,7 @@ async fn test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc() {
     }
 
     // Hop 1 (real OS child process of self_pid) attempts to send over agent.sock -> refused!
-    let child_out = tokio::process::Command::new(std::env::current_exe().unwrap())
+    let child_out = spawn::tokio_command(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg("test_xs2_svc_store_admits_only_hop0_while_refusing_child_of_svc")
         .arg("--nocapture")

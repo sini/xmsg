@@ -20,6 +20,8 @@
 
 mod agy_env;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 
 use std::collections::HashMap;
@@ -262,7 +264,7 @@ async fn start_node(p: Prepared, creds: &Creds, peers: Value) -> Node {
         "127.0.0.1:0".into(),
     ];
 
-    let mut child = tokio::process::Command::new(BIN)
+    let mut child = spawn::tokio_command(BIN)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)

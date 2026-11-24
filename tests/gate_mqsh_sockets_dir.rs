@@ -9,6 +9,8 @@
 //! - P8: exported pins route an explicit-root client to the pinned daemon.
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 
 use std::collections::BTreeMap;
@@ -71,7 +73,7 @@ impl Account {
     }
     /// A command for `bin` in this account, with no pin from the caller's environment.
     fn cmd(&self, bin: &str) -> Command {
-        let mut c = Command::new(bin);
+        let mut c = spawn::command(bin);
         c.scrub_agy_env()
             .env("HOME", self.root())
             .env("XDG_RUNTIME_DIR", self.xdg())

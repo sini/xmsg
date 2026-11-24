@@ -1,8 +1,10 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 use xmsg::client::{ClientError, ClientOptions, ListQuery, RegisteredService};
 
@@ -123,7 +125,7 @@ async fn exercise(binary: &Path) {
         daemon_uid: xmsg::client::current_uid(),
     };
     let executable = std::env::current_exe().unwrap();
-    let mut command = Command::new(binary);
+    let mut command = spawn::command(binary);
     let child = command
         .env_clear()
         .env("HOME", temp.path())
@@ -260,7 +262,7 @@ async fn pinned_and_candidate_service_contract() {
         .find_map(|line| line.strip_prefix("revision = "))
         .expect("baseline revision missing")
         .trim_matches('"');
-    let version = Command::new(&baseline)
+    let version = spawn::command(&baseline)
         .arg("--version")
         .output()
         .expect("baseline executable missing");
@@ -313,7 +315,7 @@ async fn exercise_candidate_service_name_validation(binary: &Path) {
         "genie-expert-public",
         "gateway",
     ];
-    let mut cmd = Command::new(binary);
+    let mut cmd = spawn::command(binary);
     cmd.env_clear()
         .env("HOME", temp.path())
         .env("XDG_RUNTIME_DIR", &run)
@@ -388,7 +390,7 @@ async fn exercise_candidate_service_name_validation(binary: &Path) {
             xmsg::fed::check_origin(&xmsg::storage::Origin::service(live_svc, "test-node")).is_ok(),
             "live mesh service {live_svc:?} must pass check_origin"
         );
-        let out = Command::new(&executable)
+        let out = spawn::command(&executable)
             .env("XMSG_LIVE_SVC_CHILD", live_svc)
             .env("XMSG_LIVE_REG_SOCK", &register_socket)
             .env("XMSG_LIVE_AGENT_SOCK", &agent_socket)
@@ -585,7 +587,7 @@ async fn exercise_candidate_effective_limits(binary: &Path) {
         }
         let register_socket = run.join("register.sock");
         let agent_socket = run.join("agent.sock");
-        let mut cmd = Command::new(binary);
+        let mut cmd = spawn::command(binary);
         cmd.env_clear()
             .env("HOME", temp.path())
             .env("XDG_RUNTIME_DIR", &run)

@@ -3,6 +3,8 @@
 //! enforcement + sampled startup log (S9d).
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 
 use std::collections::BTreeMap;
@@ -329,7 +331,7 @@ fn s1_all_entry_points_agree_on_resolved_defaults_and_precedence() {
     let _ns_cleanup = DirCleanup(expected_live.runtime_namespace.clone());
 
     let mut live_daemon = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &clean_rt)
@@ -342,7 +344,7 @@ fn s1_all_entry_points_agree_on_resolved_defaults_and_precedence() {
     wait_for_socket(&expected_http, &mut live_daemon.0, Duration::from_secs(10));
 
     // `xmsg doctor --json` resolves the exact same managed endpoints as the daemon!
-    let doc = Command::new(BIN)
+    let doc = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &clean_rt)
@@ -364,7 +366,7 @@ fn s1_all_entry_points_agree_on_resolved_defaults_and_precedence() {
     );
 
     // CLI `--http-sock` beats `XMSG_HTTP_SOCK` (precedence check through real CLI binary).
-    let list_cli_wins = Command::new(BIN)
+    let list_cli_wins = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &clean_rt)
@@ -501,7 +503,7 @@ fn s1_legacy_db_guard_refuses_serve_and_enroll_ca_before_creating_state() {
     //    routes through `resolve_install` before opening DB!).
     let ca_dir = tmp.path().join("ca");
     make_private_dir(&ca_dir);
-    let init_out = Command::new(BIN)
+    let init_out = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", &home)
         .args([
@@ -517,7 +519,7 @@ fn s1_legacy_db_guard_refuses_serve_and_enroll_ca_before_creating_state() {
         "enroll-ca init failed: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
-    let bad_enroll_ca = Command::new(BIN)
+    let bad_enroll_ca = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", &home)
         .env("XDG_STATE_HOME", "relative/bad-xdg")
@@ -735,7 +737,7 @@ fn s1_legacy_guard_enforced_across_every_entrypoint() {
     .unwrap();
     fs::set_permissions(&policy_path, fs::Permissions::from_mode(0o600)).unwrap();
 
-    let init_ca = Command::new(BIN)
+    let init_ca = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", &fake_home)
         .args([
@@ -758,7 +760,7 @@ fn s1_legacy_guard_enforced_across_every_entrypoint() {
     let new_db = new_state.join("xmsg.db");
 
     // 1. Real subprocess: `xmsg serve` refuses with LegacyConflict and creates nothing.
-    let mut serve_cmd = Command::new(BIN);
+    let mut serve_cmd = spawn::command(BIN);
     serve_cmd
         .env_remove("XMSG_HTTP_SOCK")
         .env_remove("XMSG_AGENT_SOCK")
@@ -789,7 +791,7 @@ fn s1_legacy_guard_enforced_across_every_entrypoint() {
     );
 
     // 2. Real subprocess: `xmsg enroll-ca list` refuses with LegacyConflict and creates nothing.
-    let ca_out = Command::new(BIN)
+    let ca_out = spawn::command(BIN)
         .env_remove("XMSG_HTTP_SOCK")
         .env_remove("XMSG_PEERS_FILE")
         .scrub_agy_env()
@@ -824,7 +826,7 @@ fn s1_legacy_guard_enforced_across_every_entrypoint() {
     );
 
     // 3. Real subprocess: CLI client (`xmsg list --json`) refuses with LegacyConflict and creates nothing.
-    let list_out = Command::new(BIN)
+    let list_out = spawn::command(BIN)
         .env_remove("XMSG_HTTP_SOCK")
         .env_remove("XMSG_AGENT_SOCK")
         .env_remove("XMSG_REGISTER_SOCK")
@@ -884,7 +886,7 @@ fn s1_legacy_guard_enforced_across_every_entrypoint() {
 
     // 5. Real subprocess: `xmsg doctor --json` keeps `enforce_legacy_guard: false` so it reports
     //    the legacy conflict structurally instead of aborting, while still creating nothing.
-    let doctor_out = Command::new(BIN)
+    let doctor_out = spawn::command(BIN)
         .env_remove("XMSG_HTTP_SOCK")
         .env_remove("XMSG_AGENT_SOCK")
         .env_remove("XMSG_REGISTER_SOCK")
@@ -950,7 +952,7 @@ fn s1_legacy_guard_enforced_across_every_entrypoint() {
     make_private_dir(&clean_xdg);
     let clean_db = clean_state.join("xmsg.db");
 
-    let clean_doc_out = Command::new(BIN)
+    let clean_doc_out = spawn::command(BIN)
         .env_remove("XMSG_HTTP_SOCK")
         .env_remove("XMSG_AGENT_SOCK")
         .env_remove("XMSG_REGISTER_SOCK")
@@ -980,7 +982,7 @@ fn s1_legacy_guard_enforced_across_every_entrypoint() {
     let _rt_cleanup = DirCleanup(doctor_http_sock.parent().map(Path::to_path_buf));
 
     let mut clean_serve = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .env_remove("XMSG_HTTP_SOCK")
             .env_remove("XMSG_AGENT_SOCK")
             .env_remove("XMSG_REGISTER_SOCK")
@@ -1003,7 +1005,7 @@ fn s1_legacy_guard_enforced_across_every_entrypoint() {
         Duration::from_secs(10),
     );
 
-    let bare_list_out = Command::new(BIN)
+    let bare_list_out = spawn::command(BIN)
         .env_remove("XMSG_HTTP_SOCK")
         .env_remove("XMSG_AGENT_SOCK")
         .env_remove("XMSG_REGISTER_SOCK")
@@ -1172,7 +1174,7 @@ fn s1_pod_vectors_and_passwd_less_pins_start_without_home() {
     make_private_dir(&clean_xdg_rt);
 
     let mut serve = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .scrub_agy_env()
             .current_dir(&decoy_cwd)
             .env("HOME", &fake_home)
@@ -1217,7 +1219,7 @@ fn s1_pod_vectors_and_passwd_less_pins_start_without_home() {
     );
 
     // Supported CLI call (`xmsg list --json`) against manual HTTP pin must succeed and NOT see decoy CWD session!
-    let list_out = Command::new(BIN)
+    let list_out = spawn::command(BIN)
         .scrub_agy_env()
         .current_dir(&decoy_cwd)
         .env("HOME", &fake_home)
@@ -1237,7 +1239,7 @@ fn s1_pod_vectors_and_passwd_less_pins_start_without_home() {
     );
 
     // MCP start and initialize + tools/list handshake without a valid account HOME!
-    let mut mcp = Command::new(BIN)
+    let mut mcp = spawn::command(BIN)
         .scrub_agy_env()
         .current_dir(&decoy_cwd)
         .env("HOME", &fake_home)
@@ -1280,7 +1282,7 @@ fn s1_pod_vectors_and_passwd_less_pins_start_without_home() {
     );
 
     // Doctor reports home-dependent Claude observations as `unknown` when HOME is unavailable/mismatched.
-    let doc_out = Command::new(BIN)
+    let doc_out = spawn::command(BIN)
         .scrub_agy_env()
         .current_dir(&decoy_cwd)
         .env("HOME", &fake_home)
@@ -1369,7 +1371,7 @@ fn s1_preexisting_setgid_02700_dirs_accepted() {
     make_private_dir(&clean_xdg_rt);
 
     let mut serve = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &clean_xdg_rt)
@@ -1475,7 +1477,7 @@ fn s1_leaf_registration_alias_and_precedence() {
     let v1_sock_b = v1_run.join("reg-b.sock");
     let v1_agent = v1_run.join("agent.sock");
     let mut serve_v1 = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &clean_xdg_rt)
@@ -1513,7 +1515,7 @@ fn s1_leaf_registration_alias_and_precedence() {
     drop(serve_v1);
 
     let mut serve = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &clean_xdg_rt)
@@ -1585,7 +1587,7 @@ fn s1_systemd_adopted_http_listener_and_foreign_listener_control() {
     let _foreign_listener = UnixListener::bind(&legacy_http).unwrap();
 
     // 1. All-pinned daemon with non-default paths MUST refuse when live legacy XDG listener exists (H4).
-    let out_h4 = Command::new(BIN)
+    let out_h4 = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &legacy_xdg_rt)
@@ -1723,7 +1725,7 @@ fn s2_readonly_discovery_and_doctor_create_nothing() {
 
     // 1. Empty tree: running doctor against missing state root must create NOTHING.
     let before_empty = snapshot_excluding_atime(tmp.path());
-    let _ = Command::new(BIN)
+    let _ = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &clean_xdg)
@@ -1756,7 +1758,7 @@ fn s2_readonly_discovery_and_doctor_create_nothing() {
         xmsg::storage::init_db(&conn).unwrap();
     }
     let before_installed = snapshot_excluding_atime(tmp.path());
-    let _ = Command::new(BIN)
+    let _ = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &clean_xdg)
@@ -1804,7 +1806,7 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
     .unwrap();
     fs::set_permissions(&policy_path, fs::Permissions::from_mode(0o600)).unwrap();
 
-    let init_ca = Command::new(BIN)
+    let init_ca = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .args([
@@ -1830,7 +1832,7 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
     }
     let v0_bytes_before = fs::read(&v0_db).unwrap();
 
-    let mut serve_v0_cmd = Command::new(BIN);
+    let mut serve_v0_cmd = spawn::command(BIN);
     serve_v0_cmd
         .scrub_agy_env()
         .env("HOME", tmp.path())
@@ -1862,7 +1864,7 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
         "M-S5: serve must not modify populated v0 DB bytes"
     );
 
-    let ca_v0 = Command::new(BIN)
+    let ca_v0 = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &run_dir)
@@ -1896,7 +1898,7 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
     // 2. Empty v0 file -> creates schema N cleanly!
     let empty_v0_db = state_dir.join("v0-empty.db");
     fs::write(&empty_v0_db, b"").unwrap();
-    let ca_empty = Command::new(BIN)
+    let ca_empty = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &run_dir)
@@ -1943,7 +1945,7 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
     let nm1_before = fs::read(&n_minus_1_db).unwrap();
     let sidecar_before = fs::read(&sidecar).unwrap();
 
-    let mut serve_nm1_cmd = Command::new(BIN);
+    let mut serve_nm1_cmd = spawn::command(BIN);
     serve_nm1_cmd
         .scrub_agy_env()
         .env("HOME", tmp.path())
@@ -1961,7 +1963,7 @@ fn s5_schema_preservation_fence_serve_and_enroll_ca() {
         ]);
     let (serve_nm1_refused, serve_nm1_err) =
         run_expect_refusal_bounded(&mut serve_nm1_cmd, Duration::from_secs(5));
-    let mut ca_nm1_cmd = Command::new(BIN);
+    let mut ca_nm1_cmd = spawn::command(BIN);
     ca_nm1_cmd
         .scrub_agy_env()
         .env("HOME", tmp.path())
@@ -2022,7 +2024,7 @@ fn s9d_daemon_sets_umask_077_and_logs_sampled_effective_umask() {
     let agent_sock = run_dir.join("agent.sock");
     let reg_sock = run_dir.join("register.sock");
 
-    let mut cmd = Command::new(BIN);
+    let mut cmd = spawn::command(BIN);
     cmd.scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &run_dir)

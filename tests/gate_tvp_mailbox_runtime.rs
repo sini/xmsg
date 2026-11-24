@@ -2,6 +2,8 @@
 mod agy_env;
 mod hop_client;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 
 use base64::Engine;
@@ -11,7 +13,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use xmsg::fed::generate_self_signed_ed25519_pem;
@@ -77,7 +79,7 @@ impl Node {
         let http = directory.path().join("run/http.sock");
         let database = directory.path().join("state.db");
         let codex = directory.path().join("codex");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        let mut child = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .scrub_agy_env()
             .env("HOME", directory.path())
             .env("XDG_RUNTIME_DIR", directory.path().join("run"))
@@ -562,7 +564,7 @@ fn assert_local_service_reply_refusal(with_attachment: bool) {
     if with_attachment {
         fs::write(hub.directory.path().join("with-attachment"), "fixture").unwrap();
     }
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = spawn::command(std::env::current_exe().unwrap());
     command
         .args(["--exact", "mailbox_reply_service_child", "--nocapture"])
         .env("TVP_REPLY_SERVICE_DIRECTORY", hub.directory.path())

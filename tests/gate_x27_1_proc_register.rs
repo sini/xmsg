@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -202,7 +204,7 @@ fn serve_fifo(
 }
 
 fn run_hook(bin: &str, sock_path: &Path, conv_id: &str) -> (i32, Value) {
-    let mut child = Command::new(bin)
+    let mut child = spawn::command(bin)
         .args([
             "register",
             "agy",

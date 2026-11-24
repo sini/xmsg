@@ -6,6 +6,8 @@
 //! inbox socket the test listens on; a service is this test process, trusted through
 //! `--svc-exe <name>=<this test binary>` and registered on `register.sock`.
 
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -77,7 +79,7 @@ impl Node {
 
     fn spawn(&mut self, services: &[&str]) {
         let exe = std::env::current_exe().unwrap();
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xmsg"));
+        let mut cmd = spawn::command(env!("CARGO_BIN_EXE_xmsg"));
         cmd.scrub_agy_env()
             .env("XDG_RUNTIME_DIR", self.dir.join("run"))
             .env("HOME", &self.dir)
@@ -361,7 +363,7 @@ impl Service {
         let relay_path = node.dir.join(format!("relay-{name}.sock"));
         let _ = fs::remove_file(&relay_path);
         let listener = UnixListener::bind(&relay_path).unwrap();
-        let child = Command::new(std::env::current_exe().unwrap())
+        let child = spawn::command(std::env::current_exe().unwrap())
             .arg(test_name)
             .arg("--exact")
             .arg("--nocapture")
@@ -678,7 +680,7 @@ async fn test_oracle_9_populated_v0_ee1b6ca_refused_without_writes() {
         }
         let bytes_before = fs::read(&db).unwrap();
 
-        let output = Command::new(env!("CARGO_BIN_EXE_xmsg"))
+        let output = spawn::command(env!("CARGO_BIN_EXE_xmsg"))
             .scrub_agy_env()
             .env("XDG_RUNTIME_DIR", &run)
             .env("HOME", tmp.path())

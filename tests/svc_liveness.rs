@@ -1,3 +1,5 @@
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -88,7 +90,7 @@ async fn exited_peer() -> PeerCred {
         .unwrap();
     let socket = temp.path().join("peer.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut child = spawn::command(std::env::current_exe().unwrap())
         .args(["svc_child_connect_helper", "--exact", "--nocapture"])
         .env("XMSG_SVC_TEST_SOCKET", &socket)
         .stdin(std::process::Stdio::piped())

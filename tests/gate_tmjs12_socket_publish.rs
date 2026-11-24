@@ -4,6 +4,8 @@
 //! incumbent collision barriers, and 1-byte temp-name exhaustion (S8 / M-S8..M-S8g).
 
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 
 use std::ffi::OsStr;
@@ -12,7 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
@@ -208,7 +210,7 @@ async fn s8_proof_authorized_stale_cleanup_and_unproven_refusal() {
     // 1. Start a real daemon with manual bindings, SIGKILL it (leaving stale sockets behind
     //    with matching owner.json proof), and restart on the same state root -> SUCCEEDS!
     let mut first = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &clean_xdg)
@@ -234,7 +236,7 @@ async fn s8_proof_authorized_stale_cleanup_and_unproven_refusal() {
     assert!(http_sock.exists(), "SIGKILL leaves recorded stale socket");
 
     let mut restarted = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &clean_xdg)
@@ -257,7 +259,7 @@ async fn s8_proof_authorized_stale_cleanup_and_unproven_refusal() {
     wait_for_socket(&http_sock, &mut restarted.0, Duration::from_secs(10));
 
     // 2. While state1 owns those endpoints, a second state root naming the same endpoint REFUSES!
-    let conflict = Command::new(BIN)
+    let conflict = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &clean_xdg)
@@ -417,7 +419,7 @@ fn s8_live_runtime_marker_removal_recovers_within_one_period() {
     let _cleanup = DirCleanup(Some(ns_dir.clone()));
 
     let mut serve = ChildGuard(
-        Command::new(BIN)
+        spawn::command(BIN)
             .scrub_agy_env()
             .env("HOME", tmp.path())
             .env("XDG_RUNTIME_DIR", &clean_xdg)
@@ -465,7 +467,7 @@ fn s8_live_runtime_marker_removal_recovers_within_one_period() {
     );
 
     // New client resolves & connects cleanly after live recovery.
-    let list_out = Command::new(BIN)
+    let list_out = spawn::command(BIN)
         .scrub_agy_env()
         .env("HOME", tmp.path())
         .env("XDG_RUNTIME_DIR", &clean_xdg)

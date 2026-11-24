@@ -1,4 +1,6 @@
 mod agy_env;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::collections::HashMap;
 use std::fs;
@@ -406,7 +408,7 @@ fn new_xmsg_cmd(set_child_listen_pid: bool) -> tokio::process::Command {
             .arg(bin);
         cmd
     } else {
-        tokio::process::Command::new(bin)
+        spawn::tokio_command(bin)
     };
     cmd.scrub_agy_env();
     cmd

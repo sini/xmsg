@@ -6,6 +6,8 @@
 //! 2. Every test harness that spawns `xmsg serve` must scrub `ANTIGRAVITY_*` (via
 //!    `agy_env::ScrubAgyEnv`, `agy_env::scrub_*`, `.env_clear()`, or explicit `env_remove`s).
 
+#[path = "support/spawn.rs"]
+mod spawn;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -216,8 +218,8 @@ fn violations(name: &str, src: &str) -> Vec<String> {
                 let end = second.find([',', ')']).unwrap_or(second.len());
                 let dst = trim_ref(&second[..end]);
                 if !dst.is_empty()
-                    && (fn_blk.contains(&format!("Command::new({dst})"))
-                        || fn_blk.contains(&format!("Command::new(&{dst})")))
+                    && (fn_blk.contains(&format!("spawn::command({dst})"))
+                        || fn_blk.contains(&format!("spawn::command(&{dst})")))
                 {
                     out.push(format!(
                         "{name}: in-process fs::copy({dst}) followed by Command::new"
@@ -359,7 +361,7 @@ fn bad() {
     let bad_copy = r#"
 fn bad() {
     fs::copy(env!("CARGO_BIN_EXE_xmsg"), &copied_bin).unwrap();
-    let _ = Command::new(&copied_bin).status();
+    let _ = spawn::command(&copied_bin).status();
 }
 "#;
     let v4 = violations("planted_copy.rs", bad_copy);
@@ -372,7 +374,7 @@ fn bad() {
     let bad_serve = r#"
 fn bad() {
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let _child = Command::new(bin)
+    let _child = spawn::command(bin)
         .env("HOME", dir)
         .arg("serve")
         .spawn()
@@ -395,7 +397,7 @@ fn bad() {
         "    write_exe::write_exe(&bin, \"#",
         "!/bin/sh\\nexit 0\\n\");\n",
         "    let xmsg = env!(\"CARGO_BIN_EXE_xmsg\");\n",
-        "    let _child = Command::new(xmsg).scrub_agy_env().env(\"HOME\", &run_dir).arg(\"serve\").spawn();\n",
+        "    let _child = spawn::command(xmsg).scrub_agy_env().env(\"HOME\", &run_dir).arg(\"serve\").spawn();\n",
         "}\n",
     );
     let clean_v = violations("clean.rs", clean);

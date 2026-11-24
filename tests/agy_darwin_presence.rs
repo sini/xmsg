@@ -2,6 +2,8 @@
 //! agy presence locks on live macOS: the holder is nominated by the open file's sticky
 //! `FWASLOCKED` flag and held only while a kqueue `NOTE_FUNLOCK` watch on the file is unfired.
 
+#[path = "support/spawn.rs"]
+mod spawn;
 mod write_exe;
 
 use std::fs;
@@ -9,7 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -65,7 +67,7 @@ fn presence_child() {
             .unwrap();
         flock(f.as_raw_fd(), libc::LOCK_EX);
         let grandchild = |mode: &str| {
-            Command::new(std::env::current_exe().unwrap())
+            spawn::command(std::env::current_exe().unwrap())
                 .args(["--exact", "presence_child", "--nocapture"])
                 .env(MODE, mode)
                 .stdin(Stdio::piped())
@@ -104,7 +106,7 @@ struct Holder {
 
 impl Holder {
     fn spawn(path: &Path, mode: &str, env: &[(&str, &str)]) -> Holder {
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut child = spawn::command(std::env::current_exe().unwrap())
             .args(["--exact", "presence_child", "--nocapture"])
             .env(HOLD, path)
             .env(MODE, mode)

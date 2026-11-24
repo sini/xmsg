@@ -1,5 +1,7 @@
 mod agy_env;
 mod short_sock;
+#[path = "support/spawn.rs"]
+mod spawn;
 use agy_env::ScrubAgyEnv;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -222,7 +224,7 @@ async fn spawn_test_node(name: &str, cert_pem: &str, key_pem: &str, peers_json: 
     let http_sock = run_dir.join("http.sock");
 
     let bin = env!("CARGO_BIN_EXE_xmsg");
-    let mut child = tokio::process::Command::new(bin)
+    let mut child = spawn::tokio_command(bin)
         .scrub_agy_env()
         .env("XDG_RUNTIME_DIR", &run_dir)
         .env("HOME", &run_dir)
