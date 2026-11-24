@@ -177,6 +177,7 @@ fn row(
         registered_at,
         last_seen,
         context: None,
+        tags: Vec::new(),
     }
 }
 

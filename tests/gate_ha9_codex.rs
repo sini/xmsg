@@ -827,6 +827,7 @@ async fn c2_mcp_environment_and_attributed_tool_paths() {
             codex_session: Some(root_p.to_string()),
             codex_thread: Some(root_p.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await
@@ -941,6 +942,7 @@ async fn c2_mcp_environment_and_attributed_tool_paths() {
             codex_session: None,
             codex_thread: None,
             codex_turn: None,
+            tag: None,
         },
     )
     .await;
@@ -1079,6 +1081,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
             codex_session: Some(p_delayed.to_string()),
             codex_thread: Some(p_delayed.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await;
@@ -1113,6 +1116,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
             codex_session: Some(p_delayed.to_string()),
             codex_thread: Some(p_delayed.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await;
@@ -1305,6 +1309,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
             codex_session: Some(p_delayed.to_string()),
             codex_thread: Some(p_delayed.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await;
@@ -1354,6 +1359,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
             codex_session: Some(p_delayed.to_string()),
             codex_thread: Some(p_delayed.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await;
@@ -1378,6 +1384,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
             codex_session: Some(p_sibling.to_string()),
             codex_thread: Some(p_sibling.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await;
@@ -1426,6 +1433,7 @@ async fn c3_registration_xb2_and_continuous_lease_watch() {
             codex_session: Some(p_sibling.to_string()),
             codex_thread: Some(p_sibling.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await;
@@ -2192,6 +2200,7 @@ async fn c11_session_start_sources_and_fresh_roots() {
             codex_session: Some(p_clear.to_string()),
             codex_thread: Some(p_clear.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await;
@@ -3499,6 +3508,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
                 codex_session: Some(root_p.to_string()),
                 codex_thread: Some(root_p.to_string()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await
@@ -3521,6 +3531,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
                 codex_session: Some(root_p.to_string()),
                 codex_thread: Some(root_p.to_string()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await
@@ -3590,6 +3601,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
             codex_session: Some(root_p.to_string()),
             codex_thread: Some(root_p.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await;
@@ -3791,6 +3803,7 @@ async fn c17_resume_reattestation_all_cases_and_revoked_by_operator_with_valid_w
                 codex_session: Some(root_p.to_string()),
                 codex_thread: Some(root_p.to_string()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await
@@ -4497,6 +4510,7 @@ async fn c19_shared_home_sibling_flock_scan_and_unlocked_fd_rejection() {
             codex_session: Some(p1.to_string()),
             codex_thread: Some(p1.to_string()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await
@@ -4935,6 +4949,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
                 codex_session: Some(p1.to_string()),
                 codex_thread: Some(p1.to_string()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await;
@@ -4957,6 +4972,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
                 codex_session: Some(p2.to_string()),
                 codex_thread: Some(p2.to_string()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await
@@ -5122,6 +5138,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
                 codex_session: Some(p_live.to_string()),
                 codex_thread: Some(p_live.to_string()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await
@@ -5185,6 +5202,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
                 codex_session: Some(p_live.to_string()),
                 codex_thread: Some(p_live.to_string()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await;
@@ -5207,6 +5225,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
                 codex_session: Some(p_live_sib.to_string()),
                 codex_thread: Some(p_live_sib.to_string()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await
@@ -5248,6 +5267,7 @@ async fn c19_3_post_admission_owner_release_without_unlink() {
                 codex_session: Some(p_live_sib.to_string()),
                 codex_thread: Some(p_live_sib.to_string()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await;
@@ -5564,6 +5584,7 @@ async fn c3_live_distinct_child_same_inode_flock_reopen_and_mutants() {
                 codex_session: Some(p_main.into()),
                 codex_thread: Some(p_main.into()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await
@@ -7136,6 +7157,7 @@ async fn bare_mcp_reattestation_pushes_queued_reply_once_against_racing_hook() {
         codex_session: session.map(str::to_string),
         codex_thread: thread.map(str::to_string),
         codex_turn: None,
+        tag: None,
     };
     assert!(
         handle_agent_frame(&env.state, &peer, list(Some(root), None))
@@ -7235,6 +7257,7 @@ async fn bare_mcp_reattestation_pushes_queued_reply_once_against_racing_hook() {
                 codex_session: Some(root.into()),
                 codex_thread: Some(root.into()),
                 codex_turn: None,
+                tag: None,
             },
         )
         .await
@@ -7783,6 +7806,7 @@ async fn va41_auto_recovery_races_mcp_and_hook_with_one_carrier() {
             codex_session: Some(ROOT.into()),
             codex_thread: Some(ROOT.into()),
             codex_turn: None,
+            tag: None,
         },
     )
     .await

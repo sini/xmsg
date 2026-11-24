@@ -331,6 +331,8 @@ pub struct ListQuery {
     pub within: Option<u64>,
     #[serde(default)]
     pub host: Option<String>,
+    #[serde(default)]
+    pub tag: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -359,6 +361,7 @@ fn live_entry(
         registered_at: Some(registered_at),
         last_seen: None,
         context: None,
+        tags: Vec::new(),
     }
 }
 
@@ -379,6 +382,7 @@ fn inactive_entry(
         registered_at: None,
         last_seen: Some(last_seen),
         context: None,
+        tags: Vec::new(),
     }
 }
 
@@ -394,6 +398,7 @@ fn recipient(e: FedListEntry, node: &str) -> Recipient {
         registered_at: e.registered_at,
         last_seen: e.last_seen,
         context: e.context,
+        tags: e.tags,
     }
 }
 
@@ -484,6 +489,11 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
             "'within' is only valid when status is 'inactive'".to_string(),
         ));
     }
+    if inactive_mode && query.tag.is_some() {
+        return Err(AppError::BadRequest(
+            "'tag' is only valid when status is 'live'".to_string(),
+        ));
+    }
     let max_within = state.reply_ttl.as_secs();
     let within_secs = query
         .within
@@ -547,13 +557,16 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
         }
         nodes.push(crate::fed::NodeStatus::ok(node));
     }
+    let mut unanswered = Vec::new();
+    let mut tag_incapable = Vec::new();
     if let Some(fs) = fed_state {
         let mut asked = tokio::task::JoinSet::new();
         for key in peers {
             let fs = fs.clone();
             asked.spawn(async move {
-                let (entries, status) = crate::fed::list_peer(&fs, &key).await;
-                (key, entries, status)
+                let (entries, status, tag_capable) =
+                    crate::fed::list_peer_for_list(&fs, &key).await;
+                (key, entries, status, tag_capable)
             });
         }
         let mut answers = Vec::new();
@@ -563,7 +576,7 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
         answers.sort_by(|a, b| a.0.cmp(&b.0));
         let now = storage::now_epoch_secs();
         let cutoff = now.saturating_sub(within_secs as i64);
-        for (key, entries, status) in answers {
+        for (key, entries, status, tag_capable) in answers {
             for e in entries {
                 if inactive_mode {
                     // Older peers do not stamp `last_seen` on parked entries, so they
@@ -575,6 +588,11 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
                     recipients.push(recipient(e, &key));
                 }
             }
+            if status.status != "ok" {
+                unanswered.push(status.node.clone());
+            } else if !tag_capable {
+                tag_incapable.push(status.node.clone());
+            }
             nodes.push(status);
         }
     }
@@ -585,6 +603,10 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
                 let local = r.address.rsplit_once('@').map_or("", |(l, _)| l);
                 r.label.as_deref() == Some(n) || (r.kind == "service" && local == n)
             })
+            && query
+                .tag
+                .as_deref()
+                .is_none_or(|tag| r.tags.iter().any(|t| t == tag))
     });
     recipients.sort_by(|a, b| {
         let timestamp = |r: &Recipient| {
@@ -620,11 +642,17 @@ pub async fn list(state: &AppState, query: &ListQuery) -> Result<ListResult, App
             };
         }
     }
+    let coverage = query.tag.as_ref().map(|_| crate::client::ListCoverage {
+        complete: unanswered.is_empty() && tag_incapable.is_empty(),
+        unanswered,
+        tag_incapable,
+    });
     Ok(ListResult {
         recipients,
         nodes,
         total,
         truncated: total > limit,
+        coverage,
     })
 }
 
@@ -645,12 +673,15 @@ pub(crate) async fn listing_live(
     )
     .await?;
     let mut out: Vec<FedListEntry> = Vec::new();
+    let mut current_regs: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
     let now = storage::now_epoch_secs();
     {
         let db = local.db.lock().map_err(db_err)?;
         let _ = storage::purge_instance_seen(&db, now, reply_ttl.as_secs() as i64);
         for (claim, e) in pairs {
             let parent_addr = claim.address();
+            current_regs.insert((parent_addr.clone(), "claude".to_string()), claim.reg());
             out.push(live_entry(
                 &parent_addr,
                 false,
@@ -675,6 +706,7 @@ pub(crate) async fn listing_live(
                     registered_at: Some(sub.bound_at),
                     last_seen: None,
                     context: None,
+                    tags: Vec::new(),
                 });
             }
         }
@@ -683,9 +715,18 @@ pub(crate) async fn listing_live(
     {
         let db = local.db.lock().map_err(db_err)?;
         crate::agy::purge_evicted_agy_subagents(&db, &local.agy_config.proc_root, local.agy_store);
+        let agy_store = local.agy_store.read().unwrap();
         for s in agy_sessions {
             let parent_id = s.session_id.clone();
             let is_registered = s.status != "unregistered";
+            if is_registered {
+                if let Some(info) = agy_store.get(&parent_id) {
+                    if !info.reg.is_empty() {
+                        current_regs
+                            .insert((parent_id.clone(), "agy".to_string()), info.reg.clone());
+                    }
+                }
+            }
             out.push(live_entry(
                 &parent_id,
                 false,
@@ -711,28 +752,44 @@ pub(crate) async fn listing_live(
                         registered_at: Some(sub.bound_at),
                         last_seen: None,
                         context: None,
+                        tags: Vec::new(),
                     });
                 }
             }
         }
     }
     let proc_root = &local.agy_config.proc_root;
-    for s in crate::pi::list_pi_sessions(proc_root, local.pi_store, &query) {
-        out.push(live_entry(
-            &s.session_id,
-            false,
-            "pi",
-            s.name,
-            user,
-            s.started_at as i64,
-        ));
+    {
+        let pi_sessions = crate::pi::list_pi_sessions(proc_root, local.pi_store, &query);
+        let pi_store = local.pi_store.read().unwrap();
+        for s in pi_sessions {
+            if let Some(info) = pi_store.get(&s.session_id) {
+                if !info.reg.is_empty() {
+                    current_regs.insert((s.session_id.clone(), "pi".to_string()), info.reg.clone());
+                }
+            }
+            out.push(live_entry(
+                &s.session_id,
+                false,
+                "pi",
+                s.name,
+                user,
+                s.started_at as i64,
+            ));
+        }
     }
     {
         let db = local.db.lock().map_err(db_err)?;
         let plugin_sessions = crate::plugin::sessions(&db).map_err(db_err)?;
+        let plugin_regs = crate::plugin::session_regs(&db).map_err(db_err)?;
         for s in plugin_sessions {
             let parent_id = s.session_id.clone();
             let parent_harness = s.harness.clone();
+            if let Some(reg) = plugin_regs.get(&(parent_id.clone(), parent_harness.clone())) {
+                if !reg.is_empty() {
+                    current_regs.insert((parent_id.clone(), parent_harness.clone()), reg.clone());
+                }
+            }
             out.push(live_entry(
                 &parent_id,
                 false,
@@ -757,6 +814,7 @@ pub(crate) async fn listing_live(
                     registered_at: Some(sub.bound_at),
                     last_seen: None,
                     context: None,
+                    tags: Vec::new(),
                 });
             }
         }
@@ -768,6 +826,10 @@ pub(crate) async fn listing_live(
             if awaiting.contains(&snap.root_id) {
                 continue;
             }
+            current_regs.insert(
+                (snap.root_id.clone(), "codex".to_string()),
+                format!("codex:{}", snap.generation),
+            );
             out.push(live_entry(
                 &snap.root_id,
                 false,
@@ -805,6 +867,7 @@ pub(crate) async fn listing_live(
                         registered_at: Some(verified_sub.bound_at),
                         last_seen: None,
                         context: None,
+                        tags: Vec::new(),
                     });
                 }
             }
@@ -819,6 +882,20 @@ pub(crate) async fn listing_live(
             user,
             s.started_at as i64,
         ));
+    }
+    let tags_by_key = {
+        let db = local.db.lock().map_err(db_err)?;
+        crate::session_context::live_tags(&db).map_err(db_err)?
+    };
+    for entry in &mut out {
+        if entry.kind == "instance" {
+            let harness = entry.harness.as_deref().unwrap_or_default().to_string();
+            if let Some(reg) = current_regs.get(&(entry.id.clone(), harness.clone())) {
+                if let Some(tags) = tags_by_key.get(&(entry.id.clone(), harness, reg.clone())) {
+                    entry.tags = tags.clone();
+                }
+            }
+        }
     }
     Ok(out)
 }
@@ -868,6 +945,7 @@ pub(crate) async fn listing_inactive(
                 registered_at: None,
                 last_seen: Some(seen_at),
                 context: None,
+                tags: Vec::new(),
             });
         }
     }
@@ -897,6 +975,7 @@ pub(crate) async fn listing_inactive(
                     registered_at: None,
                     last_seen: Some(item.last_seen),
                     context: None,
+                    tags: Vec::new(),
                 });
             }
         }
@@ -946,6 +1025,7 @@ pub(crate) async fn listing(
                 registered_at: None,
                 last_seen: Some(seen_at),
                 context: None,
+                tags: Vec::new(),
             });
         }
     }
@@ -966,6 +1046,7 @@ pub(crate) async fn listing(
                     registered_at: None,
                     last_seen: Some(last_live),
                     context: None,
+                    tags: Vec::new(),
                 });
             }
         }

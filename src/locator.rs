@@ -210,7 +210,7 @@ fn local_catalog(local: &Local<'_>, user: &str, detail: bool) -> Result<LocalCat
             let mut stmt = db.prepare(sql).map_err(fail)?;
             let results = stmt.query_map([], |r| {
                 let registered_at: Option<i64> = r.get(4)?;
-                Ok(Recipient { address: r.get(0)?, kind: r.get(1)?, harness: Some(r.get(2)?), label: r.get(3)?, status: r.get(6)?, node: String::new(), user: String::new(), registered_at, last_seen: r.get(5)?, context: None })
+                Ok(Recipient { address: r.get(0)?, kind: r.get(1)?, harness: Some(r.get(2)?), label: r.get(3)?, status: r.get(6)?, node: String::new(), user: String::new(), registered_at, last_seen: r.get(5)?, context: None, tags: Vec::new() })
             }).map_err(fail)?;
             for row in results { add(row.map_err(fail)?); }
         }
@@ -238,6 +238,7 @@ fn local_catalog(local: &Local<'_>, user: &str, detail: bool) -> Result<LocalCat
         registered_at: Some(time),
         last_seen: None,
         context: None,
+        tags: Vec::new(),
     };
     for (key, info) in local.agy_store.read().map_err(fail)?.iter() {
         add(row(
@@ -391,6 +392,7 @@ pub async fn locate(state: &AppState, query: &Query) -> Result<Located, AppError
                 registered_at: e.registered_at,
                 last_seen: e.last_seen,
                 context: e.context,
+                tags: Vec::new(),
             }));
             nodes.push(status);
         }
@@ -856,6 +858,7 @@ pub(crate) mod tests {
             registered_at: None,
             last_seen: None,
             context: None,
+            tags: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(&row).unwrap(),

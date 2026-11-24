@@ -168,6 +168,28 @@ pub enum AgentFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[allow(dead_code)]
+        as_agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_thread: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        codex_turn: Option<String>,
+    },
+    Tag {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema_version: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        add: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remove: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[allow(dead_code)]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         #[allow(dead_code)]
         as_agent: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -375,6 +397,17 @@ pub struct Recipient {
     pub last_seen: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::session_context::SessionContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// Tag-filter coverage across the nodes asked (§3.4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ListCoverage {
+    pub complete: bool,
+    pub unanswered: Vec<String>,
+    pub tag_incapable: Vec<String>,
 }
 
 /// What `list` returns: the recipients, and how each node asked answered (A-12).
@@ -385,6 +418,16 @@ pub struct ListResult {
     pub nodes: Vec<NodeStatus>,
     pub total: usize,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ListCoverage>,
+}
+
+/// What `tag` returns (§3.5).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TagResult {
+    pub address: String,
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

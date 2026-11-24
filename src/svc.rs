@@ -1033,7 +1033,7 @@ pub async fn run_leaf_inbox_task(
                     &fed_state,
                     &peer_name,
                     &query,
-                    v.unwrap_or(1) >= 2,
+                    v.unwrap_or(1),
                     read_only,
                 )
                 .await;

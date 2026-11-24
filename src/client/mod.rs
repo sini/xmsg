@@ -7,7 +7,10 @@ pub(crate) mod wire;
 
 pub use origin::Origin;
 pub use wire::{AttachRequest, AttachmentRef};
-pub use wire::{ListResult, NodeStatus, Recipient, Registration, ReplyRecord, SendResult};
+pub use wire::{
+    ListCoverage, ListResult, NodeStatus, Recipient, Registration, ReplyRecord, SendResult,
+    TagResult,
+};
 
 use health::RegistrationHealth;
 use std::os::fd::AsRawFd;
@@ -145,6 +148,7 @@ pub struct ListQuery {
     pub status: Option<String>,
     pub within: Option<u64>,
     pub limit: Option<usize>,
+    pub tag: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -457,6 +461,13 @@ impl RegisteredService {
     pub async fn list(&self, query: ListQuery) -> Result<ListResult, ClientError> {
         self.agent_client().list(query).await
     }
+    pub async fn tag(
+        &self,
+        add: Option<String>,
+        remove: Option<String>,
+    ) -> Result<TagResult, ClientError> {
+        self.agent_client().tag(add, remove).await
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -630,6 +641,31 @@ impl AgentClient {
                 status: query.status,
                 within: query.within,
                 limit: query.limit,
+                tag: query.tag,
+                as_agent: None,
+                codex_session: None,
+                codex_thread: None,
+                codex_turn: None,
+            })
+            .await?;
+        value
+            .as_object_mut()
+            .ok_or(ClientError::Protocol)?
+            .remove("status");
+        serde_json::from_value(value).map_err(|_| ClientError::Protocol)
+    }
+
+    pub async fn tag(
+        &self,
+        add: Option<String>,
+        remove: Option<String>,
+    ) -> Result<TagResult, ClientError> {
+        let mut value = self
+            .agent(AgentFrame::Tag {
+                schema_version: Some(SCHEMA_VERSION),
+                add,
+                remove,
+                session_id: None,
                 as_agent: None,
                 codex_session: None,
                 codex_thread: None,

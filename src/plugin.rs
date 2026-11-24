@@ -890,6 +890,7 @@ where
                         within,
                         limit,
                         host: None,
+                        tag: None,
                     };
                     let res = surface::list(&state, &query).await.map(|r| {
                         let mut value = serde_json::to_value(r).expect("list serializes");

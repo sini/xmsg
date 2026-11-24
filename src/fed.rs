@@ -2987,6 +2987,8 @@ pub struct FedListEntry {
     pub last_seen: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::session_context::SessionContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// A dial-out client's answer to a mailbox `list` query: its entries, or `denied` when its
@@ -2994,7 +2996,11 @@ pub struct FedListEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FedListAnswer {
-    Ok { entries: Vec<FedListEntry> },
+    Ok {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        v: Option<u32>,
+        entries: Vec<FedListEntry>,
+    },
     Denied,
 }
 
@@ -4686,14 +4692,21 @@ async fn fed_list_sessions_handler(
         return Err(AppError::RateLimited("Rate limit exceeded".to_string()));
     }
 
+    let version = query.v.unwrap_or(1);
+    let include_tags = !query.read_only && version >= 3;
     let entries = listing_for_peer(
         &fed_state,
         &peer_cfg,
-        query.v.unwrap_or(1) >= 2,
+        version >= 2,
+        include_tags,
         query.read_only,
     )
     .await?;
-    Ok((StatusCode::OK, Json(entries)).into_response())
+    if include_tags {
+        Ok((StatusCode::OK, Json(json!({ "v": 3, "entries": entries }))).into_response())
+    } else {
+        Ok((StatusCode::OK, Json(entries)).into_response())
+    }
 }
 
 /// This node's user (A16): the user of the identity it presents to its peers.
@@ -4710,6 +4723,7 @@ async fn listing_for_peer(
     fed_state: &FedState,
     peer_cfg: &PeerConfig,
     v2: bool,
+    include_tags: bool,
     read_only: bool,
 ) -> Result<Vec<FedListEntry>, AppError> {
     let mut entries = if read_only {
@@ -4730,6 +4744,7 @@ async fn listing_for_peer(
                 registered_at: r.registered_at,
                 last_seen: r.last_seen,
                 context: None,
+                tags: Vec::new(),
             })
             .collect()
     } else {
@@ -4762,6 +4777,11 @@ async fn listing_for_peer(
             e.harness = None;
             e.registered_at = None;
             e.last_seen = None;
+        }
+    }
+    if !include_tags || read_only {
+        for e in &mut entries {
+            e.tags.clear();
         }
     }
     Ok(entries)
@@ -4873,7 +4893,7 @@ async fn fed_get_inbox_handler(
                         {
                             return Ok(Some(FedInboxItem::List {
                                 query,
-                                v: Some(2),
+                                v: Some(if read_only { 2 } else { 3 }),
                                 read_only,
                             }));
                         }
@@ -6463,14 +6483,8 @@ pub async fn run_outbound_peer_pull_loop(fed_state: Arc<FedState>, peer_name: St
                 read_only,
             })) => {
                 backoff_millis = 100;
-                answer_list_query_mode(
-                    &fed_state,
-                    &peer_name,
-                    &query,
-                    v.unwrap_or(1) >= 2,
-                    read_only,
-                )
-                .await;
+                answer_list_query_mode(&fed_state, &peer_name, &query, v.unwrap_or(1), read_only)
+                    .await;
             }
             Ok(Some(FedInboxItem::Message(msg))) => {
                 backoff_millis = 100;
@@ -6872,6 +6886,14 @@ pub use crate::client::wire::NodeStatus;
 /// direct peer over `/fed/v2/sessions`, a dial-out client through its mailbox. Returns the
 /// entries its certificate user may list (P-3) and its status.
 pub async fn list_peer(fed_state: &FedState, peer_key: &str) -> (Vec<FedListEntry>, NodeStatus) {
+    let (entries, status, _) = list_peer_mode(fed_state, peer_key, false).await;
+    (entries, status)
+}
+
+pub(crate) async fn list_peer_for_list(
+    fed_state: &FedState,
+    peer_key: &str,
+) -> (Vec<FedListEntry>, NodeStatus, bool) {
     list_peer_mode(fed_state, peer_key, false).await
 }
 
@@ -6879,18 +6901,20 @@ pub async fn list_peer_read_only(
     fed_state: &FedState,
     peer_key: &str,
 ) -> (Vec<FedListEntry>, NodeStatus) {
-    list_peer_mode(fed_state, peer_key, true).await
+    let (entries, status, _) = list_peer_mode(fed_state, peer_key, true).await;
+    (entries, status)
 }
 
 async fn list_peer_mode(
     fed_state: &FedState,
     peer_key: &str,
     read_only: bool,
-) -> (Vec<FedListEntry>, NodeStatus) {
+) -> (Vec<FedListEntry>, NodeStatus, bool) {
     let Some(peer) = fed_state.current_peers().get_peer_config(peer_key) else {
         return (
             Vec::new(),
             NodeStatus::failed(peer_key, "unreachable", "not a peer".to_string()),
+            false,
         );
     };
     let asked = async {
@@ -6903,22 +6927,30 @@ async fn list_peer_mode(
     let Ok(res) = tokio::time::timeout(LIST_TIMEOUT, asked).await else {
         let detail = format!("did not answer `list` within {}s", LIST_TIMEOUT.as_secs());
         let status = if peer.leaf { "unreachable" } else { "timeout" };
-        return (Vec::new(), NodeStatus::failed(&peer.name, status, detail));
+        return (
+            Vec::new(),
+            NodeStatus::failed(&peer.name, status, detail),
+            false,
+        );
     };
     match res {
         Ok((answer, user)) => match answer {
-            FedListAnswer::Ok { entries } => {
-                (admit_entries(entries, &user), NodeStatus::ok(&peer.name))
-            }
-            FedListAnswer::Denied => (Vec::new(), withholds_list(&peer.name)),
+            FedListAnswer::Ok { v, entries } => (
+                admit_entries(entries, &user),
+                NodeStatus::ok(&peer.name),
+                v.is_some_and(|version| version >= 3),
+            ),
+            FedListAnswer::Denied => (Vec::new(), withholds_list(&peer.name), false),
         },
         Err(AppError::OpDenied(d)) => (
             Vec::new(),
             NodeStatus::failed(&peer.name, "unreachable", format!("{WITHHOLDS_LIST}: {d}")),
+            false,
         ),
         Err(e) => (
             Vec::new(),
             NodeStatus::failed(&peer.name, "unreachable", e.to_string()),
+            false,
         ),
     }
 }
@@ -6961,7 +6993,7 @@ fn list_request_uri(read_only: bool) -> &'static str {
     if read_only {
         "/fed/v2/sessions?v=2&read_only=true"
     } else {
-        "/fed/v2/sessions?v=2"
+        "/fed/v2/sessions?v=3"
     }
 }
 
@@ -7024,10 +7056,20 @@ async fn list_direct_peer_mode(
         .to_bytes();
 
     if status.is_success() {
-        let entries: Vec<FedListEntry> = serde_json::from_slice(&body_bytes).map_err(|e| {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum DirectListResponse {
+            Wrapped { v: u32, entries: Vec<FedListEntry> },
+            Bare(Vec<FedListEntry>),
+        }
+        let parsed: DirectListResponse = serde_json::from_slice(&body_bytes).map_err(|e| {
             AppError::ServiceUnavailable(format!("unreadable list from peer '{peer_name}': {e}"))
         })?;
-        Ok((FedListAnswer::Ok { entries }, user))
+        let (v, entries) = match parsed {
+            DirectListResponse::Wrapped { v, entries } => (Some(v), entries),
+            DirectListResponse::Bare(entries) => (None, entries),
+        };
+        Ok((FedListAnswer::Ok { v, entries }, user))
     } else if status == StatusCode::FORBIDDEN {
         let detail = serde_json::from_slice::<WireErrorResponse>(&body_bytes)
             .map(|e| e.detail)
@@ -7043,22 +7085,26 @@ async fn list_direct_peer_mode(
 /// A dial-out client answers a `list` query from `peer_key`'s mailbox, applying its own
 /// entry for that node (A-1, AM-1): `denied` unless it allows `list`.
 pub async fn answer_list_query(fed_state: &FedState, peer_key: &str, query: &str, v2: bool) {
-    answer_list_query_mode(fed_state, peer_key, query, v2, false).await
+    answer_list_query_mode(fed_state, peer_key, query, if v2 { 2 } else { 1 }, false).await
 }
 
 pub(crate) async fn answer_list_query_mode(
     fed_state: &FedState,
     peer_key: &str,
     query: &str,
-    v2: bool,
+    v: u32,
     read_only: bool,
 ) {
     let Some(peer) = fed_state.current_peers().get(peer_key).cloned() else {
         return;
     };
+    let include_tags = !read_only && v >= 3;
     let answer = if peer.allow.iter().any(|op| op == "list") {
-        match listing_for_peer(fed_state, &peer, v2, read_only).await {
-            Ok(entries) => FedListAnswer::Ok { entries },
+        match listing_for_peer(fed_state, &peer, v >= 2, include_tags, read_only).await {
+            Ok(entries) => FedListAnswer::Ok {
+                v: include_tags.then_some(3),
+                entries,
+            },
             Err(e) => {
                 tracing::warn!("list for '{peer_key}' failed: {e}");
                 return;
@@ -8754,7 +8800,7 @@ pub(crate) fn spawn_control_answer(fs: &Arc<FedState>, peer: &str, item: FedInbo
             read_only,
         } => {
             tokio::spawn(async move {
-                answer_list_query_mode(&fs, &peer, &query, v.unwrap_or(1) >= 2, read_only).await;
+                answer_list_query_mode(&fs, &peer, &query, v.unwrap_or(1), read_only).await;
             });
         }
         FedInboxItem::Observe { .. } | FedInboxItem::Message(_) => {}
@@ -8911,7 +8957,7 @@ mod locator_readonly_tests {
             db.execute("INSERT INTO codex_roots(root_id,codex_home,owner_pid,owner_starttime,generation,label,cwd,registered_at,active) VALUES ('cwd-holder','/fixture',0,'unknown',1,'cwd-source','/PRIVATE_CWD',1,0)",[]).unwrap();
             let now = crate::storage::now_epoch_secs();
             db.execute(
-                "INSERT INTO plugin_sessions VALUES ('active-plugin','conn','hermes','plugin',?1,1)",
+                "INSERT INTO plugin_sessions VALUES ('active-plugin','conn','hermes','plugin',?1,1,'')",
                 [now],
             )
             .unwrap();
@@ -8938,7 +8984,7 @@ mod locator_readonly_tests {
             .unwrap();
         }
         let before = fs.db.lock().unwrap().total_changes();
-        let entries = listing_for_peer(&fs, &PeerConfig::default(), true, true)
+        let entries = listing_for_peer(&fs, &PeerConfig::default(), true, false, true)
             .await
             .unwrap();
         assert!(
@@ -8977,7 +9023,7 @@ mod locator_readonly_tests {
             "/fed/v2/sessions?v=2&read_only=true",
             "direct locator lost read-only flag"
         );
-        assert_eq!(list_request_uri(false), "/fed/v2/sessions?v=2");
+        assert_eq!(list_request_uri(false), "/fed/v2/sessions?v=3");
         let queries = ListQueries::default();
         let (id, _rx) = queries.ask("peer", true);
         let (query, read_only) = queries.next_for("peer").unwrap();
@@ -9031,6 +9077,7 @@ mod locator_readonly_tests {
             &query_id,
             &expected_peer,
             FedListAnswer::Ok {
+                v: None,
                 entries: vec![FedListEntry {
                     id: "remote-session".into(),
                     kind: "instance".into(),
@@ -9041,6 +9088,7 @@ mod locator_readonly_tests {
                     registered_at: Some(1),
                     last_seen: None,
                     context: None,
+                    tags: Vec::new(),
                 }]
             },
             "person".into()

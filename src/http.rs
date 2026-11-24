@@ -886,6 +886,7 @@ async fn list_recipients_handler(
         status: request.status,
         within: request.within,
         host: request.host,
+        tag: None,
         limit: if request.read_only {
             None
         } else {

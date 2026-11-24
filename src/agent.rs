@@ -1314,6 +1314,7 @@ pub async fn handle_agent_frame(
                         within,
                         limit,
                         host: None,
+                        tag: None,
                     };
                     surface::list(state, &query).await.map(|r| {
                         let mut value = serde_json::to_value(r).expect("list serializes");
@@ -1653,6 +1654,7 @@ pub async fn handle_agent_frame(
             revoked,
             ..
         } => apply_codex_revoke(state, &session_id, revoked),
+        AgentFrame::Tag { .. } => Err(AppError::BadRequest("tag not implemented yet".to_string())),
     }
 }
 

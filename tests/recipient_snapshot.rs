@@ -140,7 +140,7 @@ impl Fixture {
             .unwrap();
         }
         db.execute("INSERT INTO codex_roots (root_id,codex_home,owner_pid,owner_starttime,generation,label,registered_at,active) VALUES ('codex-record','/nonexistent',4294967295,'gone',1,'recorded-codex',1,1)",[]).unwrap();
-        db.execute("INSERT INTO plugin_sessions VALUES ('plugin-record','conn','hermes','plugin-label',?1,4294967295)",[now]).unwrap();
+        db.execute("INSERT INTO plugin_sessions VALUES ('plugin-record','conn','hermes','plugin-label',?1,4294967295,'')",[now]).unwrap();
         self.state.agy_store.write().unwrap().insert(
             "agy-record".into(),
             xmsg::agy::AgySessionInfo::new("agy-record".into(), u32::MAX, "gone".into(), None),
