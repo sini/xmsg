@@ -468,6 +468,13 @@ pub(crate) fn has_current_grant(
         let (holder, delegated_generation, team, profile) = row.map_err(storage)?;
         if holder == principal
             && delegated_generation == sql_u64(generation)?
+            && configuration.grants.iter().any(|g| {
+                g.principal == holder
+                    && g.verb == crate::protocol::Verb::Dispatch
+                    && g.target.matches(&Target::Team {
+                        team_id: team.clone(),
+                    })
+            })
             && configuration.defaults.iter().any(|d| {
                 d.team_id == team && d.profile_id == profile && d.lifecycle_verbs.contains(&verb)
             })

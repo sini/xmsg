@@ -1776,3 +1776,89 @@ fn delegated_grant_refuses_a_new_current_generation_without_redelegation() {
         matches!(reply.receipt.authorization, Authorization::Denied {code} if code=="grant_denied")
     );
 }
+
+#[test]
+fn removing_dispatch_grant_revokes_only_derived_lifecycle_authority() {
+    let f = delegated_fixture(vec![Verb::Send]);
+    f.service
+        .lifecycle(
+            peer(),
+            ControlRequest::dispatch("dispatch".into(), "brief".into()),
+            100,
+        )
+        .unwrap();
+    let mut replacement: OwnerConfig = serde_json::from_str(
+        &f.service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row("SELECT body FROM configuration", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    replacement.revision = 2;
+    replacement.grants.clear();
+    replacement.grants.push(grant(Verb::Status, "session-1", 1));
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            AdminCommand::ReplacePolicy {
+                request_id: "revoke-dispatch".into(),
+                expected_revision: 1,
+                configuration: replacement,
+            },
+            101,
+        )
+        .unwrap();
+    let reply = f
+        .service
+        .lifecycle(
+            peer(),
+            delegated_send("send-after-dispatch-revoked", 1),
+            102,
+        )
+        .unwrap();
+    let rows: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        rows, 1,
+        "revoked dispatch holder retained derived lifecycle authority"
+    );
+    assert!(
+        matches!(reply.receipt.authorization,Authorization::Denied {code} if code=="grant_denied")
+    );
+    let status = f
+        .service
+        .lifecycle(
+            peer(),
+            ControlRequest {
+                version: crate::protocol::CONTROL_VERSION,
+                request_id: "explicit-status".into(),
+                target: Some(Target::Execution {
+                    session_id: "session-1".into(),
+                    generation: 1,
+                }),
+                action: Action::Status(crate::protocol::ReadArgs {
+                    max_events: 1,
+                    max_text_bytes: 1024,
+                }),
+                deadline: Some(200),
+            },
+            103,
+        )
+        .unwrap();
+    assert!(
+        matches!(status.receipt.authorization, Authorization::Allowed { .. }),
+        "explicit owner session grant was removed with delegation"
+    );
+}
