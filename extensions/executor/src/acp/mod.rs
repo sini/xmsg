@@ -34,6 +34,8 @@ pub enum Error {
     Turn,
     #[error("native human mode has not been selected and observed")]
     Mode,
+    #[error("the selected native model has not been applied and observed")]
+    Model,
     #[error("native capability is unsupported or unadvertised")]
     Unsupported,
     #[error("native response does not match an outstanding request")]
@@ -122,6 +124,10 @@ pub enum Command {
         native_session_id: String,
         mode_id: String,
     },
+    SetModel {
+        native_session_id: String,
+        model_id: String,
+    },
     Prompt {
         native_session_id: String,
         turn_id: String,
@@ -194,6 +200,10 @@ pub enum Event {
         native_session_id: String,
         mode_id: String,
     },
+    ModelObserved {
+        native_session_id: String,
+        model_id: String,
+    },
     PromptFinished {
         turn_id: String,
         stop_reason: String,
@@ -215,6 +225,10 @@ pub enum Event {
         options: Vec<PermissionOption>,
         raw: Value,
         human_mandatory_provenance: HumanMandatoryProvenance,
+    },
+    PermissionAutoCancelled {
+        request_id: RequestId,
+        response: crate::framing::Frame,
     },
     ToolUpdate {
         native_session_id: String,
