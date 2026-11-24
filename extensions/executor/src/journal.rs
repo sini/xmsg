@@ -16,6 +16,7 @@ type PendingRecord = (String, i64, String, String, String, i64, String, bool);
 
 pub(crate) struct Journal {
     pub(crate) db: Connection,
+    pub(crate) runtime_policy: Option<std::sync::Arc<crate::runtime_policy::RuntimePolicy>>,
 }
 fn sql_u64(value: u64) -> Result<i64, ErrorCode> {
     i64::try_from(value).map_err(|_| ErrorCode::InvalidConfiguration)
@@ -62,7 +63,10 @@ impl Journal {
         )
         .map_err(storage)?;
         crate::execution::initialize(&db)?;
-        Ok(Self { db })
+        Ok(Self {
+            db,
+            runtime_policy: None,
+        })
     }
     pub(crate) fn admit(
         &mut self,
@@ -95,6 +99,7 @@ impl Journal {
         request: &ControlRequest,
         clock: &dyn Fn() -> Result<i64, ErrorCode>,
     ) -> Result<ControlReply, ErrorCode> {
+        let runtime_policy = self.runtime_policy.clone();
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -112,7 +117,35 @@ impl Journal {
             return Ok(reply);
         }
         let configuration = config(&tx)?;
-        let outcome = admit_new(&tx, &configuration, principal, request, now);
+        let outcome = admit_new(
+            &tx,
+            &configuration,
+            principal,
+            request,
+            now,
+            runtime_policy.is_some(),
+        )
+        .and_then(|(target, resolved)| {
+            if let Some(policy) = &runtime_policy {
+                if !matches!(
+                    request.action,
+                    Action::Status(_) | Action::Result(_) | Action::Stop(_)
+                ) {
+                    let selected = if matches!(request.action, Action::Dispatch(_)) {
+                        serde_json::from_str(&resolved).map_err(storage)?
+                    } else {
+                        resolved_for_target(&tx, &target)?
+                    };
+                    policy.require(
+                        &selected,
+                        configuration.revision,
+                        now,
+                        runtime_disabled(&tx)?,
+                    )?;
+                }
+            }
+            Ok((target, resolved))
+        });
         let (target, resolved, denial) = match outcome {
             Ok((target, resolved)) => (Some(target), resolved, None),
             Err(code) => (request.target.clone(), String::new(), Some(code)),
@@ -424,6 +457,21 @@ pub(crate) fn runtime_disabled(db: &Connection) -> Result<bool, ErrorCode> {
     .map_err(storage)
 }
 
+pub(crate) fn resolved_for_target(
+    db: &Connection,
+    target: &Target,
+) -> Result<crate::capability::ResolvedDispatch, ErrorCode> {
+    let session = match target {
+        Target::Session { session_id }
+        | Target::Execution { session_id, .. }
+        | Target::Turn { session_id, .. } => session_id,
+        _ => return Err(ErrorCode::UnknownTarget),
+    };
+    let raw: String = db.query_row("SELECT resolved FROM admissions WHERE session_id=?1 AND verb='\"dispatch\"' ORDER BY id DESC LIMIT 1", [session], |r| r.get(0))
+        .optional().map_err(storage)?.ok_or(ErrorCode::UnknownTarget)?;
+    serde_json::from_str(&raw).map_err(storage)
+}
+
 pub(crate) fn has_current_grant(
     tx: &Transaction<'_>,
     configuration: &OwnerConfig,
@@ -568,12 +616,13 @@ pub(crate) fn profile<'a>(
     }
     Ok(p)
 }
-fn admit_new(
+pub(crate) fn admit_new(
     tx: &Transaction<'_>,
     config: &OwnerConfig,
     principal: &str,
     request: &ControlRequest,
     now: i64,
+    runtime_capabilities: bool,
 ) -> Result<(Target, String), ErrorCode> {
     if request.deadline.is_some_and(|d| d <= now) {
         return Err(ErrorCode::DeadlineExpired);
@@ -630,8 +679,9 @@ fn admit_new(
         {
             return Err(ErrorCode::InvalidConfiguration);
         }
-        if !args.requested.required_capabilities.is_empty()
-            || !d.resolved.required_capabilities.is_empty()
+        if !runtime_capabilities
+            && (!args.requested.required_capabilities.is_empty()
+                || !d.resolved.required_capabilities.is_empty())
         {
             return Err(ErrorCode::NotSupported);
         }
@@ -644,6 +694,11 @@ fn admit_new(
             return Err(ErrorCode::ResourceLimit);
         }
         let mut resolved = d.resolved.clone();
+        for capability in &args.requested.required_capabilities {
+            if !resolved.required_capabilities.contains(capability) {
+                resolved.required_capabilities.push(capability.clone());
+            }
+        }
         if let Some(budget) = &args.requested.budget {
             resolved.budget = budget.clone();
         }
