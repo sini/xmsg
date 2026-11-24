@@ -8,6 +8,7 @@ pub(crate) struct AdapterQualification {
     pub(crate) key: QualificationKey,
     pub(crate) adapter_sha256: String,
     pub(crate) native_sha256: String,
+    pub(crate) executor_sha256: String,
     pub(crate) capabilities: Vec<Capability>,
     pub(crate) host: String,
     pub(crate) uid: u32,
@@ -27,6 +28,7 @@ pub(crate) struct EffectFacts<'a> {
     pub(crate) key: &'a QualificationKey,
     pub(crate) adapter_sha256: &'a str,
     pub(crate) native_sha256: &'a str,
+    pub(crate) executor_sha256: &'a str,
     pub(crate) required_capabilities: &'a [Capability],
     pub(crate) host: &'a str,
     pub(crate) uid: u32,
@@ -59,6 +61,7 @@ impl Eligibility {
                 && r.key == *facts.key
                 && r.adapter_sha256 == facts.adapter_sha256
                 && r.native_sha256 == facts.native_sha256
+                && r.executor_sha256 == facts.executor_sha256
                 && facts
                     .required_capabilities
                     .iter()
@@ -111,6 +114,7 @@ mod tests {
             key: key.clone(),
             adapter_sha256: "adapter".into(),
             native_sha256: "native".into(),
+            executor_sha256: "executor".into(),
             capabilities: vec![],
             host: "fixture-host".into(),
             uid: 123,
@@ -125,6 +129,7 @@ mod tests {
             key: &key,
             adapter_sha256: "adapter",
             native_sha256: "native",
+            executor_sha256: "executor",
             required_capabilities: &[],
             host: "fixture-host",
             uid: 123,
@@ -157,6 +162,9 @@ mod tests {
         facts.native_sha256 = "changed-native";
         assert!(eligibility.require(&facts).is_err());
         facts.native_sha256 = "native";
+        facts.executor_sha256 = "other-executor";
+        assert!(eligibility.require(&facts).is_err());
+        facts.executor_sha256 = "executor";
         facts.operating_system = "other-os";
         assert!(eligibility.require(&facts).is_err());
         facts.operating_system = "fixture-os";

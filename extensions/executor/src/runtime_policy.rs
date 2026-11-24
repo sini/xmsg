@@ -2,20 +2,51 @@ use crate::{
     capability::ResolvedDispatch,
     control::ErrorCode,
     eligibility::{EffectFacts, Eligibility},
-    runtime_config::RuntimeConfig,
+    runtime_config::{ExecutableArtifact, RuntimeConfig},
 };
+use std::sync::Arc;
+
+struct ProgramArtifacts {
+    pin_id: String,
+    adapter: Option<ExecutableArtifact>,
+    native: Option<ExecutableArtifact>,
+}
+fn observe_programs(configuration: &RuntimeConfig) -> Vec<ProgramArtifacts> {
+    configuration
+        .programs
+        .iter()
+        .map(|p| ProgramArtifacts {
+            pin_id: p.pin_id.clone(),
+            adapter: p.adapter.observe_verified().ok(),
+            native: p.native.observe_verified().ok(),
+        })
+        .collect()
+}
 
 pub(crate) struct RuntimePolicy {
     pub(crate) configuration: RuntimeConfig,
     eligibility: Eligibility,
+    executor: Arc<ExecutableArtifact>,
+    programs: Vec<ProgramArtifacts>,
 }
 
 impl RuntimePolicy {
     pub(crate) fn reviewed(configuration: RuntimeConfig) -> Result<Self, ErrorCode> {
         configuration.validate()?;
+        let eligibility = Eligibility::reviewed();
+        let executor = Arc::new(ExecutableArtifact::observe(
+            &std::env::current_exe().map_err(|_| ErrorCode::Storage)?,
+        )?);
+        let programs = if eligibility.is_empty() {
+            vec![]
+        } else {
+            observe_programs(&configuration)
+        };
         Ok(Self {
             configuration,
-            eligibility: Eligibility::reviewed(),
+            eligibility,
+            executor,
+            programs,
         })
     }
 
@@ -48,14 +79,32 @@ impl RuntimePolicy {
         {
             return Err(ErrorCode::InvalidConfiguration);
         }
-        program.adapter.verify()?;
-        program.native.verify()?;
+        self.executor.unchanged()?;
+        let observed = self
+            .programs
+            .iter()
+            .find(|p| p.pin_id == program.pin_id)
+            .ok_or(ErrorCode::InvalidConfiguration)?;
+        let adapter = observed
+            .adapter
+            .as_ref()
+            .ok_or(ErrorCode::InvalidConfiguration)?;
+        let native = observed
+            .native
+            .as_ref()
+            .ok_or(ErrorCode::InvalidConfiguration)?;
+        adapter.unchanged()?;
+        native.unchanged()?;
+        if adapter.sha256 != program.adapter.sha256 || native.sha256 != program.native.sha256 {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
         let (host, kernel) = runtime_envelope()?;
         let now = clock()?;
         self.eligibility.require(&EffectFacts {
             key: &resolved.qualification,
             adapter_sha256: &program.adapter.sha256,
             native_sha256: &program.native.sha256,
+            executor_sha256: &self.executor.sha256,
             required_capabilities: &resolved.required_capabilities,
             host: &host,
             uid: xmsg::client::current_uid(),
@@ -72,10 +121,14 @@ impl RuntimePolicy {
     pub(crate) fn fixture(
         configuration: RuntimeConfig,
         records: Vec<crate::eligibility::AdapterQualification>,
+        executor: Arc<ExecutableArtifact>,
     ) -> Self {
+        let programs = observe_programs(&configuration);
         Self {
             configuration,
             eligibility: Eligibility::fixture(records),
+            executor,
+            programs,
         }
     }
 }
