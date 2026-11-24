@@ -63,6 +63,7 @@ impl Journal {
         )
         .map_err(storage)?;
         crate::execution::initialize(&db)?;
+        crate::lifecycle::initialize(&db)?;
         Ok(Self {
             db,
             runtime_policy: None,
@@ -136,12 +137,16 @@ impl Journal {
                     } else {
                         resolved_for_target(&tx, &target)?
                     };
-                    policy.require(
+                    policy.require_at(
                         &selected,
                         configuration.revision,
-                        now,
+                        clock,
                         runtime_disabled(&tx)?,
                     )?;
+                    let at = clock()?;
+                    if request.deadline.is_some_and(|deadline| deadline <= at) {
+                        return Err(ErrorCode::DeadlineExpired);
+                    }
                 }
             }
             Ok((target, resolved))

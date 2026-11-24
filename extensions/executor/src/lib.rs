@@ -5,6 +5,8 @@ pub mod capability;
 #[allow(dead_code)]
 mod eligibility;
 pub mod framing;
+#[allow(dead_code)]
+mod lifecycle;
 pub mod protocol;
 pub mod runtime_config;
 #[allow(dead_code)]
