@@ -26,6 +26,8 @@ test("WR-2 static banned-sink check on web/mc-roster/src", () => {
     /\beval\s*\(/,
     /\bnew\s+Function\b/,
     /javascript:/i,
+    /\bsetAttribute\s*\(\s*["'](?:href|src)["']\s*,\s*(?=\S)(?!["'])/,
+    /\.(?:href|src)\s*=\s*(?=\S)(?!["'])/,
   ];
   for (const f of fs.readdirSync(srcDir)) {
     if (!f.endsWith(".ts")) continue;
@@ -81,7 +83,7 @@ test("WR-3 WS-valid S->C vectors decode and apply cleanly", () => {
 });
 
 test("WR-3 WS-invalid S->C vectors and synthetic cells throw DecodeError (-> 4400)", () => {
-  for (const name of ["V-I13", "V-I14", "V-I24", "V-C2", "V-C4", "V-C5", "V-C6", "V-C7", "V-C8", "V-C9"]) {
+  for (const name of ["V-I13", "V-I14", "V-I24", "V-C2", "V-C4", "V-C5", "V-C6", "V-C7", "V-C8", "V-C9", "V-C10", "V-C11"]) {
     assert.throws(() => decodeServerMessage(loadVec(name)), DecodeError, `${name} must be refused`);
   }
 
@@ -222,4 +224,83 @@ test("WR-3 WS-invalid S->C vectors and synthetic cells throw DecodeError (-> 440
       ),
     DecodeError,
   );
+});
+
+test("WR-4b / WR-5a / WR-5d projection invariants (removed_retained, retired sub, 4403 cursor clear)", () => {
+  const store = new RosterStore();
+  store.wsOpen = true;
+  store.allocSub("fleet");
+  store.applyMessage(
+    decodeServerMessage(
+      JSON.stringify({
+        v: 1,
+        type: "snapshot",
+        sub: "fleet",
+        part: 0,
+        final: true,
+        stream_epoch: "ep1",
+        cursor: "c_fleet_1",
+        server_at: 1000,
+        truncated: false,
+        nodes: [
+          {
+            node: "old-node",
+            status: "removed_retained",
+            delivery: "live",
+            history_hidden: false,
+            endpoints: [],
+            endpoints_truncated: false,
+            exchanges: [],
+            source_gaps: [],
+          },
+        ],
+      }),
+    ),
+    512,
+    1000,
+  );
+  // m10: fleet of only removed_retained nodes reads Unknown
+  assert.equal(store.connectionBadge(1000), "Unknown");
+
+  // m11: late snapshot for a retired n<k> detail sub is ignored
+  const n1 = store.allocSub("node", "old-node");
+  store.retireSub(n1.sub);
+  const applied = store.applyMessage(
+    decodeServerMessage(
+      JSON.stringify({
+        v: 1,
+        type: "snapshot",
+        sub: n1.sub,
+        part: 0,
+        final: true,
+        stream_epoch: "ep_n1",
+        cursor: "c_n1",
+        server_at: 1050,
+        truncated: false,
+        nodes: [
+          {
+            node: "old-node",
+            status: "healthy",
+            delivery: "live",
+            history_hidden: false,
+            endpoints: [],
+            endpoints_truncated: false,
+            exchanges: [],
+            source_gaps: [],
+          },
+        ],
+      }),
+    ),
+    512,
+    1050,
+  );
+  assert.equal(applied, false, "late snapshot for retired detail sub must be ignored");
+  assert.equal(store.nodes.get("old-node")?.status, "removed_retained");
+
+  // m15: 4403 reauth clears cursors so resume does not carry the old cursor
+  store.clearAllForReauth();
+  const fleetSub = store.subs.get("fleet");
+  assert.equal(fleetSub?.cursor, undefined);
+  assert.equal(fleetSub?.streamEpoch, undefined);
+  assert.equal(fleetSub?.synced, false);
 });

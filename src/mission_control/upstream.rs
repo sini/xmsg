@@ -230,6 +230,19 @@ impl ReadHub {
     }
 
     #[cfg(test)]
+    pub(super) fn seed_nodes_for_test(&self, nodes: Vec<Node>) {
+        let mut state = self.state.lock().unwrap();
+        let now = Instant::now();
+        for view in nodes {
+            state
+                .hub
+                .apply(view, Vec::new(), Vec::new(), 1000, now)
+                .unwrap();
+        }
+        self.changed.send_replace(state.hub.watermark());
+    }
+
+    #[cfg(test)]
     pub(crate) fn witness_activity_for_test(
         &self,
         node: &str,

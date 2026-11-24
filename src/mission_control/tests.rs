@@ -905,3 +905,148 @@ async fn callback_bridge_and_root_fetch_metadata_shells() {
     assert!(cleared.contains("Max-Age=0"));
     assert_eq!(issuer.authority.list().unwrap().iter().filter(|r| r.revoked).count(), 1);
 }
+
+#[tokio::test]
+async fn populated_ssr_escaping_assets_and_fetch_metadata_edges() {
+    use crate::observe_export::{EndpointDescriptor, EndpointKind, Harness, RegistrationState};
+    let oidc = Fixture::new_at(now_epoch_secs()).await;
+    let directory = tempfile::tempdir().unwrap();
+    let issuer = issuer(&oidc, &directory, false).await;
+    issuer.authority.set_node_masked("fixture.node", true).unwrap();
+
+    let hub = upstream::ReadHub::new(&issuer.config().session_limits).unwrap();
+    hub.seed_nodes_for_test(vec![
+        protocol::Node {
+            node: "node-a".to_owned(),
+            status: protocol::Status::Healthy,
+            delivery: protocol::Delivery::Delayed,
+            last_success_at: Some(1000),
+            last_source_at: Some(1000),
+            via_hub: None,
+            history_hidden: false,
+            last_activity_at: None,
+            activity_authority: Some(protocol::ActivityAuthority::Disabled),
+            endpoints: vec![protocol::Endpoint {
+                descriptor: EndpointDescriptor {
+                    id: "bad<id>\"@node-a".to_owned(),
+                    node: "node-a".to_owned(),
+                    kind: EndpointKind::Instance,
+                    harness: Harness::Declared("<img src=x onerror='1'>".to_owned()),
+                    state: RegistrationState::Registered,
+                    source_at: Some(1),
+                    label: Some("<script>alert(\"xss\")</script><a href=\"https://evil\">".to_owned()),
+                    context: None,
+                    activity: None,
+                },
+                activity: None,
+                activity_stale: None,
+            }],
+            endpoints_truncated: false,
+            exchanges: Vec::new(),
+            source_gaps: Vec::new(),
+        },
+        protocol::Node {
+            node: "fixture.node".to_owned(),
+            status: protocol::Status::Healthy,
+            delivery: protocol::Delivery::Delayed,
+            last_success_at: Some(1000),
+            last_source_at: Some(1000),
+            via_hub: None,
+            history_hidden: false,
+            last_activity_at: None,
+            activity_authority: Some(protocol::ActivityAuthority::Disabled),
+            endpoints: vec![protocol::Endpoint {
+                descriptor: EndpointDescriptor {
+                    id: "secret-agent@node-masked".to_owned(),
+                    node: "fixture.node".to_owned(),
+                    kind: EndpointKind::Instance,
+                    harness: Harness::Claude,
+                    state: RegistrationState::Registered,
+                    source_at: Some(1),
+                    label: Some("secret-label".to_owned()),
+                    context: None,
+                    activity: None,
+                },
+                activity: None,
+                activity_stale: None,
+            }],
+            endpoints_truncated: false,
+            exchanges: Vec::new(),
+            source_gaps: Vec::new(),
+        },
+    ]);
+
+    let cb = login(&issuer, &oidc).await;
+    let session_cookie = set_cookie_header(&cb, SESSION_COOKIE);
+    let cookie_val = session_cookie.split(';').next().unwrap();
+
+    // m01: duplicate Sec-Fetch-Site must return the static no-data shell
+    let (dup_status, _, dup_body) = send_to_issuer(
+        &issuer,
+        Some(&hub),
+        Method::GET,
+        "/",
+        vec![
+            ("cookie", cookie_val),
+            ("sec-fetch-site", "same-origin"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+        b"",
+    )
+    .await;
+    assert_eq!(dup_status, StatusCode::OK);
+    assert!(dup_body.contains("Open Mission Control"));
+    assert!(!dup_body.contains("node-a"));
+    assert!(!dup_body.contains(assets::JS_PATH));
+
+    // m02: unknown Sec-Fetch-Site value must return the static no-data shell
+    let (bogus_status, _, bogus_body) = send_to_issuer(
+        &issuer,
+        Some(&hub),
+        Method::GET,
+        "/",
+        vec![("cookie", cookie_val), ("sec-fetch-site", "bogus")],
+        b"",
+    )
+    .await;
+    assert_eq!(bogus_status, StatusCode::OK);
+    assert!(bogus_body.contains("Open Mission Control"));
+    assert!(!bogus_body.contains("node-a"));
+
+    // m03 & m06: populated SSR with same-origin escapes hostile label/id/harness and hides masked endpoints
+    let (ssr_status, _, ssr_body) = send_to_issuer(
+        &issuer,
+        Some(&hub),
+        Method::GET,
+        "/",
+        vec![("cookie", cookie_val), ("sec-fetch-site", "same-origin")],
+        b"",
+    )
+    .await;
+    assert_eq!(ssr_status, StatusCode::OK);
+    assert!(ssr_body.contains("&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;&lt;a href=&quot;https://evil&quot;&gt;"));
+    assert!(ssr_body.contains("bad&lt;id&gt;&quot;@node-a"));
+    assert!(ssr_body.contains("&lt;img src=x onerror=&#39;1&#39;&gt;"));
+    assert!(!ssr_body.contains("<script>alert"));
+    assert!(!ssr_body.contains("<a href=\"https://evil\">"));
+    assert!(!ssr_body.contains("<img src=x"));
+    assert!(ssr_body.contains("History masked by node policy."));
+    assert!(!ssr_body.contains("secret-agent"));
+    assert!(!ssr_body.contains("secret-label"));
+
+    // m05: JS & CSS assets served with canonical MIME + nosniff; unknown asset path 404
+    let (js_status, js_hdrs, js_body) = send_to_issuer(&issuer, Some(&hub), Method::GET, assets::JS_PATH, vec![], b"").await;
+    assert_eq!(js_status, StatusCode::OK);
+    assert_eq!(js_hdrs[header::CONTENT_TYPE], "application/javascript; charset=utf-8");
+    assert_eq!(js_hdrs["x-content-type-options"], "nosniff");
+    assert_eq!(js_body.as_bytes(), assets::JS_BYTES);
+
+    let (css_status, css_hdrs, css_body) = send_to_issuer(&issuer, Some(&hub), Method::GET, assets::CSS_PATH, vec![], b"").await;
+    assert_eq!(css_status, StatusCode::OK);
+    assert_eq!(css_hdrs[header::CONTENT_TYPE], "text/css; charset=utf-8");
+    assert_eq!(css_hdrs["x-content-type-options"], "nosniff");
+    assert_eq!(css_body.as_bytes(), assets::CSS_BYTES);
+
+    let (miss_status, _, _) = send_to_issuer(&issuer, Some(&hub), Method::GET, "/assets/nonexistent.js", vec![], b"").await;
+    assert_eq!(miss_status, StatusCode::NOT_FOUND);
+}

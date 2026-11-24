@@ -19,6 +19,8 @@ const BANNED_SINK_PATTERNS = [
   /\beval\s*\(/,
   /\bnew\s+Function\b/,
   /javascript:/i,
+  /\bsetAttribute\s*\(\s*["'](?:href|src)["']\s*,\s*(?=\S)(?!["'])/,
+  /\.(?:href|src)\s*=\s*(?=\S)(?!["'])/,
 ];
 
 function checkBannedSinks() {

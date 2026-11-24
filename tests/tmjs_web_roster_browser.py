@@ -7,6 +7,7 @@ import hashlib
 import http.server
 import json
 import secrets
+import socket
 import struct
 import threading
 import urllib.parse
@@ -540,14 +541,83 @@ def main():
                         assert "coverage: empty" in (page.locator(".mc-banner").text_content() or "")
                     ctx.close()
 
-                # WR-5(b),(c),(d),(e),(g): fake clock + 4401 + 4403 + 4409 + 302 opaque probe
+                # WR-5(b),(c),(d),(e),(g): fake clock, 1006 resume+stale, 4401, 4403, 4409, and 302/401/403/503 probes
                 state.scenario = "auth_ssr_fixture"
+                state.ws_upgrade_status = 101
+                state.probe_status = 200
+                state.ws_attempts = 0
+                state.client_frames.clear()
                 ctx = browser.new_context()
                 page = ctx.new_page()
                 page.clock.install()
                 page.goto(f"{origin}/", wait_until="domcontentloaded")
                 page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
-                # 4409 -> client incompatible, 0 retries
+                page.wait_for_selector("[data-node='laptop-a']", timeout=5000)
+
+                # WR-5(b): 1006 -> Reconnecting -> lossless cursor resume -> Stale after stale_after_ms (tick does not reset age)
+                state.client_frames.clear()
+                conns_before = len(state.ws_conns)
+                state.ws_conns[-1].shutdown(socket.SHUT_RDWR)
+                state.ws_conns[-1].close()
+                page.wait_for_selector("[data-connection-badge='Reconnecting']", timeout=5000)
+                page.clock.run_for(2500)
+                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                assert len(state.ws_conns) == conns_before + 1
+                fleet_resumes = [f for f in state.client_frames if f.get("type") == "subscribe" and f.get("sub") == "fleet"]
+                assert fleet_resumes and fleet_resumes[-1].get("cursor") == "fleet_c1", f"expected cursor resume, got {fleet_resumes}"
+                # tick must not reset node source age, and 61s silence (> staleAfterMs=60s) -> Stale
+                ws_send_text(state.ws_conns[-1], json.dumps({"v": 1, "type": "tick", "server_at": 1795000030000}))
+                page.clock.run_for(15000)
+                node_hdr = page.locator("[data-node='laptop-a'] .mc-node-header").text_content() or ""
+                assert "source 0s ago" not in node_hdr, f"tick reset source age: {node_hdr}"
+                page.clock.run_for(61000)
+                page.wait_for_selector("[data-connection-badge='Stale']", timeout=5000)
+
+                # Refresh live state before 4401/4403/4409
+                ws_send_text(
+                    state.ws_conns[-1],
+                    json.dumps({"v": 1, "type": "event", "sub": "fleet", "seq": 2, "cursor": "c_live", "at": 1795000062000,
+                                "delta": {"kind": "node_status", "node": "laptop-a", "status": "healthy", "delivery": "delayed", "history_hidden": False}}),
+                )
+                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+
+                # WR-5(c): 4401 -> one immediate re-admit and cursor resume
+                state.client_frames.clear()
+                conns_before = len(state.ws_conns)
+                ws_send_close(state.ws_conns[-1], 4401, "auth expired")
+                page.wait_for_timeout(150)
+                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                assert len(state.ws_conns) == conns_before + 1
+                fleet_4401 = [f for f in state.client_frames if f.get("type") == "subscribe" and f.get("sub") == "fleet"]
+                assert fleet_4401 and fleet_4401[-1].get("cursor") == "c_live", f"4401 must resume cursor, got {fleet_4401}"
+
+                # WR-5(d): 4403 -> state cleared, one re-admit (no cursor), then refused re-admit stops at re-authenticate
+                state.client_frames.clear()
+                conns_before = len(state.ws_conns)
+                ws_send_close(state.ws_conns[-1], 4403, "policy changed")
+                page.wait_for_timeout(150)
+                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                assert len(state.ws_conns) == conns_before + 1
+                fleet_4403 = [f for f in state.client_frames if f.get("type") == "subscribe" and f.get("sub") == "fleet"]
+                assert fleet_4403 and "cursor" not in fleet_4403[-1], f"4403 must clear cursor, got {fleet_4403}"
+
+                # Second 4403 where re-admit upgrade fails -> stops at re-authenticate
+                state.ws_upgrade_status = 403
+                attempts_before = state.ws_attempts
+                ws_send_close(state.ws_conns[-1], 4403, "policy revoked")
+                page.wait_for_selector("a[href='/login']", timeout=5000)
+                page.clock.run_for(5000)
+                assert page.locator("[data-node='laptop-a']").count() == 0
+                assert state.ws_attempts == attempts_before + 1
+                ctx.close()
+                state.ws_upgrade_status = 101
+
+                # WR-5(e): 4409 -> client incompatible, 0 retries
+                ctx = browser.new_context()
+                page = ctx.new_page()
+                page.clock.install()
+                page.goto(f"{origin}/", wait_until="domcontentloaded")
+                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
                 prev_attempts = state.ws_attempts
                 ws_send_close(state.ws_conns[-1], 4409, "version mismatch")
                 page.wait_for_selector(".mc-error", state="attached", timeout=5000)
@@ -556,18 +626,34 @@ def main():
                 assert state.ws_attempts == prev_attempts
                 ctx.close()
 
-                # WR-5(g): 302 opaque redirect probe stops & clears sentinel
-                state.ws_upgrade_status = 302
-                state.probe_status = 302
+                # WR-5(g): 302, 401, 403 probes stop & clear sentinel; 503 probe resumes backoff
+                for probe_code in (302, 401, 403):
+                    state.ws_upgrade_status = probe_code
+                    state.probe_status = probe_code
+                    state.probe_count = 0
+                    state.ws_attempts = 0
+                    ctx = browser.new_context()
+                    page = ctx.new_page()
+                    page.goto(f"{origin}/", wait_until="domcontentloaded")
+                    page.wait_for_selector("a[href='/login']", timeout=5000)
+                    assert state.probe_count == 1, f"probe {probe_code} count={state.probe_count}"
+                    assert state.ws_attempts == 1
+                    assert page.locator("[data-ssr-node='sentinel-node']").count() == 0
+                    ctx.close()
+
+                state.ws_upgrade_status = 503
+                state.probe_status = 503
                 state.probe_count = 0
                 state.ws_attempts = 0
                 ctx = browser.new_context()
                 page = ctx.new_page()
+                page.clock.install()
                 page.goto(f"{origin}/", wait_until="domcontentloaded")
-                page.wait_for_selector("a[href='/login']", timeout=5000)
-                assert state.probe_count == 1
-                assert state.ws_attempts == 1
-                assert page.locator("[data-ssr-node='sentinel-node']").count() == 0
+                page.wait_for_selector("[data-connection-badge='Reconnecting']", timeout=5000)
+                assert state.probe_count >= 1
+                page.clock.run_for(2500)
+                page.wait_for_timeout(200)
+                assert state.ws_attempts >= 2, f"503 probe must resume backoff, attempts={state.ws_attempts}"
                 ctx.close()
                 state.ws_upgrade_status = 101
                 state.probe_status = 200
