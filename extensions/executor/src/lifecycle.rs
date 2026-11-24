@@ -14,6 +14,10 @@ const MAX_QUEUED: i64 = 32;
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) fn fixture_content_gate() -> crate::content_admission::ManagedContentFixture {
+    tests::content_gate_fixture()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

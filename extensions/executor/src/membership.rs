@@ -113,10 +113,81 @@ pub(crate) trait ContentStore {
         binding: &ProxyBinding,
         content: &ContentRecord,
     ) -> Result<CommitOutcome, MembershipError>;
+    fn admit_outgoing(
+        &mut self,
+        _binding: &ProxyBinding,
+        _operation: ContentOperation,
+        _request_key: &str,
+    ) -> Result<(), MembershipError> {
+        Err(MembershipError::ManagedEffectDenied)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContentOperation {
+    List,
+    Send,
+    Reply,
+}
+impl ContentOperation {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Send => "send",
+            Self::Reply => "reply",
+        }
+    }
+}
+
+pub(crate) struct SharedContentStore<S> {
+    inner: std::sync::Arc<std::sync::Mutex<S>>,
+}
+impl<S> Clone for SharedContentStore<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+impl<S> SharedContentStore<S> {
+    pub(crate) fn new(store: S) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(store)),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_with_mut<R>(&self, action: impl FnOnce(&mut S) -> R) -> R {
+        action(&mut self.inner.lock().unwrap())
+    }
+}
+impl<S: ContentStore> ContentStore for SharedContentStore<S> {
+    fn commit(
+        &mut self,
+        binding: &ProxyBinding,
+        content: &ContentRecord,
+    ) -> Result<CommitOutcome, MembershipError> {
+        self.inner
+            .lock()
+            .map_err(|_| MembershipError::Storage)?
+            .commit(binding, content)
+    }
+    fn admit_outgoing(
+        &mut self,
+        binding: &ProxyBinding,
+        operation: ContentOperation,
+        key: &str,
+    ) -> Result<(), MembershipError> {
+        self.inner
+            .lock()
+            .map_err(|_| MembershipError::Storage)?
+            .admit_outgoing(binding, operation, key)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum MembershipError {
+    #[error("managed content effect denied")]
+    ManagedEffectDenied,
     #[error("invalid bus proxy binding")]
     InvalidBinding,
     #[error("invalid bus content")]
