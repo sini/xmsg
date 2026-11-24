@@ -660,6 +660,7 @@ impl OwnedProcessGroup {
         let fixture_entry = false;
         #[cfg(test)]
         if fixture_entry {
+            crate::proof_processes::configure(&mut command);
             command
                 .stderr(Stdio::inherit())
                 .env("XMSG_EXECUTOR_FIXTURE_ROLE", "supervisor")
@@ -689,6 +690,8 @@ impl OwnedProcessGroup {
             });
         }
         let child = xmsg::client::caller_attribution::with_fd_inheritance_gate(|| command.spawn())?;
+        #[cfg(test)]
+        crate::proof_processes::record(&child);
         drop(child_startup);
         let bootstrap = match manifest.backend {
             crate::runtime_process::Backend::Acp { .. } => Some(manifest),

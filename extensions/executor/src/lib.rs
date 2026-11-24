@@ -18,6 +18,8 @@ pub mod launch_environment;
 mod lifecycle;
 mod lifecycle_client;
 pub mod operator;
+#[cfg(test)]
+mod proof_processes;
 pub mod protocol;
 #[allow(dead_code)]
 mod resume;

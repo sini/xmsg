@@ -115,7 +115,8 @@ mod tests {
         assert_eq!(validate_home(&alias, real.path()), Ok(()));
         assert_eq!(
             validate_home(other.path(), real.path()),
-            Err(ErrorCode::InvalidConfiguration)
+            Err(ErrorCode::InvalidConfiguration),
+            "alternate account home was accepted"
         );
     }
     #[test]
@@ -134,7 +135,11 @@ mod tests {
             .get_envs()
             .filter_map(|(k, v)| v.map(|_| k.to_os_string()))
             .collect();
-        assert_eq!(keys, vec![std::ffi::OsString::from("PATH")]);
+        assert_eq!(
+            keys,
+            vec![std::ffi::OsString::from("PATH")],
+            "launch environment retained an unapproved inherited key"
+        );
         assert!(serde_json::from_value::<LaunchEnvironment>(
             serde_json::json!({"environment":{"HOME":"other"}})
         )

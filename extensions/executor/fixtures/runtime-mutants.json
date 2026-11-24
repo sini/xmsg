@@ -137,7 +137,7 @@
     "test": "no_blanket_yes_stale_confirmation_or_persistent_permission",
     "test_module": "human_operator::tests",
     "test_file": "extensions/executor/src/human_operator.rs",
-    "assertion": "assertion failed"
+    "assertion": "typed human confirmation did not name the exact pending request"
   },
   {
     "id": "runtime-human-once-wire-option",
@@ -257,7 +257,7 @@
     "test": "environment_is_fixed_and_has_no_arbitrary_provider_or_model_passthrough",
     "test_module": "launch_environment::tests",
     "test_file": "extensions/executor/src/launch_environment.rs",
-    "assertion": "assertion"
+    "assertion": "launch environment retained an unapproved inherited key"
   },
   {
     "id": "runtime-real-home-canonical",
@@ -267,7 +267,7 @@
     "test": "owned_alternate_home_is_refused_and_canonical_alias_is_allowed",
     "test_module": "launch_environment::tests",
     "test_file": "extensions/executor/src/launch_environment.rs",
-    "assertion": "assertion"
+    "assertion": "alternate account home was accepted"
   },
   {
     "id": "runtime-adapter-revoked",

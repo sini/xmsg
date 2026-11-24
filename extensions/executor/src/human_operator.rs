@@ -321,13 +321,16 @@ mod tests {
             b"confirm ask always\n",
             b"\n",
         ] {
-            assert!(confirm(
-                &pending(),
-                &mut std::io::Cursor::new(line),
-                &mut Vec::new(),
-                &|| Ok(100)
-            )
-            .is_err());
+            assert!(
+                confirm(
+                    &pending(),
+                    &mut std::io::Cursor::new(line),
+                    &mut Vec::new(),
+                    &|| Ok(100)
+                )
+                .is_err(),
+                "typed human confirmation did not name the exact pending request"
+            );
         }
         assert!(matches!(
             confirm(

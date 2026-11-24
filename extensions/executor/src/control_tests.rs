@@ -134,6 +134,12 @@ fn peer() -> PeerWitness {
 }
 
 struct EchoPeer(std::process::Child);
+impl EchoPeer {
+    fn new(child: std::process::Child) -> Self {
+        crate::proof_processes::record(&child);
+        Self(child)
+    }
+}
 impl Drop for EchoPeer {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -416,7 +422,7 @@ fn bridge_live_peer_fixture() {
 #[test]
 fn bridge_wrong_live_peer_has_no_admission_even_with_valid_grant() {
     use std::process::{Command, Stdio};
-    let mut peer = EchoPeer(
+    let mut peer = EchoPeer::new(
         Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",

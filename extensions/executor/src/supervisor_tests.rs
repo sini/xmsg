@@ -186,7 +186,7 @@ fn missing_startup_connection_is_bounded_and_child_is_reaped() {
         .unwrap();
     let pid = child.id() as libc::pid_t;
     {
-        let _child = FixtureDaemon(child);
+        let _child = FixtureDaemon::new(child);
         let failure = accept_fixture(&listener, "forced absent startup").unwrap_err();
         assert_eq!(failure.kind(), std::io::ErrorKind::TimedOut);
         assert!(failure.to_string().contains("forced absent startup"));
@@ -1168,6 +1168,7 @@ fn spawn_broker(f: &Fixture, point: &str, backend: Option<PathBuf>) -> (FixtureD
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
+    crate::proof_processes::configure(&mut command);
     unsafe {
         command.pre_exec(move || {
             let flags = libc::fcntl(fd, libc::F_GETFD);
@@ -1177,7 +1178,7 @@ fn spawn_broker(f: &Fixture, point: &str, backend: Option<PathBuf>) -> (FixtureD
             Ok(())
         });
     }
-    let broker = FixtureDaemon(command.spawn().unwrap());
+    let broker = FixtureDaemon::new(command.spawn().unwrap());
     drop(child);
     (broker, parent)
 }
@@ -1493,6 +1494,7 @@ fn real_sender(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    crate::proof_processes::configure(&mut command);
     unsafe {
         command.pre_exec(move || {
             let f = libc::fcntl(fd, libc::F_GETFD);
@@ -1504,13 +1506,19 @@ fn real_sender(
     }
     // The result follows registration and all sends, rather than one supervisor RPC.
     let expires = std::time::Instant::now() + Duration::from_secs(30);
-    let sender = FixtureDaemon(command.spawn().unwrap());
+    let sender = FixtureDaemon::new(command.spawn().unwrap());
     drop(child);
     drop(data);
     let ids = read_frame_until(&parent, expires).unwrap();
     (sender, parent, ids)
 }
 struct FixtureDaemon(Child);
+impl FixtureDaemon {
+    fn new(child: Child) -> Self {
+        crate::proof_processes::record(&child);
+        Self(child)
+    }
+}
 impl std::ops::Deref for FixtureDaemon {
     type Target = Child;
     fn deref(&self) -> &Child {
@@ -1700,7 +1708,7 @@ async fn real_bus_sender_commits_control_looking_content_without_authority() {
         daemon_uid: xmsg::client::current_uid(),
     };
     let executable = std::env::current_exe().unwrap();
-    let mut daemon = FixtureDaemon(
+    let mut daemon = FixtureDaemon::new(
         Command::new(fixture_daemon_binary())
             .env_clear()
             .env("HOME", f.dir.path())
@@ -1956,6 +1964,7 @@ fn missing_supervisor_stays_unknown_consumes_slot_and_never_kills_diagnostic_pid
         .spawn()
         .unwrap();
     let pid = bystander.id();
+    crate::proof_processes::record(&bystander);
     f.service
         .journal
         .lock()
