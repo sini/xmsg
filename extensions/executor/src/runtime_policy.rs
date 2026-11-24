@@ -26,6 +26,16 @@ impl RuntimePolicy {
         now: i64,
         emergency_disabled: bool,
     ) -> Result<(), ErrorCode> {
+        self.require_at(resolved, revision, &|| Ok(now), emergency_disabled)
+    }
+
+    pub(crate) fn require_at(
+        &self,
+        resolved: &ResolvedDispatch,
+        revision: u64,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+        emergency_disabled: bool,
+    ) -> Result<(), ErrorCode> {
         if emergency_disabled {
             return Err(ErrorCode::ProfileDenied);
         }
@@ -41,6 +51,7 @@ impl RuntimePolicy {
         program.adapter.verify()?;
         program.native.verify()?;
         let (host, kernel) = runtime_envelope()?;
+        let now = clock()?;
         self.eligibility.require(&EffectFacts {
             key: &resolved.qualification,
             adapter_sha256: &program.adapter.sha256,

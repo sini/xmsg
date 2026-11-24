@@ -117,7 +117,13 @@ fn authorize(tx: &Transaction<'_>, record: &DispatchRecord, now: i64) -> Result<
         .ok_or(ErrorCode::ProfileDenied)?;
     let mut permitted = current.resolved.clone();
     permitted.budget = record.resolved.budget.clone();
+    permitted.required_capabilities = record.resolved.required_capabilities.clone();
     if permitted != record.resolved
+        || !current
+            .resolved
+            .required_capabilities
+            .iter()
+            .all(|c| record.resolved.required_capabilities.contains(c))
         || record.resolved.budget.worker_slots > current.resolved.budget.worker_slots
         || record.resolved.budget.reviewer_slots > current.resolved.budget.reviewer_slots
         || record.resolved.budget.max_wall_ms > current.resolved.budget.max_wall_ms
@@ -142,6 +148,16 @@ fn authorize(tx: &Transaction<'_>, record: &DispatchRecord, now: i64) -> Result<
         return Err(ErrorCode::ResourceLimit);
     }
     Ok(cfg.revision)
+}
+
+pub(crate) fn revalidate_dispatch(
+    tx: &Transaction<'_>,
+    admission_id: i64,
+    now: i64,
+) -> Result<ResolvedDispatch, ErrorCode> {
+    let record = dispatch(tx, admission_id)?;
+    authorize(tx, &record, now)?;
+    Ok(record.resolved)
 }
 impl Journal {
     pub(crate) fn dispatch_identity(
