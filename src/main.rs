@@ -64,6 +64,9 @@ enum Commands {
     /// List mesh recipients and node status
     List(operator::ListArgs),
 
+    /// Add or remove a capability tag on the calling session
+    Tag(operator::TagArgs),
+
     /// Find a session without attaching or resuming it
     Locate(operator::LocateArgs),
 
@@ -620,6 +623,7 @@ fn main_from_args(
                 .block_on(xmsg::mission_control_client::run(args))?;
         }
         Commands::List(args) => operator::list(args)?,
+        Commands::Tag(args) => operator::tag(args)?,
         Commands::Locate(args) => operator::locate(args)?,
         Commands::Harness(args) => operator::harness(args)?,
         Commands::Watch(args) => {

@@ -416,6 +416,7 @@ pub async fn handle_pi_connection_peer<
             "ack" => &["action", "messageId"],
             "update_context" => &["action", "sessionId", "context"],
             "clear_context" => &["action", "sessionId"],
+            "tag" => &["action", "sessionId", "add", "remove"],
             _ => &["action"],
         };
         if let Some(field) = cmd
@@ -463,6 +464,82 @@ pub async fn handle_pi_connection_peer<
                 let resp = result
                     .map(|()| serde_json::json!({ "status": "ok" }))
                     .unwrap_or_else(|e| e.frame());
+                writer.write_all(format!("{resp}\n").as_bytes()).await?;
+            }
+            "tag" => {
+                let result = (|| {
+                    let denied =
+                        || AppError::Denied("tag requires the registered Pi connection".into());
+                    if !closing.active
+                        || !peer.is_alive(&proc_root, &starttime)
+                        || cmd
+                            .get("sessionId")
+                            .is_some_and(|id| id.as_str() != Some(&session_id))
+                    {
+                        return Err(denied());
+                    }
+                    let add = match cmd.get("add") {
+                        None | Some(serde_json::Value::Null) => None,
+                        Some(v) => Some(
+                            v.as_str()
+                                .ok_or_else(|| {
+                                    AppError::BadRequest("'add' must be a string".into())
+                                })?
+                                .to_string(),
+                        ),
+                    };
+                    let remove = match cmd.get("remove") {
+                        None | Some(serde_json::Value::Null) => None,
+                        Some(v) => Some(
+                            v.as_str()
+                                .ok_or_else(|| {
+                                    AppError::BadRequest("'remove' must be a string".into())
+                                })?
+                                .to_string(),
+                        ),
+                    };
+                    let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+                    let entries = store
+                        .read()
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
+                    let info = entries
+                        .get(&session_id)
+                        .filter(|info| closing.owns(info))
+                        .ok_or_else(denied)?;
+                    if info.reg.is_empty() {
+                        return Err(denied());
+                    }
+                    let tags = match (add, remove) {
+                        (Some(tag), None) => crate::session_context::add_tag_with_check(
+                            &conn,
+                            &session_id,
+                            "pi",
+                            &info.reg,
+                            &tag,
+                            now_epoch_secs(),
+                            || Ok(true),
+                        )?,
+                        (None, Some(tag)) => crate::session_context::remove_tag_with_check(
+                            &conn,
+                            &session_id,
+                            "pi",
+                            &info.reg,
+                            &tag,
+                            || Ok(true),
+                        )?,
+                        _ => {
+                            return Err(AppError::BadRequest(
+                                "tag requires exactly one of 'add' or 'remove'".into(),
+                            ));
+                        }
+                    };
+                    Ok(serde_json::json!({
+                        "status": "ok",
+                        "address": format!("{session_id}@{node_name}"),
+                        "tags": tags,
+                    }))
+                })();
+                let resp = result.unwrap_or_else(|e| e.frame());
                 writer.write_all(format!("{resp}\n").as_bytes()).await?;
             }
             "poll" => {

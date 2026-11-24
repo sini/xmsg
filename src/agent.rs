@@ -1277,6 +1277,7 @@ pub async fn handle_agent_frame(
             status,
             within,
             limit,
+            tag,
             codex_session,
             codex_thread,
             codex_turn,
@@ -1314,7 +1315,7 @@ pub async fn handle_agent_frame(
                         within,
                         limit,
                         host: None,
-                        tag: None,
+                        tag,
                     };
                     surface::list(state, &query).await.map(|r| {
                         let mut value = serde_json::to_value(r).expect("list serializes");
@@ -1654,7 +1655,26 @@ pub async fn handle_agent_frame(
             revoked,
             ..
         } => apply_codex_revoke(state, &session_id, revoked),
-        AgentFrame::Tag { .. } => Err(AppError::BadRequest("tag not implemented yet".to_string())),
+        AgentFrame::Tag {
+            add,
+            remove,
+            session_id,
+            as_agent,
+            codex_session,
+            codex_thread,
+            codex_turn,
+            ..
+        } => handle_agent_tag(
+            state,
+            caller_trace,
+            add,
+            remove,
+            session_id,
+            as_agent,
+            codex_session.as_deref(),
+            codex_thread.as_deref(),
+            codex_turn.as_deref(),
+        ),
     }
 }
 
@@ -1692,6 +1712,145 @@ fn context_owner(
         return Err(denied());
     }
     Ok(caller)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_agent_tag(
+    state: &AppState,
+    caller_trace: Result<CallerTrace, AppError>,
+    add: Option<String>,
+    remove: Option<String>,
+    session_id: Option<String>,
+    as_agent: Option<String>,
+    codex_session: Option<&str>,
+    codex_thread: Option<&str>,
+    codex_turn: Option<&str>,
+) -> Result<serde_json::Value, AppError> {
+    if session_id.is_some() {
+        return Err(AppError::BadRequest(
+            "'session_id' is not accepted on tag".to_string(),
+        ));
+    }
+    if as_agent.is_some() {
+        return Err(AppError::BadRequest(
+            "'as_agent' is not accepted on tag".to_string(),
+        ));
+    }
+    enum TagOp {
+        Add(String),
+        Remove(String),
+    }
+    let op = match (add, remove) {
+        (Some(tag), None) => {
+            crate::session_context::validate_tag(&tag)?;
+            TagOp::Add(tag)
+        }
+        (None, Some(tag)) => {
+            crate::session_context::validate_tag(&tag)?;
+            TagOp::Remove(tag)
+        }
+        _ => {
+            return Err(AppError::BadRequest(
+                "tag requires exactly one of 'add' or 'remove'".to_string(),
+            ));
+        }
+    };
+    let caller = context_owner(
+        state,
+        caller_trace,
+        None,
+        codex_session,
+        codex_thread,
+        codex_turn,
+    )
+    .map_err(|_| AppError::Denied("tag requires the attested session owner".to_string()))?;
+    if caller.session_id.contains('/') {
+        return Err(AppError::Denied(
+            "tag requires a whole session, not a subagent".to_string(),
+        ));
+    }
+    let db = state
+        .db
+        .lock()
+        .map_err(|e| AppError::Internal(format!("db lock poisoned: {e}")))?;
+    let current_reg = || -> Result<Option<String>, AppError> {
+        match caller.harness.as_str() {
+            "claude" => {
+                let mut stmt = db
+                    .prepare(
+                        "SELECT id, pid, proc_start, suffix, released, created_at FROM instance_claims WHERE released = 0",
+                    )
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                let claims = stmt
+                    .query_map([], |row| {
+                        Ok(crate::claim::InstanceClaim {
+                            id: row.get(0)?,
+                            pid: row.get(1)?,
+                            proc_start: row.get(2)?,
+                            suffix: row.get(3)?,
+                            released: row.get::<_, i64>(4)? != 0,
+                            created_at: row.get(5)?,
+                        })
+                    })
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                for claim in claims {
+                    let claim = claim.map_err(|e| AppError::Internal(e.to_string()))?;
+                    if claim.address() == caller.session_id {
+                        return Ok(Some(claim.reg()));
+                    }
+                }
+                Ok(None)
+            }
+            "codex" => {
+                let gen: Option<i64> = db
+                    .query_row(
+                        "SELECT generation FROM codex_roots WHERE root_id = ?1 AND active = 1 AND revoked = 0",
+                        [&caller.session_id],
+                        |row| row.get(0),
+                    )
+                    .ok();
+                Ok(gen.map(|g| format!("codex:{g}")))
+            }
+            "agy" => {
+                let store = state.agy_store.read().unwrap();
+                Ok(store
+                    .get(&caller.session_id)
+                    .filter(|info| !info.reg.is_empty())
+                    .map(|info| info.reg.clone()))
+            }
+            _ => Ok(None),
+        }
+    };
+    let Some(reg) = current_reg()? else {
+        return Err(AppError::Denied(
+            "tag requires a registered live session".to_string(),
+        ));
+    };
+    let is_current = || Ok(current_reg()?.as_deref() == Some(reg.as_str()));
+    let tags = match op {
+        TagOp::Add(tag) => crate::session_context::add_tag_with_check(
+            &db,
+            &caller.session_id,
+            &caller.harness,
+            &reg,
+            &tag,
+            crate::storage::now_epoch_secs(),
+            is_current,
+        )?,
+        TagOp::Remove(tag) => crate::session_context::remove_tag_with_check(
+            &db,
+            &caller.session_id,
+            &caller.harness,
+            &reg,
+            &tag,
+            is_current,
+        )?,
+    };
+    Ok(serde_json::json!({
+        "status": "ok",
+        "address": format!("{}@{}", caller.session_id, state.node_name),
+        "tags": tags,
+    }))
 }
 
 /// Persist operator `revoke` / `unrevoke` to SQLite first, updating in-memory `CodexStore`

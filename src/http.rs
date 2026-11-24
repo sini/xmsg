@@ -844,6 +844,7 @@ struct RecipientListQuery {
     status: Option<String>,
     within: Option<u64>,
     host: Option<String>,
+    tag: Option<String>,
     limit: Option<usize>,
 }
 
@@ -886,7 +887,7 @@ async fn list_recipients_handler(
         status: request.status,
         within: request.within,
         host: request.host,
-        tag: None,
+        tag: request.tag,
         limit: if request.read_only {
             None
         } else {

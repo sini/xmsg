@@ -101,6 +101,14 @@ enum Frame {
         request_id: String,
         session: String,
     },
+    Tag {
+        request_id: String,
+        session: String,
+        #[serde(default)]
+        add: Option<String>,
+        #[serde(default)]
+        remove: Option<String>,
+    },
     Continues {
         request_id: String,
         from: String,
@@ -133,6 +141,8 @@ enum Frame {
         within: Option<u64>,
         #[serde(default)]
         limit: Option<usize>,
+        #[serde(default)]
+        tag: Option<String>,
     },
     Attach {
         request_id: String,
@@ -790,6 +800,61 @@ where
                 })();
                 let _ = tx.send(answer(res, &request_id));
             }
+            Frame::Tag {
+                request_id,
+                session,
+                add,
+                remove,
+            } => {
+                let res = (|| {
+                    let denied = || {
+                        AppError::Denied(format!(
+                            "session '{session}' is not registered on this connection"
+                        ))
+                    };
+                    let c = db.lock().map_err(db_err)?;
+                    if !peer.is_alive(&state.agy_config.proc_root, &starttime) {
+                        return Err(denied());
+                    }
+                    let s = held(&c, &conn_id, &session)
+                        .map_err(db_err)?
+                        .ok_or_else(denied)?;
+                    let reg = session_reg(&c, &s.session_id)
+                        .map_err(db_err)?
+                        .filter(|r| !r.is_empty())
+                        .ok_or_else(denied)?;
+                    let tags = match (add, remove) {
+                        (Some(tag), None) => crate::session_context::add_tag_with_check(
+                            &c,
+                            &s.session_id,
+                            &s.harness,
+                            &reg,
+                            &tag,
+                            storage::now_epoch_secs(),
+                            || Ok(held(&c, &conn_id, &session).map_err(db_err)?.is_some()),
+                        )?,
+                        (None, Some(tag)) => crate::session_context::remove_tag_with_check(
+                            &c,
+                            &s.session_id,
+                            &s.harness,
+                            &reg,
+                            &tag,
+                            || Ok(held(&c, &conn_id, &session).map_err(db_err)?.is_some()),
+                        )?,
+                        _ => {
+                            return Err(AppError::BadRequest(
+                                "tag requires exactly one of 'add' or 'remove'".into(),
+                            ));
+                        }
+                    };
+                    Ok(json!({
+                        "status": "ok",
+                        "address": format!("{}@{}", s.session_id, state.node_name),
+                        "tags": tags,
+                    }))
+                })();
+                let _ = tx.send(answer(res, &request_id));
+            }
             Frame::Continues {
                 request_id,
                 from,
@@ -872,6 +937,7 @@ where
                 status,
                 within,
                 limit,
+                tag,
             } => {
                 let _ = as_agent;
                 let caller =
@@ -890,7 +956,7 @@ where
                         within,
                         limit,
                         host: None,
-                        tag: None,
+                        tag,
                     };
                     let res = surface::list(&state, &query).await.map(|r| {
                         let mut value = serde_json::to_value(r).expect("list serializes");

@@ -610,8 +610,25 @@ pub fn tool_definitions() -> Vec<Value> {
                     "status": { "type": "string", "enum": ["live", "inactive"], "description": "Whether to list live recipients (default) or inactive (parked and closed) instances" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50, "description": "Maximum recipients across all nodes after filtering; narrow name/node/kind or raise this if truncated" },
                     "within": { "type": "integer", "minimum": 0, "description": "For status='inactive', include entries seen within this many seconds (default 86400 = 24h, capped at reply TTL)" },
+                    "tag": { "type": "string", "description": "Only live whole instances carrying this exact tag" },
                     "as_agent": as_agent_prop
                 },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "tag",
+            "description": "Add or remove a capability tag on your calling session. Provide exactly one of `add` or `remove`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "add": { "type": "string", "description": "Tag name to add to your calling session" },
+                    "remove": { "type": "string", "description": "Tag name to remove from your calling session" }
+                },
+                "oneOf": [
+                    {"required": ["add"], "not": {"required": ["remove"]}},
+                    {"required": ["remove"], "not": {"required": ["add"]}}
+                ],
                 "additionalProperties": false
             }
         }),
@@ -847,7 +864,7 @@ pub fn execute_tool_with_meta(
                 "schema_version": crate::surface::MCP_SCHEMA_VERSION,
                 "limit": limit,
             });
-            for k in ["name", "node", "kind", "status"] {
+            for k in ["name", "node", "kind", "status", "tag"] {
                 if let Some(v) = str_arg(k) {
                     agent_payload[k] = Value::String(v.to_string());
                 }
@@ -893,7 +910,7 @@ pub fn execute_tool_with_meta(
             }
 
             let mut url = reqwest::Url::parse("http://xmsg/v1/recipients").expect("static url");
-            for k in ["name", "node", "kind", "status"] {
+            for k in ["name", "node", "kind", "status", "tag"] {
                 if let Some(v) = str_arg(k) {
                     url.query_pairs_mut().append_pair(k, v);
                 }
@@ -1111,6 +1128,39 @@ pub fn execute_tool_with_meta(
                 payload["as_agent"] = Value::String(as_agent.to_string());
             }
             agent_tool(config, &payload, None, Duration::from_secs(wait + 5))
+        }
+        "tag" => {
+            if args.get("add").is_some_and(|v| !v.is_string())
+                || args.get("remove").is_some_and(|v| !v.is_string())
+            {
+                return tool_err("error: 'add' and 'remove' must be strings".to_string());
+            }
+            let add = str_arg("add");
+            let remove = str_arg("remove");
+            let mut payload = match (add, remove) {
+                (Some(tag), None) => json!({
+                    "action": "tag",
+                    "schema_version": crate::surface::MCP_SCHEMA_VERSION,
+                    "add": tag,
+                }),
+                (None, Some(tag)) => json!({
+                    "action": "tag",
+                    "schema_version": crate::surface::MCP_SCHEMA_VERSION,
+                    "remove": tag,
+                }),
+                _ => {
+                    return tool_err(
+                        "error: 'tag' requires exactly one of 'add' or 'remove'".to_string(),
+                    );
+                }
+            };
+            if codex_meta.present {
+                attach_codex_meta(&mut payload, codex_meta);
+            }
+            match call_agent_sock_within(&config.agent_sock, &payload, Duration::from_secs(10)) {
+                Ok(resp) => tool_ok(serde_json::to_string(&resp).unwrap_or_default()),
+                Err(e) => tool_err(e),
+            }
         }
         _ => tool_err(format!("unknown tool: {name}")),
     }

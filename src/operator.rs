@@ -27,9 +27,32 @@ pub struct ListArgs {
     kind: Option<String>,
     #[arg(long, value_parser = ["live", "inactive"])]
     status: Option<String>,
+    /// Only live whole instances carrying this exact tag
+    #[arg(long)]
+    tag: Option<String>,
     /// Maximum recipients after filtering (newest first)
     #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=500))]
     limit: u16,
+}
+
+#[derive(Args, Debug)]
+pub struct TagArgs {
+    /// Agent socket path (defaults to $XDG_RUNTIME_DIR/xmsg/agent.sock)
+    #[arg(long, env = "XMSG_AGENT_SOCK")]
+    agent_sock: Option<PathBuf>,
+    /// Print the server's JSON response on one line
+    #[arg(long)]
+    json: bool,
+    #[command(subcommand)]
+    action: TagAction,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum TagAction {
+    /// Add a tag to the calling session
+    Add { name: String },
+    /// Remove a tag from the calling session
+    Remove { name: String },
 }
 
 #[derive(Args, Debug)]
@@ -142,6 +165,7 @@ pub fn list(args: ListArgs) -> Result<()> {
         ("node", args.node),
         ("kind", args.kind),
         ("status", args.status),
+        ("tag", args.tag),
     ] {
         if let Some(value) = value {
             url.query_pairs_mut().append_pair(key, &value);
@@ -170,6 +194,12 @@ pub fn list(args: ListArgs) -> Result<()> {
         if let Some(context) = row.get("context") {
             print_context(&serde_json::from_value(context.clone())?);
         }
+        if let Some(tags) = row.get("tags").and_then(Value::as_array) {
+            let names: Vec<&str> = tags.iter().filter_map(Value::as_str).collect();
+            if !names.is_empty() {
+                println!("  tags: {}", names.join(", "));
+            }
+        }
     }
     println!("\nNODE\tSTATUS");
     for row in value["nodes"].as_array().ok_or("missing nodes")? {
@@ -192,6 +222,14 @@ pub fn list(args: ListArgs) -> Result<()> {
                 .len(),
             value["total"]
         );
+    }
+    if let Some(cov) = value.get("coverage").filter(|c| !c.is_null()) {
+        if cov["complete"] == false {
+            println!(
+                "\ncoverage incomplete (unanswered: {:?}, tag_incapable: {:?})",
+                cov["unanswered"], cov["tag_incapable"]
+            );
+        }
     }
     Ok(())
 }
@@ -433,5 +471,41 @@ pub fn harness(args: HarnessArgs) -> Result<()> {
                 Ok(())
             }
         }
+    }
+}
+
+pub fn tag(args: TagArgs) -> Result<()> {
+    let sock = match args.agent_sock {
+        Some(path) => path,
+        None => xmsg::agent::default_agent_sock_path()?,
+    };
+    let frame = match args.action {
+        TagAction::Add { name } => json!({
+            "action": "tag",
+            "schema_version": xmsg::surface::MCP_SCHEMA_VERSION,
+            "add": name,
+        }),
+        TagAction::Remove { name } => json!({
+            "action": "tag",
+            "schema_version": xmsg::surface::MCP_SCHEMA_VERSION,
+            "remove": name,
+        }),
+    };
+    let resp = xmsg::mcp::call_agent_sock(&sock, &frame)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    if args.json {
+        print_json(&resp, true)
+    } else {
+        let addr = resp["address"].as_str().unwrap_or("");
+        let tags: Vec<&str> = resp["tags"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if tags.is_empty() {
+            println!("{addr}: (no tags)");
+        } else {
+            println!("{addr}: {}", tags.join(", "));
+        }
+        Ok(())
     }
 }

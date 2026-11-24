@@ -202,6 +202,11 @@ pub(crate) fn collect(
             "read-only snapshots report registered / last seen, partial; status and within filters require a live listing".into(),
         ));
     }
+    if query.tag.is_some() {
+        return Err(AppError::BadRequest(
+            "read-only snapshots do not carry tags; use a live listing for tag filtering".into(),
+        ));
+    }
     if query
         .kind
         .as_deref()
