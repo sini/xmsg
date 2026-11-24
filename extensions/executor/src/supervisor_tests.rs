@@ -465,6 +465,7 @@ fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
     let workspace = resolved.workspace.clone();
     let root = f.dir.path();
     let mut configuration = RuntimeConfig {
+        bus: None,
         version: 1,
         control: config,
         paths: ServicePaths {
@@ -807,6 +808,11 @@ fn real_acp_fixture(fairness: bool, prelaunch_failure: bool) {
         ]
     );
     assert_eq!(methods[4], "session/prompt");
+    assert_eq!(
+        frames[1]["params"]["mcpServers"],
+        serde_json::json!([]),
+        "absent owner bus configuration created a content service"
+    );
     assert_eq!(frames[4]["params"]["prompt"][0]["text"], "only fake brief");
     prompt.write_all(b"R").unwrap();
     if fairness {

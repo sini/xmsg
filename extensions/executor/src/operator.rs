@@ -17,12 +17,20 @@ enum Invocation {
     Serve(PathBuf),
     Check(PathBuf),
     Runtime { fd: i32, max_wall_ms: u64 },
+    ContentMcp(PathBuf),
     Version,
 }
 fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation, ErrorCode> {
     let args: Vec<OsString> = arguments.into_iter().collect();
     if args.len() == 1 && args[0] == "--version" {
         return Ok(Invocation::Version);
+    }
+    if args.len() == 3 && args[0] == "content-mcp" && args[1] == "--socket" {
+        let socket = PathBuf::from(&args[2]);
+        if !socket.is_absolute() {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        return Ok(Invocation::ContentMcp(socket));
     }
     if args.len() == 3
         && args[1] == "--config"
@@ -68,6 +76,9 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), ErrorCod
             RuntimeConfig::read(&file)?;
             println!("configuration valid; runtime activation unavailable");
             Ok(())
+        }
+        Invocation::ContentMcp(socket) => {
+            crate::content::run_stdio(&socket).map_err(|_| ErrorCode::Storage)
         }
         Invocation::Serve(file) => serve(RuntimeConfig::read(&file)?),
         Invocation::Runtime { fd, max_wall_ms } => {
@@ -259,6 +270,19 @@ mod tests {
     }
     #[test]
     fn entrypoints_refuse_activation_flags_and_unowned_standard_descriptors() {
+        assert_eq!(
+            parse(args(&["content-mcp", "--socket", "/fixture/content"])).unwrap(),
+            Invocation::ContentMcp("/fixture/content".into())
+        );
+        assert!(parse(args(&["content-mcp", "--socket", "relative"])).is_err());
+        assert!(parse(args(&[
+            "content-mcp",
+            "--socket",
+            "/fixture/content",
+            "--as-agent",
+            "other"
+        ]))
+        .is_err());
         assert_eq!(
             parse(args(&["check-config", "--config", "/fixture/config"])).unwrap(),
             Invocation::Check("/fixture/config".into())
