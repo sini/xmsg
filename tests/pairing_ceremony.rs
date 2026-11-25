@@ -1153,6 +1153,14 @@ async fn q2_6_monotonic_120s_deadline_expires_intent() {
         "Q2-6: intent monotonic deadline must be bounded by 120s"
     );
     tokio::time::advance(Duration::from_secs(121)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        intent.completion.lock().unwrap().is_some(),
+        "Q2-6: intent must expire at 120s monotonic without waiting 3600s"
+    );
     let err = rt.service.wait_for_responder(&intent).await.unwrap_err();
     assert_eq!(err.code(), "pairing.expired");
 }
