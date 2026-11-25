@@ -3663,22 +3663,25 @@ async fn fed_send_message_handler(
         crate::pairing::auth::Operation::Send
     };
     let attachment_bytes: u64 = envelope.attachments.iter().map(|a| a.size as u64).sum();
+    if !init_peers.is_manual_peer(&peer.name)
+        && !peer_cfg.principals.is_empty()
+        && !principal_allowed(&envelope.origin, &peer_cfg.principals)
+    {
+        return Err(AppError::OpDenied(
+            "principal not authorized for peer".to_string(),
+        ));
+    }
     let send_res = crate::pairing::auth::Resource {
         target: Some(target_ref_early),
-        principal: envelope.origin.key().or(Some("anon")),
+        principal: if init_peers.is_manual_peer(&peer.name) {
+            envelope.origin.key().or(Some("anon"))
+        } else {
+            peer_cfg.principals.first().map(String::as_str)
+        },
         body_bytes: envelope.body.len() as u64,
         attachment_bytes,
     };
     fed_state.authorize_peer_op(&init_peers, &peer, send_op, &send_res)?;
-
-    if !peer_cfg.principals.is_empty() {
-        let authorized = principal_allowed(&envelope.origin, &peer_cfg.principals);
-        if !authorized {
-            return Err(AppError::OpDenied(
-                "principal not authorized for peer".to_string(),
-            ));
-        }
-    }
 
     check_received_refs(&fed_state, &envelope.id, &envelope.attachments)?;
 

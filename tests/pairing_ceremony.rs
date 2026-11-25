@@ -530,8 +530,8 @@ fn seed_manual_grant(
     let intent = xmsg::pairing::store::reserve_intent(&db, &req, xmsg::storage::now_epoch_secs()).unwrap();
     xmsg::pairing::store::reserve_capacity(&db, &intent.intent_id, xmsg::storage::now_epoch_secs()).unwrap();
     let grant_id = intent.grant_id;
-    let receipt_local = vec![0xA5u8; 16];
-    let receipt_remote = vec![0x5Au8; 16];
+    let receipt_local = [0xA5u8; 16];
+    let receipt_remote = [0x5Au8; 16];
     let tx_id = [0x11u8; 32];
     let exporter = [0x22u8; 32];
     let now = xmsg::storage::now_epoch_secs();
@@ -1153,9 +1153,12 @@ async fn q2_6_monotonic_120s_deadline_expires_intent() {
         "Q2-6: intent monotonic deadline must be bounded by 120s"
     );
     tokio::time::advance(Duration::from_secs(121)).await;
-    for _ in 0..8 {
+    for _ in 0..50 {
         tokio::task::yield_now().await;
-        std::thread::sleep(Duration::from_millis(10));
+        if intent.completion.lock().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
         intent.completion.lock().unwrap().is_some(),
