@@ -91,6 +91,7 @@ jobs:
           {
             echo "extra-substituters = https://cache.numtide.com${ATTIC_PUBLIC_KEY:+ https://attic.json64.dev/ci}"
             echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=${ATTIC_PUBLIC_KEY:+ ${ATTIC_PUBLIC_KEY}}"
+            echo "fallback = true"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
           if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
             sudo systemctl restart nix-daemon
@@ -179,6 +180,7 @@ jobs:
           {
             echo "extra-substituters = https://cache.numtide.com${ATTIC_PUBLIC_KEY:+ https://attic.json64.dev/ci}"
             echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=${ATTIC_PUBLIC_KEY:+ ${ATTIC_PUBLIC_KEY}}"
+            echo "fallback = true"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
           if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
             sudo systemctl restart nix-daemon
@@ -237,6 +239,7 @@ jobs:
           {
             echo "extra-substituters = https://cache.numtide.com${ATTIC_PUBLIC_KEY:+ https://attic.json64.dev/ci}"
             echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=${ATTIC_PUBLIC_KEY:+ ${ATTIC_PUBLIC_KEY}}"
+            echo "fallback = true"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
           if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
             sudo systemctl restart nix-daemon
@@ -296,6 +299,7 @@ jobs:
           {
             echo "extra-substituters = https://cache.numtide.com${ATTIC_PUBLIC_KEY:+ https://attic.json64.dev/ci}"
             echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=${ATTIC_PUBLIC_KEY:+ ${ATTIC_PUBLIC_KEY}}"
+            echo "fallback = true"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
           if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
             sudo systemctl restart nix-daemon
@@ -359,6 +363,7 @@ jobs:
           {
             echo "extra-substituters = https://cache.numtide.com${ATTIC_PUBLIC_KEY:+ https://attic.json64.dev/ci}"
             echo "extra-trusted-public-keys = niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g=${ATTIC_PUBLIC_KEY:+ ${ATTIC_PUBLIC_KEY}}"
+            echo "fallback = true"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
           if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
             sudo systemctl restart nix-daemon

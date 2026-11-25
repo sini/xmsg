@@ -51,6 +51,7 @@ jobs:
           {
             echo "extra-substituters = https://attic.json64.dev/ci"
             echo "extra-trusted-public-keys = ${ATTIC_PUBLIC_KEY}"
+            echo "fallback = true"
           } | sudo tee -a /etc/nix/nix.conf >/dev/null
           if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet nix-daemon 2>/dev/null; then
             sudo systemctl restart nix-daemon
