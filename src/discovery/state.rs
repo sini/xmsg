@@ -44,6 +44,7 @@ pub struct State {
     pub probes: Arc<Semaphore>,
     pub mdns_status: SharedStatus,
     pub mdns_trigger: Arc<AtomicBool>,
+    pub mdns_close_trigger: Arc<AtomicBool>,
     tables: Mutex<Tables>,
 }
 
@@ -55,6 +56,7 @@ impl Default for State {
             probes: Arc::new(Semaphore::new(4)),
             mdns_status: SharedStatus::default(),
             mdns_trigger: Arc::new(AtomicBool::new(false)),
+            mdns_close_trigger: Arc::new(AtomicBool::new(false)),
             tables: Mutex::new(Tables::default()),
         }
     }

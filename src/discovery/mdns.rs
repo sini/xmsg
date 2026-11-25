@@ -293,6 +293,7 @@ pub struct Engine<B> {
     candidates: SharedCandidates,
     changed: Arc<Notify>,
     trigger: Arc<AtomicBool>,
+    close_trigger: Arc<AtomicBool>,
     running: bool,
     browse: bool,
     active_handle: Option<String>,
@@ -361,6 +362,7 @@ impl<B: Backend> Engine<B> {
             candidates,
             changed,
             trigger,
+            close_trigger: Arc::new(AtomicBool::new(false)),
             running: false,
             browse: false,
             active_handle: None,
@@ -593,6 +595,16 @@ impl<B: Backend> Engine<B> {
         }
     }
 
+    /// Closes an active timed announcement window when the last responder pairing intent ends (§5.1).
+    pub fn close_announce_window(&mut self, now: Instant) -> bool {
+        if self.window_until.take().is_none() {
+            return false;
+        }
+        self.stop_announcing(now);
+        self.set_posture(AnnouncePosture::AtRest);
+        true
+    }
+
     /// One reconcile tick: start, stop or toggle from the current config, follow interface
     /// changes, schedule the non-announcing Local Network deny probe, refresh and expire candidates.
     pub fn reconcile(&mut self, inputs: &Inputs, now: Instant) {
@@ -747,6 +759,9 @@ impl<B: Backend> Engine<B> {
         }
         if self.trigger.swap(false, Ordering::SeqCst) {
             let _ = self.activate_announce_window(inputs, now);
+        }
+        if self.close_trigger.swap(false, Ordering::SeqCst) {
+            let _ = self.close_announce_window(now);
         }
         if let Some(until) = self.window_until {
             if now >= until {
@@ -1362,7 +1377,7 @@ pub fn stop(bound: Duration) {
 pub fn spawn(fed: Arc<crate::fed::FedState>, fed_listen: Option<SocketAddr>) {
     STOP.store(false, Ordering::SeqCst);
     STOPPED.store(false, Ordering::SeqCst);
-    let engine = Engine::with_notify(
+    let mut engine = Engine::with_notify(
         MdnsSd::default(),
         Box::new(random_id),
         fed.discovery.mdns_status.clone(),
@@ -1370,6 +1385,7 @@ pub fn spawn(fed: Arc<crate::fed::FedState>, fed_listen: Option<SocketAddr>) {
         fed.discovery.changed.clone(),
         fed.discovery.mdns_trigger.clone(),
     );
+    engine.close_trigger = fed.discovery.mdns_close_trigger.clone();
     let spawned = std::thread::Builder::new()
         .name("xmsg-mdns".into())
         .spawn(move || {

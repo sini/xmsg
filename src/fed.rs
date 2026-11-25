@@ -542,7 +542,7 @@ impl LeafAuthority {
 #[derive(Debug, Clone, Default)]
 pub struct PeersMap {
     pub deny: DenyPolicy,
-    peers_by_name: HashMap<String, PeerConfig>,
+    pub peers_by_name: HashMap<String, PeerConfig>,
     name_by_pin: HashMap<String, String>,
     ca_bundles_by_name: HashMap<String, Vec<rustls::pki_types::TrustAnchor<'static>>>,
     discovery_roots: HashMap<String, Vec<[u8; 32]>>,
@@ -1306,6 +1306,20 @@ impl PeersMap {
                     discovery = crate::discovery::Config::parse(w.discovery)?;
                     member_objects(w.peers)?
                 } else {
+                    for k in map.keys() {
+                        if k == "auto_accept"
+                            || k.starts_with("auto_accept.")
+                            || k == "pairing"
+                            || k.starts_with("pairing.")
+                            || k == "discovery.announce_identity"
+                            || k == "attestation"
+                            || k.starts_with("attestation.")
+                        {
+                            return Err(format!(
+                                "unsupported v1a preference key '{k}' in peers config"
+                            ));
+                        }
+                    }
                     let m: Members = serde_json::from_str(json_str)
                         .map_err(|e| format!("Failed to parse peers JSON: {e}"))?;
                     member_objects(m)?
@@ -7353,9 +7367,102 @@ pub async fn run_fed_listener_with_acceptor(
                 .before_handshake
                 .pause()
                 .await;
+            let start_handshake = match tokio::time::timeout(
+                Duration::from_secs(3),
+                tokio_rustls::LazyConfigAcceptor::new(
+                    rustls::server::Acceptor::default(),
+                    tcp_stream,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    debug!("TLS ClientHello failed from {remote_addr}: {e}");
+                    #[cfg(any(test, feature = "test-hooks"))]
+                    crate::observe_fed::test_hooks::controls(&fed_state)
+                        .tls_handshake_refusals
+                        .record();
+                    return;
+                }
+                Err(_) => {
+                    debug!("TLS handshake timed out from {remote_addr}");
+                    return;
+                }
+            };
+
+            let offers_pairing_alpn = start_handshake
+                .client_hello()
+                .alpn()
+                .is_some_and(|mut alpn| alpn.any(|p| p == crate::pairing::ceremony::PAIRING_ALPN));
+
+            if offers_pairing_alpn {
+                let rt = crate::pairing::service::pairing_runtime(&fed_state);
+                if !rt.service.is_startup_cancel_done() {
+                    rt.service
+                        .budgets
+                        .record_refusal("pairing.startup_cancel_failed");
+                    return;
+                }
+                if !rt.service.has_live_responder_intent() {
+                    rt.service.budgets.record_refusal("pairing.no_intent");
+                    return;
+                }
+                let Some(in_permit) = rt.service.budgets.inbound.try_acquire() else {
+                    rt.service.budgets.record_refusal("pairing.inbound_budget");
+                    return;
+                };
+                let (Some(cert_der), Some(key_der)) =
+                    (fed_state.own_cert_der(), fed_state.own_key_der())
+                else {
+                    return;
+                };
+                let rt_check = rt.clone();
+                let allowed_peer: crate::pairing::ceremony::AllowedPeerCheck =
+                    Arc::new(move |id| rt_check.service.has_live_responder_intent_for(id));
+                let Ok((pairing_cfg, key_alg_flag)) =
+                    crate::pairing::ceremony::build_pairing_server_config(
+                        vec![CertificateDer::from(cert_der)],
+                        key_der,
+                        allowed_peer,
+                        Some(fed_state.current_peers()),
+                    )
+                else {
+                    return;
+                };
+                let tls_stream = match tokio::time::timeout(
+                    crate::pairing::budgets::INBOUND_HANDSHAKE_TIMEOUT,
+                    start_handshake.into_stream(pairing_cfg),
+                )
+                .await
+                {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        if key_alg_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            rt.service.budgets.record_refusal("pairing.key_algorithm");
+                        } else {
+                            rt.service.budgets.record_refusal("pairing.handshake_failed");
+                        }
+                        debug!("Pairing TLS handshake failed from {remote_addr}: {e}");
+                        return;
+                    }
+                    Err(_) => {
+                        rt.service.budgets.record_refusal("pairing.handshake_timeout");
+                        return;
+                    }
+                };
+                drop(unauth_guard);
+                drop(in_permit);
+                rt.service
+                    .handle_inbound_pairing_stream(&fed_state, tls_stream)
+                    .await;
+                return;
+            }
+
+            let fed_server_cfg = current_acceptor.config().clone();
             let tls_stream = match tokio::time::timeout(
                 Duration::from_secs(3),
-                current_acceptor.accept(tcp_stream),
+                start_handshake.into_stream(fed_server_cfg),
             )
             .await
             {
@@ -8190,14 +8297,28 @@ impl CredentialReloader {
     }
 
     pub fn start_watcher(self: Arc<Self>, interval: Duration) -> tokio::task::JoinHandle<()> {
+        if let Some(ref fs) = self.fed_state {
+            crate::pairing::service::attach_reloader(fs, &self);
+        }
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
             interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval_timer.tick().await; // consume first immediate tick
             loop {
                 interval_timer.tick().await;
+                if let Some(ref fs) = self.fed_state {
+                    let rt = crate::pairing::service::pairing_runtime(fs);
+                    if !rt.service.is_startup_cancel_done() {
+                        if let Err(e) = rt.service.attempt_startup_cancel(fs) {
+                            tracing::warn!("pairing startup cancel retry failed: {e}");
+                        }
+                    }
+                }
                 if let Err(e) = self.check_and_reload() {
                     tracing::error!("federation credential reload check failed: {e}");
+                }
+                if let Err(e) = self.publish_store() {
+                    tracing::error!("pairing store reconciliation failed: {e}");
                 }
             }
         })

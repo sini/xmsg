@@ -456,6 +456,20 @@ pub fn trigger_announce(fed: &crate::fed::FedState) -> bool {
     }
 }
 
+/// Closes an active timed LAN announcement window when the last responder intent ends (§5.1).
+pub fn close_announce(fed: &crate::fed::FedState) -> bool {
+    #[cfg(feature = "mdns")]
+    {
+        fed.discovery.mdns_close_trigger.store(true, Ordering::SeqCst);
+        true
+    }
+    #[cfg(not(feature = "mdns"))]
+    {
+        let _ = fed;
+        false
+    }
+}
+
 /// Withdraws the mDNS announcement and stops the source, waiting at most `bound`. Does
 /// nothing when no source was started.
 pub fn stop(bound: std::time::Duration) {

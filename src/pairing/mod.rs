@@ -3,6 +3,7 @@ pub mod budgets;
 pub mod ceremony;
 #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
 pub mod codec;
+pub mod service;
 pub mod store;
 
 #[cfg(test)]

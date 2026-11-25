@@ -868,6 +868,110 @@ pub fn health(fed: Option<&crate::fed::FedState>) -> serde_json::Value {
     }
 }
 
+/// Cancels a single open intent by intent ID or peer ID, releasing any capacity reservation.
+pub fn cancel_intent_by_id(conn: &Connection, intent_id: &[u8; 16]) -> Result<bool, StoreError> {
+    let tx = immediate(conn)?;
+    let n = tx.execute(
+        "UPDATE pairing_intents SET state = 'cancelled' WHERE intent_id = ?1 AND state = 'open'",
+        [&intent_id[..]],
+    )?;
+    tx.commit()?;
+    Ok(n > 0)
+}
+
+/// Cancels all open intents for `peer`, releasing any capacity reservations.
+pub fn cancel_open_intents_for_peer(
+    conn: &Connection,
+    peer: &DeviceId,
+) -> Result<Vec<[u8; 16]>, StoreError> {
+    let tx = immediate(conn)?;
+    let mut stmt = tx.prepare(
+        "SELECT intent_id FROM pairing_intents WHERE peer_id = ?1 AND state = 'open'",
+    )?;
+    let ids: Vec<[u8; 16]> = stmt
+        .query_map([&peer[..]], |r| {
+            let v: Vec<u8> = r.get(0)?;
+            Ok(v.try_into().unwrap_or([0u8; 16]))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    if !ids.is_empty() {
+        tx.execute(
+            "UPDATE pairing_intents SET state = 'cancelled' WHERE peer_id = ?1 AND state = 'open'",
+            [&peer[..]],
+        )?;
+    }
+    tx.commit()?;
+    Ok(ids)
+}
+
+#[derive(Clone, Debug)]
+pub struct StoredGrantSummary {
+    pub grant_id: GrantId,
+    pub peer_id: DeviceId,
+    pub provenance: String,
+    pub profile: Option<String>,
+    pub not_after: Option<i64>,
+    pub exposure: Option<Vec<u8>>,
+    pub has_reverse_receipt: bool,
+    pub active: bool,
+}
+
+pub fn list_grants_summary(conn: &Connection) -> Result<Vec<StoredGrantSummary>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT g.grant_id, g.subject, g.provenance, g.profile, g.not_after, g.exposure,
+                (g.receipt_remote IS NOT NULL), g.active
+         FROM pairing_grants g
+         WHERE NOT EXISTS (SELECT 1 FROM pairing_removed_grants r WHERE r.grant_id = g.grant_id)
+         ORDER BY g.activated_at ASC, g.grant_id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let gid: Vec<u8> = r.get(0)?;
+            let pid: Vec<u8> = r.get(1)?;
+            Ok(StoredGrantSummary {
+                grant_id: gid.try_into().unwrap_or([0u8; 16]),
+                peer_id: pid.try_into().unwrap_or([0u8; 32]),
+                provenance: r.get(2)?,
+                profile: r.get(3)?,
+                not_after: r.get(4)?,
+                exposure: r.get(5)?,
+                has_reverse_receipt: r.get::<_, i64>(6)? != 0,
+                active: r.get::<_, i64>(7)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn list_blocks(conn: &Connection) -> Result<Vec<(DeviceId, i64)>, StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT device_id, blocked_at FROM pairing_device_blocks ORDER BY blocked_at ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let pid: Vec<u8> = r.get(0)?;
+            Ok((pid.try_into().unwrap_or([0u8; 32]), r.get(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn count_slots_used(conn: &Connection) -> Result<i64, StoreError> {
+    slots_used(conn, None)
+}
+
+pub fn count_expired_grants_holding_slots(conn: &Connection, now: i64) -> Result<i64, StoreError> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM pairing_grants g
+         WHERE g.provenance = 'manual_authenticated_oob'
+           AND NOT EXISTS (SELECT 1 FROM pairing_removed_grants r WHERE r.grant_id = g.grant_id)
+           AND g.not_after IS NOT NULL AND g.not_after <= ?1",
+        [now],
+        |r| r.get(0),
+    )?)
+}
+
 #[cfg(test)]
 #[path = "store_tests.rs"]
 mod tests;
