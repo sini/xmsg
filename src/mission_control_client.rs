@@ -210,10 +210,19 @@ enum Connection {
     Stale,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LatchedStop {
+    Incompatible,
+    Reauthenticate,
+    ReconnectMaxAttempts,
+}
+
 struct View {
     open: bool,
+    reconnecting: bool,
     synced: bool,
-    stale: bool,
+    latched_stop: Option<LatchedStop>,
+    first_dial: Option<Instant>,
     last_message: Option<Instant>,
     last_event: Option<Instant>,
     cursor: Option<String>,
@@ -222,6 +231,7 @@ struct View {
     last_seq: Option<u64>,
     next_part: u32,
     tick: Duration,
+    stale_after: Duration,
     server_clock: Option<(Instant, u64)>,
     source_gaps: VecDeque<String>,
 }
@@ -230,8 +240,10 @@ impl Default for View {
     fn default() -> Self {
         Self {
             open: false,
+            reconnecting: false,
             synced: false,
-            stale: false,
+            latched_stop: None,
+            first_dial: None,
             last_message: None,
             last_event: None,
             cursor: None,
@@ -240,6 +252,7 @@ impl Default for View {
             last_seq: None,
             next_part: 0,
             tick: Duration::from_secs(15),
+            stale_after: Duration::from_secs(45),
             server_clock: None,
             source_gaps: VecDeque::new(),
         }
@@ -247,24 +260,40 @@ impl Default for View {
 }
 
 impl View {
+    fn silence(&self, now: Instant) -> Duration {
+        self.last_message
+            .or(self.first_dial)
+            .map_or(Duration::ZERO, |then| now.saturating_duration_since(then))
+    }
+
+    fn clear_for_reauth(&mut self) {
+        self.synced = false;
+        self.parts.clear();
+        self.next_part = 0;
+        self.last_seq = None;
+        self.cursor = None;
+        self.nodes.clear();
+        self.source_gaps.clear();
+    }
+
     fn state(&self, now: Instant) -> Connection {
-        if self.stale
-            || self
-                .last_message
-                .is_some_and(|then| now.duration_since(then) >= Duration::from_secs(45))
-        {
+        match self.latched_stop {
+            Some(LatchedStop::Incompatible) => return Connection::Unknown,
+            Some(LatchedStop::Reauthenticate) => return Connection::Unknown,
+            Some(LatchedStop::ReconnectMaxAttempts) => return Connection::Stale,
+            None => {}
+        }
+        let silence = self.silence(now);
+        if silence >= self.stale_after {
             return Connection::Stale;
         }
-        if !self.open && self.last_message.is_some() {
+        if !self.open && self.reconnecting {
             return Connection::Reconnecting;
         }
-        if !self.synced || !self.open {
+        if !self.open || !self.synced {
             return Connection::Unknown;
         }
-        if self
-            .last_message
-            .is_some_and(|then| now.duration_since(then) > self.tick * 2)
-        {
+        if silence > self.tick * 2 {
             return Connection::Unknown;
         }
         let mut any_eligible = false;
@@ -335,7 +364,6 @@ impl View {
                     self.last_seq = None;
                     self.cursor = cursor;
                     self.synced = true;
-                    self.stale = false;
                 } else {
                     self.next_part = self.next_part.checked_add(1).ok_or(codec::InvalidMessage)?;
                 }
@@ -498,6 +526,9 @@ async fn connect(origin: &Url, handle: &str, view: &mut View) -> Result<End, Err
         http::header::AUTHORIZATION,
         http::HeaderValue::from_str(&format!("Bearer {handle}")).map_err(|_| Error::Config)?,
     );
+    if view.first_dial.is_none() {
+        view.first_dial = Some(Instant::now());
+    }
     let connection = time::timeout(
         Duration::from_secs(5),
         tokio_tungstenite::connect_async(request),
@@ -509,7 +540,7 @@ async fn connect(origin: &Url, handle: &str, view: &mut View) -> Result<End, Err
         _ => return Ok(End::Resume),
     };
     view.open = true;
-    view.last_message = Some(Instant::now());
+    view.reconnecting = false;
     let hello = json!({"v":1,"type":"hello","id":1,"protocol":1,"capabilities":["observe","activity"],"require":["observe"]});
     if socket
         .send(Frame::Text(hello.to_string().into()))
@@ -563,6 +594,10 @@ async fn connect(origin: &Url, handle: &str, view: &mut View) -> Result<End, Err
     }
 }
 
+fn should_reset_backoff(open_elapsed: Duration, synced: bool) -> bool {
+    open_elapsed >= Duration::from_secs(60) && synced
+}
+
 fn jitter(attempt: u8) -> Duration {
     let cap = 1000u64.saturating_mul(1 << attempt.min(5)).min(30_000);
     let mut sample = [0; 8];
@@ -591,36 +626,70 @@ pub async fn run(args: Args) -> Result<(), Error> {
         };
         let result = match outcome {
             Err(Error::Reauthenticate) => {
-                view = View::default();
+                view.open = false;
+                view.reconnecting = false;
+                view.latched_stop = Some(LatchedStop::Reauthenticate);
+                view.clear_for_reauth();
                 view.render(&mut io::stdout().lock())
                     .map_err(|_| Error::Output)?;
                 return Err(Error::Reauthenticate);
+            }
+            Err(Error::Incompatible) => {
+                view.open = false;
+                view.reconnecting = false;
+                view.latched_stop = Some(LatchedStop::Incompatible);
+                view.render(&mut io::stdout().lock())
+                    .map_err(|_| Error::Output)?;
+                return Err(Error::Incompatible);
             }
             other => other?,
         };
         view.open = false;
         view.parts.clear();
         view.next_part = 0;
-        if started.elapsed() >= Duration::from_secs(60) && view.synced {
+        if should_reset_backoff(started.elapsed(), view.synced) {
             attempts = 0;
             immediate = true;
         }
         match result {
-            End::Normal => return Ok(()),
-            End::Incompatible => return Err(Error::Incompatible),
+            End::Normal => {
+                view.reconnecting = false;
+                view.render(&mut io::stdout().lock())
+                    .map_err(|_| Error::Output)?;
+                return Ok(());
+            }
+            End::Incompatible => {
+                view.reconnecting = false;
+                view.latched_stop = Some(LatchedStop::Incompatible);
+                view.render(&mut io::stdout().lock())
+                    .map_err(|_| Error::Output)?;
+                return Err(Error::Incompatible);
+            }
             End::Immediate if immediate => {
                 immediate = false;
+                view.reconnecting = true;
+                view.render(&mut io::stdout().lock())
+                    .map_err(|_| Error::Output)?;
                 continue;
             }
-            End::Immediate => return Err(Error::Reauthenticate),
+            End::Immediate => {
+                view.reconnecting = false;
+                view.latched_stop = Some(LatchedStop::Reauthenticate);
+                view.clear_for_reauth();
+                view.render(&mut io::stdout().lock())
+                    .map_err(|_| Error::Output)?;
+                return Err(Error::Reauthenticate);
+            }
             End::Resume => {}
         }
         if attempts >= 8 {
-            view.stale = true;
+            view.reconnecting = false;
+            view.latched_stop = Some(LatchedStop::ReconnectMaxAttempts);
             view.render(&mut io::stdout().lock())
                 .map_err(|_| Error::Output)?;
             return Ok(());
         }
+        view.reconnecting = true;
         view.render(&mut io::stdout().lock())
             .map_err(|_| Error::Output)?;
         time::sleep(jitter(attempts)).await;
@@ -671,6 +740,7 @@ mod tests {
         assert_eq!(view.last_event, Some(now));
         assert_eq!(view.state(now + Duration::from_secs(10)), Connection::Live);
         view.open = false;
+        view.reconnecting = true;
         assert_eq!(
             view.state(now + Duration::from_secs(11)),
             Connection::Reconnecting
@@ -812,7 +882,192 @@ mod tests {
         // Empty fleet, then 1006 (closed while synced, within stale_after) -> Reconnecting.
         let mut closed_empty = synced_view(vec![]);
         closed_empty.open = false;
+        closed_empty.reconnecting = true;
         assert_eq!(closed_empty.state(now), Connection::Reconnecting);
+    }
+
+    #[test]
+    fn sp13_connection_state_precedence_truth_table() {
+        let t0 = Instant::now();
+        let make_synced = |nodes: Vec<codec::Node>| View {
+            open: true,
+            reconnecting: false,
+            synced: true,
+            first_dial: Some(t0),
+            last_message: Some(t0),
+            last_event: Some(t0),
+            nodes: nodes.into_iter().map(|n| (n.node.clone(), n)).collect(),
+            ..View::default()
+        };
+
+        // Row 1: Latched 4409 -> Unknown (beats silence >= stale_after_ms and Live fleet).
+        let mut row1 = make_synced(vec![test_node("a", codec::Status::Healthy, Delivery::Live)]);
+        row1.latched_stop = Some(LatchedStop::Incompatible);
+        assert_eq!(row1.state(t0), Connection::Unknown);
+        assert_eq!(
+            row1.state(t0 + Duration::from_secs(60)),
+            Connection::Unknown
+        );
+
+        // Row 2: Latched re-authenticate -> Unknown (beats silence >= stale_after_ms).
+        let mut row2 = make_synced(vec![test_node("a", codec::Status::Healthy, Delivery::Live)]);
+        row2.latched_stop = Some(LatchedStop::Reauthenticate);
+        assert_eq!(row2.state(t0), Connection::Unknown);
+        assert_eq!(
+            row2.state(t0 + Duration::from_secs(60)),
+            Connection::Unknown
+        );
+
+        // Row 3: Latched reconnect_max_attempts -> Stale (even at t0).
+        let mut row3 = View {
+            first_dial: Some(t0),
+            latched_stop: Some(LatchedStop::ReconnectMaxAttempts),
+            ..View::default()
+        };
+        assert_eq!(row3.state(t0), Connection::Stale);
+        row3.open = false;
+        row3.reconnecting = false;
+        assert_eq!(row3.state(t0 + Duration::from_secs(1)), Connection::Stale);
+
+        // Row 4: silence >= stale_after_ms -> Stale across all transport states (initial dial, reconnecting, open+!synced, open+synced).
+        let initial_dial = View {
+            first_dial: Some(t0),
+            ..View::default()
+        };
+        assert_eq!(
+            initial_dial.state(t0 + Duration::from_millis(44_999)),
+            Connection::Unknown
+        );
+        assert_eq!(
+            initial_dial.state(t0 + Duration::from_millis(45_000)),
+            Connection::Stale
+        );
+
+        let reconnecting_view = View {
+            first_dial: Some(t0),
+            reconnecting: true,
+            ..View::default()
+        };
+        assert_eq!(
+            reconnecting_view.state(t0 + Duration::from_millis(44_999)),
+            Connection::Reconnecting
+        );
+        assert_eq!(
+            reconnecting_view.state(t0 + Duration::from_millis(45_000)),
+            Connection::Stale
+        );
+
+        let open_unsynced = View {
+            open: true,
+            first_dial: Some(t0),
+            ..View::default()
+        };
+        assert_eq!(
+            open_unsynced.state(t0 + Duration::from_millis(44_999)),
+            Connection::Unknown
+        );
+        assert_eq!(
+            open_unsynced.state(t0 + Duration::from_millis(45_000)),
+            Connection::Stale
+        );
+
+        // Row 5: Not open & reconnecting, silence < stale_after_ms -> Reconnecting.
+        let mut reconnecting_after_msg =
+            make_synced(vec![test_node("a", codec::Status::Healthy, Delivery::Live)]);
+        reconnecting_after_msg.open = false;
+        reconnecting_after_msg.reconnecting = true;
+        assert_eq!(
+            reconnecting_after_msg.state(t0 + Duration::from_secs(10)),
+            Connection::Reconnecting
+        );
+
+        // Row 6: Initial dial / 1000 idle close, silence < stale_after_ms -> Unknown.
+        let mut idle_closed =
+            make_synced(vec![test_node("a", codec::Status::Healthy, Delivery::Live)]);
+        idle_closed.open = false;
+        idle_closed.reconnecting = false;
+        assert_eq!(
+            idle_closed.state(t0 + Duration::from_secs(1)),
+            Connection::Unknown
+        );
+
+        // Row 7: Open & !synced (even with retained nodes, or after gap{reset}), silence < stale_after_ms -> Unknown.
+        let mut open_unsynced_retained =
+            make_synced(vec![test_node("a", codec::Status::Healthy, Delivery::Live)]);
+        open_unsynced_retained.synced = false;
+        assert_eq!(open_unsynced_retained.state(t0), Connection::Unknown);
+
+        let mut gapped = make_synced(vec![test_node("a", codec::Status::Healthy, Delivery::Live)]);
+        gapped
+            .apply(
+                Message::Gap {
+                    v: 1,
+                    sub: None,
+                    reason: codec::GapReason::CursorExpired,
+                    unknown_loss: true,
+                    reset: true,
+                },
+                t0 + Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(
+            gapped.state(t0 + Duration::from_secs(5)),
+            Connection::Unknown
+        );
+        assert_eq!(gapped.last_message, Some(t0 + Duration::from_secs(5)));
+
+        // Row 8: Open & synced & 2*tick < silence < stale_after -> Unknown (preserves last_event).
+        let row8 = make_synced(vec![test_node("a", codec::Status::Healthy, Delivery::Live)]);
+        assert_eq!(
+            row8.state(t0 + Duration::from_millis(30_000)),
+            Connection::Live
+        );
+        assert_eq!(
+            row8.state(t0 + Duration::from_millis(30_001)),
+            Connection::Unknown
+        );
+        assert_eq!(row8.last_event, Some(t0));
+
+        // Rows 9-12: Open & synced & silence <= 2*tick.
+        // Row 9: E >= 1 && !De -> Live
+        assert_eq!(
+            make_synced(vec![test_node("a", codec::Status::Healthy, Delivery::Live)]).state(t0),
+            Connection::Live
+        );
+        // Row 10: E >= 1 && De -> Delayed
+        assert_eq!(
+            make_synced(vec![
+                test_node("a", codec::Status::Healthy, Delivery::Live),
+                test_node("b", codec::Status::Healthy, Delivery::Delayed),
+            ])
+            .state(t0),
+            Connection::Delayed
+        );
+        // Row 11: E == 0 && Dn -> Delayed
+        assert_eq!(
+            make_synced(vec![test_node(
+                "a",
+                codec::Status::Loading,
+                Delivery::Delayed
+            )])
+            .state(t0),
+            Connection::Delayed
+        );
+        // Row 12: E == 0 && !Dn -> Unknown
+        assert_eq!(
+            make_synced(vec![test_node(
+                "a",
+                codec::Status::RemovedRetained,
+                Delivery::Delayed
+            )])
+            .state(t0),
+            Connection::Unknown
+        );
+
+        // Backoff reset requires >= 60s open AND synced (not synced alone).
+        assert!(!should_reset_backoff(Duration::from_secs(59), true));
+        assert!(!should_reset_backoff(Duration::from_secs(60), false));
+        assert!(should_reset_backoff(Duration::from_secs(60), true));
     }
     #[tokio::test]
     async fn proxy_refusal_stops_before_reconnecting() {

@@ -25,6 +25,12 @@ export interface SubRecord {
   pendingEpoch?: string;
 }
 
+export const BACKOFF_RESET_OPEN_SYNCED_MS = 60_000;
+
+export function shouldResetBackoff(wsOpen: boolean, synced: boolean, openSyncedMs: number): boolean {
+  return wsOpen && synced && openSyncedMs >= BACKOFF_RESET_OPEN_SYNCED_MS;
+}
+
 export type ConnectionBadge = "Unknown" | "Live" | "Delayed" | "Reconnecting" | "Stale";
 
 export const CLIENT_DEFAULTS = {
@@ -130,6 +136,7 @@ export class RosterStore {
 
   serverAtMs = 0;
   clientAtServerMs = 0;
+  firstDialAtMs = 0;
   lastServerMessageAtMs = 0;
   lastRealEventAtMs = 0;
   tickIntervalMs: number = CLIENT_DEFAULTS.tick_interval_ms;
@@ -219,28 +226,46 @@ export class RosterStore {
     }
   }
 
+  noteDialAttempt(nowClientMs: number): void {
+    if (this.firstDialAtMs === 0) {
+      this.firstDialAtMs = nowClientMs;
+    }
+  }
+
+  resetForManualReconnect(): void {
+    this.reconnectExhausted = false;
+    this.reconnecting = false;
+    this.firstDialAtMs = 0;
+    this.lastServerMessageAtMs = 0;
+  }
+
+  silenceMs(nowClientMs: number): number {
+    const origin = this.lastServerMessageAtMs > 0 ? this.lastServerMessageAtMs : this.firstDialAtMs;
+    if (origin <= 0) return 0;
+    return Math.max(0, nowClientMs - origin);
+  }
+
   nowServerMs(nowClientMs: number): number {
     if (!this.serverAtMs) return nowClientMs;
     return this.serverAtMs + (nowClientMs - this.clientAtServerMs);
   }
 
   connectionBadge(nowClientMs: number): ConnectionBadge {
-    if (this.stoppedAuth || this.stoppedIncompatible) return "Unknown";
+    if (this.stoppedIncompatible) return "Unknown";
+    if (this.stoppedAuth) return "Unknown";
     if (this.reconnectExhausted) return "Stale";
+
+    const silence = this.silenceMs(nowClientMs);
+    if (silence >= this.staleAfterMs) return "Stale";
+
+    if (!this.wsOpen && this.reconnecting) return "Reconnecting";
+    if (!this.wsOpen) return "Unknown";
+
     const fleetSub = this.subs.get("fleet");
-    if (this.reconnecting) {
-      if (this.lastServerMessageAtMs && nowClientMs - this.lastServerMessageAtMs >= this.staleAfterMs) {
-        return "Stale";
-      }
-      return "Reconnecting";
-    }
-    if (!this.wsOpen || !fleetSub || !fleetSub.synced) return "Unknown";
-    if (this.lastServerMessageAtMs && nowClientMs - this.lastServerMessageAtMs >= this.staleAfterMs) {
-      return "Stale";
-    }
-    if (this.lastServerMessageAtMs && nowClientMs - this.lastServerMessageAtMs > 2 * this.tickIntervalMs) {
-      return "Unknown";
-    }
+    if (!fleetSub || !fleetSub.synced) return "Unknown";
+
+    if (silence > 2 * this.tickIntervalMs) return "Unknown";
+
     const allNodes = this.nodeOrder.map((n) => this.nodes.get(n)).filter((n): n is NodeView => Boolean(n));
     const eligible = allNodes.filter((n) => !NON_ELIGIBLE_STATUS.has(n.status));
     if (eligible.length >= 1) {

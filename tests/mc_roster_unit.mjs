@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { CLIENT_DEFAULTS, RosterStore } from "../web/mc-roster/src/projection.ts";
+import { CLIENT_DEFAULTS, RosterStore, shouldResetBackoff } from "../web/mc-roster/src/projection.ts";
 import { DecodeError, decodeServerMessage, parseStrictJson } from "../web/mc-roster/src/protocol.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -460,4 +460,143 @@ test("SP defaults table and 2*tick / stale_after_ms / reconnectExhausted project
   store.reconnecting = false;
   store.reconnectExhausted = true;
   assert.equal(store.connectionBadge(15_000), "Stale");
+});
+
+function makeSyncedStore(nodes, t0 = 10_000) {
+  const store = new RosterStore();
+  store.noteDialAttempt(t0);
+  store.wsOpen = true;
+  store.allocSub("fleet");
+  store.applyMessage(
+    decodeServerMessage(
+      JSON.stringify({
+        v: 1,
+        type: "snapshot",
+        sub: "fleet",
+        part: 0,
+        final: true,
+        stream_epoch: "ep_wr5",
+        cursor: "c_wr5",
+        server_at: t0,
+        truncated: false,
+        nodes,
+      }),
+    ),
+    256,
+    t0,
+  );
+  return store;
+}
+
+function mkNode(node, status, delivery) {
+  return {
+    node,
+    status,
+    delivery,
+    history_hidden: false,
+    endpoints: [],
+    endpoints_truncated: false,
+    exchanges: [],
+    source_gaps: [],
+  };
+}
+
+test("WR-5 connection-state precedence truth table and monotonic silence origin", () => {
+  const t0 = 10_000;
+
+  // Row 1: Latched 4409 -> Unknown (beats silence >= stale_after_ms and Live fleet).
+  const row1 = makeSyncedStore([mkNode("n1", "healthy", "live")], t0);
+  row1.stoppedIncompatible = true;
+  assert.equal(row1.connectionBadge(t0), "Unknown");
+  assert.equal(row1.connectionBadge(t0 + 60_000), "Unknown");
+
+  // Row 2: Latched re-authenticate -> Unknown (beats silence >= stale_after_ms).
+  const row2 = makeSyncedStore([mkNode("n1", "healthy", "live")], t0);
+  row2.stoppedAuth = true;
+  row2.clearAllForReauth();
+  assert.equal(row2.connectionBadge(t0), "Unknown");
+  assert.equal(row2.connectionBadge(t0 + 60_000), "Unknown");
+  assert.equal(row2.lastServerMessageAtMs, t0);
+
+  // Row 3: Latched reconnect_max_attempts -> Stale; released by manual reconnect.
+  const row3 = new RosterStore();
+  row3.noteDialAttempt(t0);
+  row3.reconnectExhausted = true;
+  assert.equal(row3.connectionBadge(t0), "Stale");
+  row3.resetForManualReconnect();
+  row3.noteDialAttempt(t0 + 1000);
+  assert.equal(row3.connectionBadge(t0 + 1000), "Unknown");
+
+  // Row 4: silence >= stale_after_ms -> Stale across all non-latched transport states,
+  // including before any server message arrives (origin = firstDialAtMs).
+  const initialDial = new RosterStore();
+  initialDial.noteDialAttempt(t0);
+  assert.equal(initialDial.connectionBadge(t0 + 44_999), "Unknown");
+  assert.equal(initialDial.connectionBadge(t0 + 45_000), "Stale");
+
+  const reconnectingNoMsg = new RosterStore();
+  reconnectingNoMsg.noteDialAttempt(t0);
+  reconnectingNoMsg.reconnecting = true;
+  assert.equal(reconnectingNoMsg.connectionBadge(t0 + 44_999), "Reconnecting");
+  assert.equal(reconnectingNoMsg.connectionBadge(t0 + 45_000), "Stale");
+
+  const openUnsynced = new RosterStore();
+  openUnsynced.noteDialAttempt(t0);
+  openUnsynced.wsOpen = true;
+  openUnsynced.allocSub("fleet");
+  assert.equal(openUnsynced.connectionBadge(t0 + 44_999), "Unknown");
+  assert.equal(openUnsynced.connectionBadge(t0 + 45_000), "Stale");
+
+  // Row 5: Not open & reconnecting, silence < stale_after_ms -> Reconnecting.
+  const row5 = makeSyncedStore([mkNode("n1", "healthy", "live")], t0);
+  row5.wsOpen = false;
+  row5.reconnecting = true;
+  assert.equal(row5.connectionBadge(t0 + 10_000), "Reconnecting");
+
+  // Row 6: Initial dial / 1000 idle close, silence < stale_after_ms -> Unknown.
+  const idleClosed = makeSyncedStore([mkNode("n1", "healthy", "live")], t0);
+  idleClosed.wsOpen = false;
+  idleClosed.reconnecting = false;
+  assert.equal(idleClosed.connectionBadge(t0 + 1_000), "Unknown");
+
+  // Row 7: Open & !synced (even with retained nodes, or after gap{reset}), silence < stale_after_ms -> Unknown.
+  const openUnsyncedRetained = makeSyncedStore([mkNode("n1", "healthy", "live")], t0);
+  openUnsyncedRetained.subs.get("fleet").synced = false;
+  assert.equal(openUnsyncedRetained.connectionBadge(t0), "Unknown");
+
+  const gapped = makeSyncedStore([mkNode("n1", "healthy", "live")], t0);
+  gapped.applyMessage(
+    decodeServerMessage(
+      JSON.stringify({ v: 1, type: "gap", sub: "fleet", reason: "cursor_expired", unknown_loss: true, reset: true }),
+    ),
+    64,
+    t0 + 5_000,
+  );
+  assert.equal(gapped.connectionBadge(t0 + 5_000), "Unknown");
+
+  // Row 8: Open & synced & 2*tick < silence < stale_after_ms -> Unknown (lastRealEventAtMs kept).
+  const row8 = makeSyncedStore([mkNode("n1", "healthy", "live")], t0);
+  assert.equal(row8.connectionBadge(t0 + 30_000), "Live");
+  assert.equal(row8.connectionBadge(t0 + 30_001), "Unknown");
+  assert.equal(row8.lastRealEventAtMs, t0);
+
+  // Tick updates silence clock but NOT lastRealEventAtMs.
+  row8.applyMessage(decodeServerMessage(JSON.stringify({ v: 1, type: "tick", server_at: t0 + 35_000 })), 32, t0 + 35_000);
+  assert.equal(row8.connectionBadge(t0 + 35_000), "Live");
+  assert.equal(row8.lastRealEventAtMs, t0);
+
+  // Rows 9-12: Open & synced & silence <= 2*tick.
+  assert.equal(makeSyncedStore([mkNode("n1", "healthy", "live")], t0).connectionBadge(t0), "Live");
+  assert.equal(
+    makeSyncedStore([mkNode("n1", "healthy", "live"), mkNode("n2", "healthy", "delayed")], t0).connectionBadge(t0),
+    "Delayed",
+  );
+  assert.equal(makeSyncedStore([mkNode("n1", "loading", "delayed")], t0).connectionBadge(t0), "Delayed");
+  assert.equal(makeSyncedStore([mkNode("n1", "removed_retained", "delayed")], t0).connectionBadge(t0), "Unknown");
+
+  // Backoff reset requires 60 s open AND synced (not synced alone).
+  assert.equal(shouldResetBackoff(false, true, 60_000), false);
+  assert.equal(shouldResetBackoff(true, false, 60_000), false);
+  assert.equal(shouldResetBackoff(true, true, 59_999), false);
+  assert.equal(shouldResetBackoff(true, true, 60_000), true);
 });

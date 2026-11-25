@@ -41,7 +41,7 @@ class MissionControlClient {
   private manualReconnect(): void {
     if (this.store.stoppedAuth || this.store.stoppedIncompatible) return;
     this.backoffAttempt = 0;
-    this.store.reconnectExhausted = false;
+    this.store.resetForManualReconnect();
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -92,6 +92,7 @@ class MissionControlClient {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = `${proto}//${window.location.host}/v1/mission-control/session`;
     this.openedThisAttempt = false;
+    this.store.noteDialAttempt(Date.now());
     const ws = new WebSocket(url, "xmsg.mission-control.v1");
     this.ws = ws;
 
