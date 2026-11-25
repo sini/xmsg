@@ -422,7 +422,7 @@ def main():
         record.update({'status': 'building', 'variant_hashes': {name: digest(data) for name, data in expected.items()}})
         persist()
         verify(source, expected, modes)
-        if not ledger['controls']:
+        if 'source_tamper_refused' not in ledger['controls']:
             guard_file = source / test_file
             guard_file.write_bytes(expected[test_file] + b'\n')
             try:
@@ -432,6 +432,8 @@ def main():
             else:
                 raise RuntimeError('source tamper control survived')
             guard_file.write_bytes(expected[test_file])
+            persist()
+        if 'outside_artifact_refused' not in ledger['controls']:
             try:
                 artifact(b'{"reason":"compiler-artifact","target":{"kind":["lib"]},"executable":"/bin/false","fresh":false}', target)
             except RuntimeError:
@@ -519,6 +521,15 @@ def main():
         for case in cases:
             arm(case, 'red')
             arm(case, 'green')
+        required_controls = {
+            'added_source_refused', 'source_mode_refused', 'source_symlink_refused',
+            'artifact_tamper_refused', 'wrong_child_nonce_refused',
+            'unrelated_session_refused', 'held_process_group_reaped',
+            'source_tamper_refused', 'outside_artifact_refused',
+            'cached_artifact_refused', 'wrong_nonce_refused',
+        }
+        if any(ledger['controls'].get(name) is not True for name in required_controls):
+            raise RuntimeError('required runner controls did not all fire')
         ledger['status'] = 'passed'
         ledger['completed_at'] = time.time()
         persist()
