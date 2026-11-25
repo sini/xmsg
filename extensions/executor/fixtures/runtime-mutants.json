@@ -84,10 +84,10 @@
     "file": "extensions/executor/src/supervisor.rs",
     "needle": "libc::F_SETFD, flags | libc::FD_CLOEXEC",
     "replacement": "libc::F_SETFD, flags & !libc::FD_CLOEXEC",
-    "test": "real_acp_bootstrap_uses_inherited_lease_and_observed_model_before_brief",
+    "test": "owned_startup_socket_is_cloexec_immediately_before_any_spawn",
     "test_module": "supervisor::tests",
     "test_file": "extensions/executor/src/supervisor_tests.rs",
-    "assertion": "native child inherited the broker startup socket identity"
+    "assertion": "owned startup socket was not close-on-exec immediately after restoration"
   },
   {
     "id": "runtime-buffered-continue-starvation",
@@ -292,9 +292,9 @@
   {
     "id": "runtime-native-descriptor-cloexec",
     "file": "extensions/executor/src/runtime_process.rs",
-    "needle": "if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {",
-    "replacement": "if flags >= 0 && { let _ = fd; false } {",
-    "test": "native_exec_excludes_an_inheritable_unowned_socket",
+    "needle": "command.pre_exec(move || native_descriptor_flags(use_close_range, maximum));",
+    "replacement": "command.pre_exec(move || { let _ = (use_close_range, maximum); Ok(()) });",
+    "test": "native_exec_excludes_a_high_inheritable_unowned_socket",
     "test_module": "runtime_process::descriptor_tests",
     "test_file": "extensions/executor/src/runtime_process.rs",
     "assertion": "native exec inherited the deliberately unowned socket"

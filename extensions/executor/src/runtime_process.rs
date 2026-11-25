@@ -152,8 +152,7 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
     if Instant::now() >= expires {
         return Err(ErrorCode::DeadlineExpired.into());
     }
-    #[cfg(target_os = "macos")]
-    native_descriptors_cloexec(&mut command);
+    native_descriptors_cloexec(&mut command)?;
     let mut backend =
         journal.spawn_native_backend(admission, &manifest.identity, &unix_now, &mut command)?;
     let mut input = backend.stdin.take().ok_or(SupervisorError::Protocol)?;
@@ -948,30 +947,85 @@ impl Session {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn native_descriptors_cloexec(command: &mut ProcessCommand) {
+fn native_descriptors_cloexec(command: &mut ProcessCommand) -> Result<(), ErrorCode> {
     use std::os::unix::process::CommandExt;
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
     };
-    let maximum = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
-        limit.rlim_cur.min(65536) as libc::c_int
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(ErrorCode::NativeDescriptorInventoryUnavailable);
+    }
+    #[cfg(target_os = "linux")]
+    let use_close_range = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            u32::MAX,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    } == 0;
+    #[cfg(not(target_os = "linux"))]
+    let use_close_range = false;
+    if !use_close_range {
+        if limit.rlim_cur == libc::RLIM_INFINITY || limit.rlim_cur > (1 << 20) {
+            return Err(ErrorCode::NativeDescriptorLimitUnsupported);
+        }
+        #[cfg(target_os = "linux")]
+        let directory = "/proc/self/fd";
+        #[cfg(not(target_os = "linux"))]
+        let directory = "/dev/fd";
+        let entries = std::fs::read_dir(directory)
+            .map_err(|_| ErrorCode::NativeDescriptorInventoryUnavailable)?;
+        for entry in entries {
+            let entry = entry.map_err(|_| ErrorCode::NativeDescriptorInventoryUnavailable)?;
+            let fd = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .ok_or(ErrorCode::NativeDescriptorInventoryUnavailable)?;
+            if fd >= limit.rlim_cur {
+                return Err(ErrorCode::NativeDescriptorOutsideLimit);
+            }
+        }
+    }
+    let maximum = if use_close_range {
+        0
     } else {
-        65536
+        limit.rlim_cur as libc::c_int
     };
     // Marking rather than closing preserves std's exec-error pipe.
     unsafe {
-        command.pre_exec(move || {
-            for fd in 3..maximum {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
+        command.pre_exec(move || native_descriptor_flags(use_close_range, maximum));
     }
+    Ok(())
+}
+
+fn native_descriptor_flags(use_close_range: bool, maximum: libc::c_int) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if use_close_range {
+        if unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        } < 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        return Ok(());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = use_close_range;
+    for fd in 3..maximum {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -981,9 +1035,19 @@ mod descriptor_tests {
     use std::os::unix::process::CommandExt;
 
     #[test]
-    fn native_exec_excludes_an_inheritable_unowned_socket() {
+    fn native_exec_excludes_a_high_inheritable_unowned_socket() {
         let (socket, _peer) = UnixStream::pair().unwrap();
         let fd = socket.as_raw_fd();
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        let high = limit.rlim_cur.saturating_sub(1).min(1000) as libc::c_int;
+        assert!(high > fd);
         let metadata = File::from(std::os::fd::OwnedFd::from(socket.try_clone().unwrap()))
             .metadata()
             .unwrap();
@@ -1001,7 +1065,7 @@ except OSError:
  inherited=False
 sys.exit(23 if inherited else 0)",
             ])
-            .arg(fd.to_string())
+            .arg(high.to_string())
             .arg(metadata.dev().to_string())
             .arg(metadata.ino().to_string())
             .stdin(Stdio::piped())
@@ -1009,14 +1073,13 @@ sys.exit(23 if inherited else 0)",
             .stderr(Stdio::null());
         unsafe {
             command.pre_exec(move || {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                if libc::dup2(fd, high) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
             });
         }
-        native_descriptors_cloexec(&mut command);
+        native_descriptors_cloexec(&mut command).unwrap();
         crate::proof_processes::configure(&mut command);
         let mut child = command.spawn().unwrap();
         crate::proof_processes::record(&child);

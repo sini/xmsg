@@ -86,8 +86,15 @@ The verbs are `dispatch`, `send`, `steer`, `interrupt`, `resume`, `stop`, `statu
 attribution and current owner verb/target grants. Owner/human credentials do not
 substitute for that attribution; no per-agent control credential is minted.
 
-On macOS, native adapter exec marks descriptors above stdio close-on-exec,
-including ambient system sockets inherited by the supervisor.
+Native adapter exec excludes descriptors above stdio on Linux and macOS,
+including ambient system sockets inherited by the supervisor. Linux uses
+`close_range(CLOSE_RANGE_CLOEXEC)` when supported; otherwise the executor checks
+the current descriptor inventory and sweeps the complete finite soft file limit.
+Without `close_range`, a limit above 1,048,576, an unavailable inventory or an existing descriptor above
+the limit refuses launch with `native_descriptor_limit_unsupported`,
+`native_descriptor_inventory_unavailable` or `native_descriptor_outside_limit`.
+The admitted process envelope requires trusted code not to change its file limit
+concurrently with launch. Stdio and the standard exec-error pipe are preserved.
 
 Authorization, durable admission, native submission and observed effect are
 separate receipt layers. Replaying the same canonical principal/request ID

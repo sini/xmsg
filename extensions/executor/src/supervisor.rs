@@ -1195,13 +1195,7 @@ pub(crate) fn run_inherited(fd: RawFd, max_wall_ms: u64) -> Result<(), Superviso
     if crate::unix::peer(&stream)?.uid != xmsg::client::current_uid() {
         return Err(ErrorCode::PeerUid.into());
     }
-    xmsg::client::caller_attribution::with_fd_inheritance_gate(|| {
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    })?;
+    xmsg::client::caller_attribution::with_fd_inheritance_gate(|| restore_startup_cloexec(fd))?;
     let deadline = started
         .checked_add(Duration::from_millis(max_wall_ms))
         .ok_or(SupervisorError::Protocol)?
@@ -1432,4 +1426,12 @@ fn run_fixture_supervisor_until(
         }
         frame_until(&mut stream, &hello, request_deadline)?;
     }
+}
+
+fn restore_startup_cloexec(fd: libc::c_int) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }

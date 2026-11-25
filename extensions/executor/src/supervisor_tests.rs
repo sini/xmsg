@@ -2708,3 +2708,25 @@ fn held_backend_exit_is_observed_before_attach_can_publish_running() {
     assert_eq!(state, "unknown", "dead backend published running state");
     assert_eq!(result.state, ExecutionState::Unknown);
 }
+
+#[test]
+fn owned_startup_socket_is_cloexec_immediately_before_any_spawn() {
+    let (owned, _peer) = UnixStream::pair().unwrap();
+    let fd = owned.as_raw_fd();
+    xmsg::client::caller_attribution::with_fd_inheritance_gate(|| {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+            0
+        );
+        super::restore_startup_cloexec(fd).unwrap();
+        let restored = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(
+            restored >= 0 && restored & libc::FD_CLOEXEC != 0,
+            "owned startup socket was not close-on-exec immediately after restoration"
+        );
+        Ok(())
+    })
+    .unwrap();
+}

@@ -46,6 +46,12 @@ pub enum ErrorCode {
     DeadlineExpired,
     #[error("profile_denied")]
     ProfileDenied,
+    #[error("native_descriptor_inventory_unavailable")]
+    NativeDescriptorInventoryUnavailable,
+    #[error("native_descriptor_limit_unsupported")]
+    NativeDescriptorLimitUnsupported,
+    #[error("native_descriptor_outside_limit")]
+    NativeDescriptorOutsideLimit,
     #[error("invalid_configuration")]
     InvalidConfiguration,
     #[error("unknown_target")]
