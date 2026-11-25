@@ -134,6 +134,23 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(test)]
+    if matches!(
+        &manifest.backend,
+        Backend::Acp {
+            fixture_records: Some(_),
+            ..
+        }
+    ) {
+        if let Some(trace) = program.arguments.get(1) {
+            let stderr = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(std::path::Path::new(trace).with_extension("native-stderr"))?;
+            command.stderr(Stdio::from(stderr));
+        }
+    }
     match selected.harness {
         crate::protocol::Harness::Claude => {
             command.env("CLAUDE_CODE_EXECUTABLE", &program.native.path);

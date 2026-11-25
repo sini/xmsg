@@ -883,6 +883,49 @@ fn real_acp_fixture(scenario: AcpScenario) {
             "failed prelaunch admission was selected again after restart"
         );
     }
+    if !trace.with_extension("fd-proof").is_file() {
+        let session = if prelaunch_failure {
+            "session-4"
+        } else {
+            "session-1"
+        };
+        let identity = service
+            .journal
+            .lock()
+            .unwrap()
+            .execution(session, 1)
+            .unwrap()
+            .map(|row| row.identity);
+        let snapshot = identity.as_ref().map(|identity| {
+            acp_failure_snapshot(
+                &service,
+                &trace,
+                &runtime.root,
+                identity,
+                scenario_started.elapsed(),
+            )
+        });
+        let read = |extension: &str| -> String {
+            String::from_utf8_lossy(&fs::read(trace.with_extension(extension)).unwrap_or_default())
+                .chars()
+                .take(65536)
+                .collect()
+        };
+        let startup = match &started {
+            Ok(observed) => {
+                serde_json::json!({"state":observed.state,"session":observed.identity.session_id,"generation":observed.identity.generation})
+            }
+            Err(error) => serde_json::json!({"error":format!("{error:?}")}),
+        };
+        let diagnostic = serde_json::json!({"startup":startup,"snapshot":snapshot,"child_result":read("runtime-result"),"native_stderr":read("native-stderr"),"fd_expected":read("fd-expected"),"fd_proof":read("fd-proof"),"native_env":read("native-env")});
+        if let Some(receipt) = std::env::var_os("XMSG_EXECUTOR_PROOF_CHILDREN") {
+            let _ = fs::write(
+                PathBuf::from(receipt).with_extension("fixture-failure.json"),
+                serde_json::to_vec_pretty(&diagnostic).unwrap(),
+            );
+        }
+        panic!("native bootstrap produced no descriptor proof: {diagnostic}");
+    }
     let proof: serde_json::Value =
         serde_json::from_slice(&fs::read(trace.with_extension("fd-proof")).unwrap()).unwrap();
     assert_eq!(

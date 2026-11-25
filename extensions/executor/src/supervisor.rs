@@ -1139,7 +1139,25 @@ fn run_supervisor_process_at(
     let expires = started
         .checked_add(Duration::from_millis(manifest.max_wall_ms))
         .ok_or(SupervisorError::Protocol)?;
+    #[cfg(test)]
+    let diagnostic_path = match &manifest.backend {
+        crate::runtime_process::Backend::Acp {
+            configuration,
+            fixture_records: Some(_),
+            ..
+        } => configuration
+            .programs
+            .first()
+            .and_then(|p| p.arguments.get(1))
+            .map(|trace| PathBuf::from(trace).with_extension("runtime-result")),
+        _ => None,
+    };
     let result = run_supervisor_until(manifest, expires);
+    #[cfg(test)]
+    if let Some(destination) = diagnostic_path {
+        let receipt = serde_json::json!({"error":result.as_ref().err().map(|e|format!("{e:?}")),"elapsed_ms":started.elapsed().as_millis(),"pid":std::process::id()});
+        let _ = fs::write(destination, serde_json::to_vec(&receipt).unwrap());
+    }
     let group = unsafe { libc::getpgrp() };
     if group == i32::try_from(std::process::id()).unwrap_or(-1) {
         if let Ok(target) = negative_owned_group(group) {
