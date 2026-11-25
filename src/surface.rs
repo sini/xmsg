@@ -449,6 +449,9 @@ fn peer_keys_for_host(peers: &crate::fed::PeersMap, host: &str) -> Vec<String> {
             matched.insert(name);
         }
     }
+    if peers.manual_peer_config(host).is_some() {
+        matched.insert(host.to_string());
+    }
     matched.into_iter().collect()
 }
 

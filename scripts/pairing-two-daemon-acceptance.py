@@ -347,7 +347,7 @@ def unix_post(sock_path, path, payload):
     return resp.status, body
 
 st_send_ok, body_send_ok = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "hello-q2-7a"}})
-assert "not allowed" not in body_send_ok.lower() and "op_denied" not in body_send_ok.lower() and "no address" not in body_send_ok.lower() and "unknown peer" not in body_send_ok.lower() and "bad_request" not in body_send_ok.lower(), f"Q2-7a first send B->A failed: {{st_send_ok}} {{body_send_ok}}"
+assert "not allowed" not in body_send_ok.lower() and "op_denied" not in body_send_ok.lower() and "no address" not in body_send_ok.lower() and "unknown peer" not in body_send_ok.lower() and "unknown node" not in body_send_ok.lower() and "bad_request" not in body_send_ok.lower(), f"Q2-7a first send B->A failed: {{st_send_ok}} {{body_send_ok}}"
 
 st_send_other, body_send_other = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"other@{{id_a}}", "text": "deny-q2-9"}})
 assert st_send_other >= 400 and ("not allowed" in body_send_other.lower() or "denied" in body_send_other.lower()), f"Q2-9 send to unlisted target 'other' unexpectedly succeeded: {{st_send_other}} {{body_send_other}}"

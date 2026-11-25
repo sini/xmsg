@@ -701,8 +701,10 @@ impl PeersMap {
     }
 
     /// The entry key for a typed `@node`: a local nickname, or a canonical name.
-    pub fn key_for(&self, typed: &str) -> Option<&str> {
-        self.get(typed).map(|p| p.name.as_str())
+    pub fn key_for<'a>(&'a self, typed: &'a str) -> Option<&'a str> {
+        self.get(typed)
+            .map(|p| p.name.as_str())
+            .or_else(|| self.manual_peer_config(typed).map(|_| typed))
     }
 
     /// The canonical node name of the entry keyed `key`; this is what crosses the wire.
@@ -1065,7 +1067,7 @@ impl PeersMap {
         }
         Some(PeerConfig {
             name: name.to_string(),
-            address: String::new(),
+            address: crate::pairing::service::known_peer_address(&dev.0).unwrap_or_default(),
             pin: Some(hex_pin),
             ca: None,
             identities: None,
