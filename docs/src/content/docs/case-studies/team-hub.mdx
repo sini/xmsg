@@ -136,10 +136,7 @@ use rules that do not span those bundles.
 
 ## Setup
 
-### From a fleet file (`lib.fleet`)
-
-Instead of hand-maintaining each host's `peers.json`, declare the team's topology once with
-[`lib.fleet`](/operations/fleet-topology/):
+Declare the team's topology once with [`lib.fleet`](/operations/fleet-topology/):
 
 ```nix title="fleet.nix"
 {
@@ -159,112 +156,146 @@ Instead of hand-maintaining each host's `peers.json`, declare the team's topolog
   };
   grants = {
     "team.hub"."build.gpubox".allow = [ "send" "reply" ];
-    "build.gpubox"."team.hub".allow = [ "send" "reply" "relayed" ];
+    "build.gpubox"."team.hub".allow = [ "send" "reply" ];
     "team.hub"."alice.laptop" = { mailbox = true; allow = [ "send" "reply" "list" ]; };
     "team.hub"."bob.laptop"   = { mailbox = true; allow = [ "send" "reply" "list" ]; };
     "team.hub"."carol.laptop" = { mailbox = true; allow = [ "send" "reply" "list" ]; };
-    "alice.laptop"."team.hub".allow = [ "send" "reply" "relayed" ];
-    "bob.laptop"."team.hub".allow   = [ "send" "reply" "relayed" ];
-    "carol.laptop"."team.hub".allow = [ "send" "reply" "relayed" ];
+    "alice.laptop"."team.hub".allow = [ "send" "reply" ];
+    "bob.laptop"."team.hub".allow   = [ "send" "reply" ];
+    "carol.laptop"."team.hub".allow = [ "send" "reply" ];
   };
   relays = {
-    "alice.laptop" = { via = "team.hub"; to = [ "bob.laptop" "carol.laptop" "build.gpubox" ]; };
-    "bob.laptop"   = { via = "team.hub"; to = [ "alice.laptop" "carol.laptop" "build.gpubox" ]; };
-    "carol.laptop" = { via = "team.hub"; to = [ "alice.laptop" "bob.laptop" "build.gpubox" ]; };
+    "alice.laptop" = { via = "team.hub"; to = [ "build.gpubox" ]; };
+    "bob.laptop"   = { via = "team.hub"; to = [ "build.gpubox" ]; };
+    "carol.laptop" = { via = "team.hub"; to = [ "build.gpubox" ]; };
   };
 }
 ```
 
-On `team.hub` and `build.gpubox`, set `programs.xmsg.server.federation.fleet = { value = fleet; self = "<name>"; };`
-(or `services.xmsg.instances.<n>.federation.fleet`). On each outbound-only laptop, render its
-peers file with `lib.fleet.peersJsonFor { inherit fleet; self = "alice.laptop"; }` (and validate
-it with `lib.fleet.checkFinal`), which produces the JSON below (adding `"dial": "outbound"` on
-the laptop's own hub entry when running outbound-only).
+- **Mailboxes and relays:** The laptops reach each other through `team.hub`'s mailboxes (a leaf's
+  send goes to its hub, and the hub delivers into the other leaf's mailbox), so no leaf-to-leaf
+  relay is needed. Only relays to `build.gpubox` (`acceptRelayed = [ "team.hub" ]`) appear in
+  `relays`; `lib.fleet` derives `"forward"` on `team.hub` and `"relayed"` on `build.gpubox` from
+  `relays` and `acceptRelayed` rather than from hand-written grants.
+- **Nodes vs. leaves:** On `team.hub` and `build.gpubox`, set
+  `programs.xmsg.server.federation.fleet = { value = fleet; self = "<name>"; };` (or
+  `services.xmsg.instances.<n>.federation.fleet`). On each laptop (`kind = "leaf"`), render its
+  peers file outside those modules with `lib.fleet.peersJsonFor { inherit fleet; self = "alice.laptop"; }`
+  and validate it with `lib.fleet.checkFinal` (add `hostOwned` entries only for external CA peers
+  outside the fleet).
 
 ### Each laptop
 
-Every laptop has one peer: the hub. This is `alice.laptop`'s peers file; bob's and carol's are the
-same.
+Every laptop has one derived peer: the hub. `lib.fleet.peersJsonFor { inherit fleet; self = "alice.laptop"; }`
+renders (bob's and carol's are the same):
 
 ```json title="alice.laptop: peers.json"
 {
-  "peers": {
-    "team.hub": {
-      "address": "hub.example.org:7788",
-      "ca": "/etc/xmsg/team-ca.pem",
-      "identities": ["spiffe://example.org/host/hub/user/team"],
-      "dial": "outbound",
-      "allow": ["send", "reply", "relayed"],
-      "default_route": true
-    }
+  "team.hub": {
+    "address": "hub.example.org:7788",
+    "allow": [
+      "send",
+      "reply"
+    ],
+    "ca": "/etc/xmsg/team-ca.pem",
+    "default_route": true,
+    "identities": [
+      "spiffe://example.org/host/hub/user/team"
+    ]
   }
 }
 ```
 
-- `"dial": "outbound"` makes this node dial the hub and pull its mailbox.
 - `"default_route": true` sends any explicit destination that is not a direct peer, such as
-  `bob.laptop`, to the hub. At most one entry may set it.
-- `allow` lists operations accepted from the hub. The examples grant `relayed` for
-  forwarded messages. Planned (unreleased): full-node mailbox pulls enforce this grant
-  before local delivery; without it, third-party items receive a `denied` reply and are
-  ACKed without delivery. Direct hub-origin messages still work without it.
+  `bob.laptop` or `build.gpubox`, to the hub. At most one entry may set it.
 - Mailbox access is gated by the authenticated peer plus `leaf: true` on the hub.
-  `inbox` in `allow` is accepted and ignored; old configurations listing it still load.
 
 ### The hub
 
-The hub names every laptop and the build box. This is `team.hub`'s peers file:
+`lib.fleet.peersJsonFor { inherit fleet; self = "team.hub"; }` renders every laptop (with leaf
+SPIFFE identity `spiffe://example.org/ns/laptop/sa/<user>`) and the build box:
 
 ```json title="team.hub: peers.json"
 {
-  "peers": {
-    "alice.laptop": {
-      "ca": "/etc/xmsg/team-ca.pem",
-      "identities": ["spiffe://example.org/host/laptop/user/alice"],
-      "leaf": true,
-      "allow": ["send", "reply", "list", "forward"]
-    },
-    "bob.laptop": {
-      "ca": "/etc/xmsg/team-ca.pem",
-      "identities": ["spiffe://example.org/host/laptop/user/bob"],
-      "leaf": true,
-      "allow": ["send", "reply", "list", "forward"]
-    },
-    "carol.laptop": {
-      "ca": "/etc/xmsg/team-ca.pem",
-      "identities": ["spiffe://example.org/host/laptop/user/carol"],
-      "leaf": true,
-      "allow": ["send", "reply", "list", "forward"]
-    },
-    "build.gpubox": {
-      "address": "gpubox.example.org:7788",
-      "ca": "/etc/xmsg/team-ca.pem",
-      "identities": ["spiffe://example.org/host/gpubox/user/build"],
-      "allow": ["send", "reply"]
-    }
+  "alice.laptop": {
+    "address": "alice.laptop.invalid:7788",
+    "allow": [
+      "send",
+      "reply",
+      "list",
+      "forward"
+    ],
+    "ca": "/etc/xmsg/team-ca.pem",
+    "identities": [
+      "spiffe://example.org/ns/laptop/sa/alice"
+    ],
+    "leaf": true
+  },
+  "bob.laptop": {
+    "address": "bob.laptop.invalid:7788",
+    "allow": [
+      "send",
+      "reply",
+      "list",
+      "forward"
+    ],
+    "ca": "/etc/xmsg/team-ca.pem",
+    "identities": [
+      "spiffe://example.org/ns/laptop/sa/bob"
+    ],
+    "leaf": true
+  },
+  "build.gpubox": {
+    "address": "gpubox.example.org:7788",
+    "allow": [
+      "send",
+      "reply"
+    ],
+    "ca": "/etc/xmsg/team-ca.pem",
+    "identities": [
+      "spiffe://example.org/host/gpubox/user/build"
+    ]
+  },
+  "carol.laptop": {
+    "address": "carol.laptop.invalid:7788",
+    "allow": [
+      "send",
+      "reply",
+      "list",
+      "forward"
+    ],
+    "ca": "/etc/xmsg/team-ca.pem",
+    "identities": [
+      "spiffe://example.org/ns/laptop/sa/carol"
+    ],
+    "leaf": true
   }
 }
 ```
 
-- `"leaf": true` keeps a mailbox for that laptop instead of dialling it. A laptop entry has no
-  `address`, because the hub never dials a laptop.
-- `"forward"` lets that laptop ask the hub to pass a message on to another peer.
-- `"list"` lets that laptop run `list` against the hub and see the hub's own recipients.
+- `"leaf": true` keeps a mailbox for that laptop instead of dialling it (`*.invalid:7788` is a
+  placeholder address that the hub never dials).
+- `"forward"` is derived from `relays` so the hub can forward each laptop's sends to `build.gpubox`.
+- `"list"` lets each laptop run `list` against the hub and see the hub's own recipients.
 - The build box is dialled at its `address`, and it does not get `forward`.
-- An entry's key must match the name its certificate gives (`alice.laptop`), and
-  `xmsg check-peers` checks that before you start the daemon.
 
 ### The build box
 
+`lib.fleet.peersJsonFor { inherit fleet; self = "build.gpubox"; }` renders:
+
 ```json title="build.gpubox: peers.json"
 {
-  "peers": {
-    "team.hub": {
-      "address": "hub.example.org:7788",
-      "ca": "/etc/xmsg/team-ca.pem",
-      "identities": ["spiffe://example.org/host/hub/user/team"],
-      "allow": ["send", "reply", "relayed"]
-    }
+  "team.hub": {
+    "address": "hub.example.org:7788",
+    "allow": [
+      "send",
+      "reply",
+      "relayed"
+    ],
+    "ca": "/etc/xmsg/team-ca.pem",
+    "identities": [
+      "spiffe://example.org/host/hub/user/team"
+    ]
   }
 }
 ```

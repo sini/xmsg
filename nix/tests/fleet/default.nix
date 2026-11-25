@@ -1386,9 +1386,139 @@ let
   failures = lib.filter (c: !c.ok) allChecks;
 in
 if failures == [ ] then
-  pkgs.runCommand "check-fleet" { } ''
-    echo "fleet-check-complete:${toString (builtins.length allChecks)}" > $out
-  ''
+  pkgs.runCommand "check-fleet"
+    {
+      nativeBuildInputs = [
+        pkgs.nix
+        pkgs.python3
+      ];
+    }
+    ''
+      export NIX_STATE_DIR="$TMPDIR/nix-state"
+      export NIX_LOG_DIR="$TMPDIR/nix-log"
+      export HOME="$TMPDIR/home"
+      mkdir -p "$NIX_STATE_DIR" "$NIX_LOG_DIR" "$HOME"
+
+      python3 - <<'PY'
+      import json, re, subprocess, tempfile
+      from pathlib import Path
+
+      mdx = Path("${../../../docs/src/content/docs/case-studies/team-hub.mdx}").read_text()
+      def extract(fence):
+          m = re.search(rf"```{re.escape(fence)}\n(.*?)\n```", mdx, re.S)
+          assert m, f"missing fenced block: {fence}"
+          return m.group(1)
+
+      fleet_nix = extract('nix title="fleet.nix"')
+      laptop_json = json.loads(extract('json title="alice.laptop: peers.json"'))
+      hub_json = json.loads(extract('json title="team.hub: peers.json"'))
+      gpubox_json = json.loads(extract('json title="build.gpubox: peers.json"'))
+
+      with tempfile.NamedTemporaryFile("w", suffix=".nix", delete=False) as tf:
+          tf.write(fleet_nix)
+          fleet_path = tf.name
+
+      expr = f"""
+      let
+        pkgs = import ${pkgs.path} {{ system = "${pkgs.stdenv.hostPlatform.system}"; }};
+        lib = pkgs.lib;
+        fl = import ${../../modules}/_fleet.nix {{ inherit lib; }};
+        teamFleet = import {fleet_path};
+      in {{
+        check = fl.check teamFleet;
+        laptop = builtins.fromJSON (fl.peersJsonFor {{ fleet = teamFleet; self = "alice.laptop"; }});
+        hub = builtins.fromJSON (fl.peersJsonFor {{ fleet = teamFleet; self = "team.hub"; }});
+        gpubox = builtins.fromJSON (fl.peersJsonFor {{ fleet = teamFleet; self = "build.gpubox"; }});
+      }}
+      """
+      out = subprocess.check_output(
+          ["nix-instantiate", "--eval", "--strict", "--json", "--store", "dummy://", "--expr", expr],
+          text=True,
+      )
+      res = json.loads(out)
+      assert res["check"] == [], f"team-hub fleet.nix failed lib.fleet.check: {res['check']}"
+      assert res["laptop"] == laptop_json, f"alice.laptop JSON drift: {res['laptop']} != {laptop_json}"
+      assert res["hub"] == hub_json, f"team.hub JSON drift: {res['hub']} != {hub_json}"
+      assert res["gpubox"] == gpubox_json, f"build.gpubox JSON drift: {res['gpubox']} != {gpubox_json}"
+
+      # M22: assert the exact throw message text for federation.fleet with federation.enable = false.
+      hm_expr = f"""
+      let
+        pkgs = import ${pkgs.path} {{ system = "${pkgs.stdenv.hostPlatform.system}"; }};
+        lib = pkgs.lib;
+        hmMod = import ${../../modules}/home-manager.nix {{ packages = {{ "${pkgs.stdenv.hostPlatform.system}".default = pkgs.hello; }}; }};
+        res = lib.evalModules {{
+          specialArgs = {{ inherit pkgs; }};
+          modules = [
+            ({{ lib, ... }}: {{
+              options = {{
+                xdg = {{ stateHome = lib.mkOption {{ default = "/tmp"; }}; configHome = lib.mkOption {{ default = "/tmp"; }}; dataHome = lib.mkOption {{ default = "/tmp"; }}; configFile = lib.mkOption {{ default = {{ }}; }}; dataFile = lib.mkOption {{ default = {{ }}; }}; }};
+                home = {{ username = lib.mkOption {{ default = "t"; }}; homeDirectory = lib.mkOption {{ default = "/tmp"; }}; packages = lib.mkOption {{ default = [ ]; }}; sessionVariables = lib.mkOption {{ default = {{ }}; }}; file = lib.mkOption {{ default = {{ }}; }}; activation = lib.mkOption {{ default = {{ }}; }}; }};
+                systemd.user = {{ startServices = lib.mkOption {{ default = "sd-switch"; }}; services = lib.mkOption {{ default = {{ }}; }}; }};
+                launchd.agents = lib.mkOption {{ default = {{ }}; }};
+                programs = {{ claude-code = lib.mkOption {{ default = {{ }}; }}; antigravity-cli = lib.mkOption {{ default = {{ }}; }}; codex = lib.mkOption {{ default = {{ }}; }}; }};
+                services.hermes-agent = lib.mkOption {{ default = {{ }}; }};
+                assertions = lib.mkOption {{ default = [ ]; }};
+                warnings = lib.mkOption {{ default = [ ]; }};
+              }};
+            }})
+            hmMod
+            {{
+              programs.xmsg = {{
+                enable = true;
+                server = {{
+                  enable = true;
+                  federation = {{
+                    enable = false;
+                    fleet = {{ value = import {fleet_path}; self = "team.hub"; }};
+                  }};
+                }};
+              }};
+            }}
+          ];
+        }};
+      in builtins.deepSeq res.config.assertions "ok"
+      """
+      nx_expr = f"""
+      let
+        pkgs = import ${pkgs.path} {{ system = "${pkgs.stdenv.hostPlatform.system}"; }};
+        lib = pkgs.lib;
+        nxMod = import ${../../modules}/nixos.nix {{ packages = {{ "${pkgs.stdenv.hostPlatform.system}".default = pkgs.hello; }}; }};
+        res = lib.evalModules {{
+          specialArgs = {{ inherit pkgs; }};
+          modules = [
+            ({{ lib, ... }}: {{
+              options = {{
+                assertions = lib.mkOption {{ default = [ ]; }};
+                warnings = lib.mkOption {{ default = [ ]; }};
+                systemd.services = lib.mkOption {{ default = {{ }}; }};
+                networking.firewall.allowedTCPPorts = lib.mkOption {{ default = [ ]; }};
+              }};
+            }})
+            nxMod
+            {{
+              services.xmsg.instances.main.federation = {{
+                enable = false;
+                fleet = {{ value = import {fleet_path}; self = "team.hub"; }};
+              }};
+            }}
+          ];
+        }};
+      in builtins.deepSeq res.config.assertions "ok"
+      """
+      for label, e in [("HM", hm_expr), ("NixOS", nx_expr)]:
+          p = subprocess.run(
+              ["nix-instantiate", "--eval", "--strict", "--store", "dummy://", "--expr", e],
+              capture_output=True, text=True,
+          )
+          assert p.returncode != 0, f"{label} enable=false unexpectedly succeeded"
+          assert "federation.fleet needs federation.enable" in p.stderr, (
+              f"{label} enable=false missing expected message in stderr: {p.stderr}"
+          )
+      PY
+
+      echo "fleet-check-complete:${toString (builtins.length allChecks)}" > $out
+    ''
 else
   builtins.throw "fleet check failed:\n${
     lib.concatMapStringsSep "\n" (c: "  FAIL ${c.name}") failures

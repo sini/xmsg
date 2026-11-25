@@ -292,6 +292,14 @@ let
     };
   };
 
+  addr443Fleet = baseFleet // {
+    nodes = baseFleet.nodes // {
+      "bob.desk" = baseFleet.nodes."bob.desk" // {
+        address = "bob.example.org:443";
+      };
+    };
+  };
+
   noMailboxLeafFleet = baseFleet // {
     nodes = baseFleet.nodes // {
       "extra.leaf" = {
@@ -589,6 +597,18 @@ let
             "hub"
             "deny"
           ];
+        } == [ ];
+    }
+    {
+      name = "u2 green: hostOwned entry with leaf=true passes V6 (M05)";
+      ok =
+        cf {
+          file = aliceLaptopGold // {
+            "ext.host" = extHost // {
+              leaf = true;
+            };
+          };
+          hostOwned = [ "ext.host" ];
         } == [ ];
     }
   ];
@@ -1531,6 +1551,65 @@ let
               };
             };
           })) true
+        )).success;
+    }
+    {
+      name = "u2 fault HM V5: address :443 without listenPort and federation.port=7788 (M01)";
+      ok = hasInfixAny "must equal fleet node" (
+        failedMsgs (hmFleetBase {
+          self = "bob.desk";
+          port = 7788;
+          fleetVal = addr443Fleet;
+        })
+      );
+    }
+    {
+      name = "u2 fault NixOS V5: address :443 without listenPort and federation.port=7788 (M02)";
+      ok = hasInfixAny "must equal fleet node" (
+        failedMsgs (nixosFleetBase {
+          self = "bob.desk";
+          port = 7788;
+          fleetVal = addr443Fleet;
+        })
+      );
+    }
+    {
+      name = "u2 fault V2: hostOwned name equal to non-derived fleet node (M03)";
+      ok = hasInfixAny "V2" (cfMsgs {
+        self = "alice.laptop";
+        file = aliceLaptopGold // {
+          "gateway.mcp" = extHost;
+        };
+        hostOwned = [ "gateway.mcp" ];
+      });
+    }
+    {
+      name = "u2 fault V2: hostOwned identity equal to non-derived fleet node (M04)";
+      ok = hasInfixAny "V2" (cfMsgs {
+        self = "alice.laptop";
+        file = aliceLaptopGold // {
+          "ext.host" = extHost // {
+            identities = [ "spiffe://example.org/ns/mcp/sa/gateway" ];
+          };
+        };
+        hostOwned = [ "ext.host" ];
+      });
+    }
+    {
+      name = "u2 fault HM observeCollector.fleet: non-collector self throws (M17)";
+      ok =
+        !(builtins.tryEval (
+          builtins.deepSeq
+            (evalHM {
+              programs.xmsg = {
+                enable = true;
+                observeCollector.fleet = {
+                  value = baseFleet;
+                  self = "alice.hub";
+                };
+              };
+            }).programs.xmsg.observeCollector.config.sources
+            true
         )).success;
     }
   ];
