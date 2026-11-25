@@ -32,12 +32,13 @@ flowchart LR
   H --- R["review-bot<br/>(service on the hub)"]
 ```
 
-- **The laptops use outbound links.** Each laptop's entry for the hub sets `"dial": "outbound"`.
-  The laptop connects to the hub and long-polls its mailbox there, so it needs no open port.
+- **The laptops run in leaf mode.** Leaf mode is outbound-only (`--leaf`); each laptop's peers
+  file names only the hub, marked `"default_route": true`, and the laptop connects out to the hub
+  and long-polls its mailbox without needing an open port.
 - **The hub keeps a mailbox per laptop.** The hub's entry for each laptop sets `"leaf": true`.
   Messages for that laptop wait in the hub's durable `peer_mailbox` until the laptop pulls them.
-- **The hub forwards.** A laptop cannot dial another laptop, so the hub passes messages between
-  them, and to the build box. Forwarding is one hop at most: laptop to hub to destination.
+- **Mailboxes and forwarding.** The hub delivers laptop-to-laptop mail into the recipient's
+  mailbox, and forwards a laptop's jobs to the build box (one hop).
 - **The build box is dialable.** The hub connects to it directly.
 
 ## Identity: use a team CA
@@ -108,7 +109,7 @@ The operator compares these values with Alice's intended terminal through an
 independent trusted channel. Sign-in alone is insufficient. To reject it, run
 `xmsg enroll-ca deny REQUEST_ID`. The deadline includes sign-in and approval and
 is at most 300 seconds from the CA's provider request. Restart or expiry requires
-a fresh request. After collection Alice starts her dial-out node:
+a fresh request. After collection Alice starts her leaf-mode node:
 
 ```sh
 xmsg serve --enroll-state ./alice-server-enroll \
@@ -313,7 +314,7 @@ can address it by that label on bob's node. A label resolves only when exactly o
 alice's Claude Code session, on alice.laptop
   › send(to="reviewer@bob.laptop", text="Please review branch fix-lexer. Focus on empty input.")
     → alice.laptop has no direct route to bob.laptop, so the send goes to team.hub
-    → team.hub forwards it once, into bob.laptop's mailbox
+    → team.hub queues it in bob.laptop's mailbox
     outcome: queued · message_id 01JDA7…
 
 bob's Codex session, on bob.laptop, after bob's node pulls its mailbox
@@ -327,11 +328,11 @@ alice's Claude Code session, pushed into its inbox
 ```
 
 The send's `outcome` reports what happened to the message, not the answer. Here it is `queued`:
-the hub holds it in bob's mailbox until bob's node pulls it. The reply is separate. bob's node sends it to the hub. The hub recorded the forwarded message, and it stores the reply
+the hub holds it in bob's mailbox until bob's node pulls it. The reply is separate. bob's node sends it to the hub. The hub recorded the queued message, and it stores the reply
 for alice's node. Nothing can dial alice's node either. Thus alice's node pulls its hub mailbox,
 and it also polls the replies to its sent messages. It pushes the answer into her session's
 inbox. The queued
-forward and queued return are both covered by the outbound-link gate. bob's session sees `id@alice.laptop` as the sender. The hub attests the node that the message
+delivery and queued return are both covered by the hub's mailbox and reply rules. bob's session sees `id@alice.laptop` as the sender. The hub attests the node that the message
 came from. It uses that node's certificate.
 
 ## Flow 2: borrow more resources
@@ -414,10 +415,10 @@ See [delivery, queueing and replies](/concepts/replies/) and
 
 | Hop | Configured on | In the entry for | Needs in `allow` |
 |---|---|---|---|
-| A laptop sends to the hub | the hub | that laptop | `send`, `reply`, `inbox` |
+| A laptop sends to the hub | the hub | that laptop | `send`, `reply` |
 | A laptop lists the hub's recipients | the hub | that laptop | `list` |
 | The hub forwards for a laptop | the hub | the sending laptop | `forward` |
-| A laptop accepts forwarded messages | each laptop | the hub | `relayed` |
+| A laptop collects its mail | the hub | that laptop | `leaf: true` |
 | The build box accepts forwarded jobs | the build box | the hub | `relayed` |
 
 To stop something, remove it from `allow`. Two more fields narrow it further:
