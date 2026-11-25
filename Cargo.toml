@@ -621,7 +621,7 @@ required-features = ["daemon"]
 [[test]]
 name = "pairing_ceremony"
 path = "tests/pairing_ceremony.rs"
-required-features = ["daemon", "test-hooks"]
+required-features = ["daemon"]
 
 [[test]]
 name = "test_write_exe_guard"

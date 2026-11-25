@@ -189,8 +189,8 @@ impl Fixture {
     fn assert_read_only_requests(&self) {
         let requests = self.requests.lock().unwrap();
         assert!(!requests.is_empty(), "health detector never ran");
-        assert_eq!(requests.len() % 4, 0, "incomplete doctor request sequence");
-        for invocation in requests.as_chunks::<4>().0 {
+        assert_eq!(requests.len() % 5, 0, "incomplete doctor request sequence");
+        for invocation in requests.as_chunks::<5>().0 {
             let mut actual = invocation.iter().map(String::as_str).collect::<Vec<_>>();
             actual.sort_unstable();
             assert_eq!(
@@ -199,6 +199,7 @@ impl Fixture {
                     "GET /healthz HTTP/1.1",
                     "GET /v1/diagnostics/enrollment HTTP/1.1",
                     "GET /v1/diagnostics/federation HTTP/1.1",
+                    "GET /v1/diagnostics/pairing HTTP/1.1",
                     "GET /v1/recipients?read_only=true&liveness=true HTTP/1.1",
                 ],
                 "doctor retried or used a mutating route"
@@ -694,7 +695,7 @@ fn unsupported_or_cold_process_source_warns_without_live_listing_fallback() {
         fixture.assert_read_only_requests();
         assert_eq!(
             fixture.requests.lock().unwrap().len(),
-            4,
+            5,
             "doctor retried through another route"
         );
     }
@@ -841,7 +842,7 @@ fn unavailable_federation_source_never_falls_back_to_direct_peer_dials() {
             "doctor dialled a peer itself"
         );
         fixture.assert_read_only_requests();
-        assert_eq!(fixture.requests.lock().unwrap().len(), 4);
+        assert_eq!(fixture.requests.lock().unwrap().len(), 5);
     }
 }
 

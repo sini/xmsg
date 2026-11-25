@@ -295,6 +295,7 @@ fn q2_14_peers_file_rejects_deferred_preference_keys_in_both_forms() {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test]
 async fn q2_15c2_startup_cancel_failure_blocks_ceremonies_allows_revocation_and_recovers() {
     let dir = TempDir::new().unwrap();
