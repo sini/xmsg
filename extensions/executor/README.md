@@ -90,6 +90,16 @@ From the repository root:
 extensions/executor/scripts/check.sh
 ```
 
-The check script builds the candidate scratch daemon outside cargo-test and records its binary hash/version, then supplies it explicitly to the required real-bus fixture. It does not install a service or launch a real harness. One ignored libtest helper is a subprocess entrypoint, not a qualification case: parent tests actually execute and reap it. The census distinguishes that exact helper from functional tests and rejects other ignored tests.
+The check script builds the candidate scratch daemon outside cargo-test and records its binary hash/version, then supplies it explicitly to the required real-bus fixture. It does not install a service or launch a real harness. Two ignored libtest helpers are subprocess entrypoints, not qualification cases: parent tests actually execute and reap them. The census distinguishes those exact helpers from functional tests and rejects other ignored tests.
 
 Pinned ACP schema basis: [RequestId and v1 schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/fa50fde1ac75ccd22fafff69c3e0ec3562a4f30f/schema/v1/schema.json), [stdio transport](https://agentclientprotocol.com/protocol/v1/transports). This package makes no v2 or real-runtime support claim.
+
+The Executor contracts workflow registers all **33 runtime source faults** in
+`fixtures/runtime-mutants.json`: **66 RED/restored-GREEN arms** across six Ubuntu
+shards, derived from the registry rather than duplicated case lists. The unchanged
+`control_faults.py` controller checks fresh compiled nonces, source/artifact
+integrity and 11 refusal/cleanup controls. A completion job requires every arm,
+checks its raw log/compiler hashes and rejects incomplete or tampered receipts.
+Stdout and stderr are retained separately so child diagnostics cannot corrupt the
+strict functional-test census. These are fake-only CI checks: no adapter tuple,
+caller qualification or native capability becomes eligible from them.

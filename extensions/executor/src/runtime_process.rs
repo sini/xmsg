@@ -273,10 +273,11 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
             }
         ),
     };
+    let hello_deadline = expires.min(Instant::now() + Duration::from_secs(2));
     crate::supervisor::frame_until(
         &mut startup,
-        &session.hello()?,
-        expires.min(Instant::now() + Duration::from_secs(2)),
+        &session.hello(hello_deadline)?,
+        hello_deadline,
     )?;
     drop(startup);
     #[cfg(test)]
@@ -291,10 +292,10 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
             session.journal.native_transport_unknown(&session.binding)?;
             return Err(SupervisorError::Unknown);
         }
-        if session
-            .journal
-            .administrative_stop_needed(&session.binding.identity)?
-        {
+        let authority_deadline = expires.min(Instant::now() + Duration::from_secs(2));
+        if retry_metadata(&mut session.journal, authority_deadline, |journal| {
+            journal.administrative_stop_needed(&manifest.identity)
+        })? {
             let _ = crate::supervisor::terminate_owned_backend_group(&mut session.backend);
             session.journal.native_transport_unknown(&session.binding)?;
             return Err(SupervisorError::Unknown);
@@ -367,13 +368,17 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
             if let Ok((stream, _)) =
                 xmsg::client::caller_attribution::with_fd_inheritance_gate(|| listener.accept())
             {
-                if session.control(stream).unwrap_or(false) {
-                    return Err(SupervisorError::Unknown);
+                match session.control(stream, authority_deadline) {
+                    Ok(true) => return Err(SupervisorError::Unknown),
+                    Err(SupervisorError::Journal(ErrorCode::JournalBusy)) => {
+                        return Err(ErrorCode::JournalBusy.into())
+                    }
+                    _ => {}
                 }
             }
         }
-        session.schedule()?;
-        session.start_content()?;
+        session.schedule(authority_deadline)?;
+        session.start_content(authority_deadline)?;
     }
 }
 
@@ -651,18 +656,21 @@ impl RuntimeContent {
 }
 impl Session {
     #[cfg(test)]
-    fn refresh_fixture_callers(&self) -> Result<(), SupervisorError> {
+    fn refresh_fixture_callers(&mut self, deadline: Instant) -> Result<(), SupervisorError> {
         if self.refresh_caller_fixtures {
-            self.journal
-                .runtime_policy
-                .as_deref()
-                .ok_or(ErrorCode::NotSupported)?
-                .callers
-                .restore_fixture(&self.journal.db)?;
+            retry_metadata(&mut self.journal, deadline, |journal| {
+                journal
+                    .runtime_policy
+                    .as_deref()
+                    .ok_or(ErrorCode::NotSupported)?
+                    .callers
+                    .restore_fixture(&journal.db)
+            })?;
         }
         Ok(())
     }
-    fn start_content(&mut self) -> Result<(), SupervisorError> {
+
+    fn start_content(&mut self, deadline: Instant) -> Result<(), SupervisorError> {
         let Some(content) = &mut self.content else {
             return Ok(());
         };
@@ -670,12 +678,17 @@ impl Session {
             let _ = service.status();
             return Ok(());
         }
-        let binding = match self.journal.proxy_binding(&self.binding.identity) {
+        let identity = &self.binding.identity;
+        let binding = match retry_metadata(&mut self.journal, deadline, |journal| {
+            journal.proxy_binding(identity)
+        }) {
             Ok(binding) => binding,
-            Err(ErrorCode::StaleGeneration) => return Ok(()),
-            Err(code) => return Err(code.into()),
+            Err(SupervisorError::Journal(ErrorCode::StaleGeneration)) => return Ok(()),
+            Err(error) => return Err(error),
         };
-        let mut journal = Journal::open_existing(&content.journal)?;
+        let mut journal = retry_metadata(&mut self.journal, deadline, |_| {
+            Journal::open_existing(&content.journal)
+        })?;
         journal.runtime_policy = self.journal.runtime_policy.clone();
         let store = crate::content_admission::BoundContentJournal::new(
             journal,
@@ -689,20 +702,21 @@ impl Session {
         );
         Ok(())
     }
-    fn hello(&mut self) -> Result<SupervisorHello, SupervisorError> {
-        let cursor: i64 = self
-            .journal
-            .db
-            .query_row(
-                "SELECT cursor FROM executions WHERE session_id=?1 AND generation=?2",
-                rusqlite::params![
-                    self.binding.identity.session_id,
-                    i64::try_from(self.binding.identity.generation)
-                        .map_err(|_| ErrorCode::Storage)?
-                ],
-                |r| r.get(0),
-            )
-            .map_err(|_| ErrorCode::Storage)?;
+    fn hello(&mut self, deadline: Instant) -> Result<SupervisorHello, SupervisorError> {
+        let identity = &self.binding.identity;
+        let cursor: i64 = retry_metadata(&mut self.journal, deadline, |journal| {
+            journal
+                .db
+                .query_row(
+                    "SELECT cursor FROM executions WHERE session_id=?1 AND generation=?2",
+                    rusqlite::params![
+                        identity.session_id,
+                        i64::try_from(identity.generation).map_err(|_| ErrorCode::Storage)?
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(crate::journal::metadata_error)
+        })?;
         Ok(SupervisorHello {
             identity: self.binding.identity.clone(),
             event_cursor: u64::try_from(cursor).map_err(|_| ErrorCode::Storage)?,
@@ -818,22 +832,32 @@ impl Session {
         )?;
         Ok(())
     }
-    fn schedule(&mut self) -> Result<(), SupervisorError> {
+    fn schedule(&mut self, deadline: Instant) -> Result<(), SupervisorError> {
         #[cfg(test)]
-        self.refresh_fixture_callers()?;
-        let running:bool=self.journal.db.query_row("SELECT EXISTS(SELECT 1 FROM executions WHERE session_id=?1 AND generation=?2 AND state='running')",rusqlite::params![self.binding.identity.session_id,i64::try_from(self.binding.identity.generation).map_err(|_|ErrorCode::Storage)?],|r|r.get(0)).map_err(|_|ErrorCode::Storage)?;
+        self.refresh_fixture_callers(deadline)?;
+        let identity = self.binding.identity.clone();
+        let epoch = self.binding.transport_epoch.clone();
+        let running: bool = retry_metadata(&mut self.journal, deadline, |journal| {
+            journal.db.query_row("SELECT EXISTS(SELECT 1 FROM executions WHERE session_id=?1 AND generation=?2 AND state='running')",rusqlite::params![identity.session_id,i64::try_from(identity.generation).map_err(|_|ErrorCode::Storage)?],|r|r.get(0)).map_err(crate::journal::metadata_error)
+        })?;
         if !running {
             return Ok(());
         }
-        let decision:Option<String>=self.journal.db.query_row("SELECT approval_id FROM native_pending WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state='decision_recorded' ORDER BY rowid LIMIT 1",rusqlite::params![self.binding.identity.session_id,i64::try_from(self.binding.identity.generation).map_err(|_|ErrorCode::Storage)?,self.binding.transport_epoch],|r|r.get(0)).optional().map_err(|_|ErrorCode::Storage)?;
+        let decision: Option<String> = retry_metadata(&mut self.journal, deadline, |journal| {
+            journal.db.query_row("SELECT approval_id FROM native_pending WHERE session_id=?1 AND generation=?2 AND transport_epoch=?3 AND state='decision_recorded' ORDER BY rowid LIMIT 1",rusqlite::params![identity.session_id,i64::try_from(identity.generation).map_err(|_|ErrorCode::Storage)?,epoch],|r|r.get(0)).optional().map_err(crate::journal::metadata_error)
+        })?;
         if let Some(id) = decision {
             let _ = self.decide(&id);
         }
-        let next:Option<i64>=self.journal.db.query_row("SELECT a.id FROM admissions a LEFT JOIN native_operations n ON n.admission_id=a.id WHERE n.admission_id IS NULL AND (a.session_id=?1 OR json_extract(a.target,'$.session_id')=?1) AND a.verb IN('\"dispatch\"','\"send\"','\"steer\"','\"interrupt\"') ORDER BY CASE a.verb WHEN '\"interrupt\"' THEN 0 WHEN '\"steer\"' THEN 1 ELSE 2 END,a.id LIMIT 1",[&self.binding.identity.session_id],|r|r.get(0)).optional().map_err(|_|ErrorCode::Storage)?;
+        let next: Option<i64> = retry_metadata(&mut self.journal, deadline, |journal| {
+            journal.db.query_row("SELECT a.id FROM admissions a LEFT JOIN native_operations n ON n.admission_id=a.id WHERE n.admission_id IS NULL AND (a.session_id=?1 OR json_extract(a.target,'$.session_id')=?1) AND a.verb IN('\"dispatch\"','\"send\"','\"steer\"','\"interrupt\"') ORDER BY CASE a.verb WHEN '\"interrupt\"' THEN 0 WHEN '\"steer\"' THEN 1 ELSE 2 END,a.id LIMIT 1",[&identity.session_id],|r|r.get(0)).optional().map_err(crate::journal::metadata_error)
+        })?;
         if let Some(id) = next {
             let _ = self.journal.queue_native(id, &unix_now);
         }
-        let queued:Option<i64>=self.journal.db.query_row("SELECT n.admission_id FROM native_operations n JOIN admissions a ON a.id=n.admission_id WHERE n.session_id=?1 AND n.generation=?2 AND n.transport_epoch=?3 AND n.state='queued' ORDER BY CASE a.verb WHEN '\"interrupt\"' THEN 0 WHEN '\"steer\"' THEN 1 ELSE 2 END,n.admission_id LIMIT 1",rusqlite::params![self.binding.identity.session_id,i64::try_from(self.binding.identity.generation).map_err(|_|ErrorCode::Storage)?,self.binding.transport_epoch],|r|r.get(0)).optional().map_err(|_|ErrorCode::Storage)?;
+        let queued: Option<i64> = retry_metadata(&mut self.journal, deadline, |journal| {
+            journal.db.query_row("SELECT n.admission_id FROM native_operations n JOIN admissions a ON a.id=n.admission_id WHERE n.session_id=?1 AND n.generation=?2 AND n.transport_epoch=?3 AND n.state='queued' ORDER BY CASE a.verb WHEN '\"interrupt\"' THEN 0 WHEN '\"steer\"' THEN 1 ELSE 2 END,n.admission_id LIMIT 1",rusqlite::params![identity.session_id,i64::try_from(identity.generation).map_err(|_|ErrorCode::Storage)?,epoch],|r|r.get(0)).optional().map_err(crate::journal::metadata_error)
+        })?;
         if let Some(id) = queued {
             let _ = self.submit(id);
         }
@@ -855,13 +879,16 @@ impl Session {
         }
         Ok(())
     }
-    fn control(&mut self, mut stream: UnixStream) -> Result<bool, SupervisorError> {
+    fn control(
+        &mut self,
+        mut stream: UnixStream,
+        deadline: Instant,
+    ) -> Result<bool, SupervisorError> {
         #[cfg(test)]
-        self.refresh_fixture_callers()?;
+        self.refresh_fixture_callers(deadline)?;
         if crate::unix::peer(&stream)?.uid != xmsg::client::current_uid() {
             return Err(ErrorCode::PeerUid.into());
         }
-        let deadline = self.expires.min(Instant::now() + Duration::from_secs(2));
         let request: SupervisorRequest = crate::supervisor::read_frame_until(&stream, deadline)?;
         let identity = match &request {
             SupervisorRequest::Attach { identity }
@@ -902,7 +929,7 @@ impl Session {
                 self.decide(&approval_id)?;
             }
             SupervisorRequest::ReadEvents { after, max, .. } => {
-                let mut hello = self.hello()?;
+                let mut hello = self.hello(deadline)?;
                 if max == 0 || max > 32 || after > hello.event_cursor {
                     return Err(SupervisorError::Protocol);
                 }
@@ -938,7 +965,7 @@ impl Session {
             }
             SupervisorRequest::Attach { .. } => {}
         }
-        let mut hello = self.hello()?;
+        let mut hello = self.hello(deadline)?;
         if stop {
             hello.running = false;
         }
@@ -1026,6 +1053,71 @@ fn native_descriptor_flags(use_close_range: bool, maximum: libc::c_int) -> std::
         }
     }
     Ok(())
+}
+
+fn retry_metadata<T>(
+    journal: &mut Journal,
+    deadline: Instant,
+    mut read: impl FnMut(&mut Journal) -> Result<T, ErrorCode>,
+) -> Result<T, SupervisorError> {
+    #[cfg(test)]
+    let mut notified = false;
+    let mut was_busy = false;
+    loop {
+        if was_busy && Instant::now() >= deadline {
+            return Err(ErrorCode::JournalBusy.into());
+        }
+        match read(journal) {
+            Err(ErrorCode::JournalBusy) => {
+                was_busy = true;
+                #[cfg(test)]
+                if !notified && Instant::now() < deadline {
+                    notified = fixture_metadata_busy(journal, deadline)?;
+                }
+                if Instant::now() >= deadline {
+                    return Err(ErrorCode::JournalBusy.into());
+                }
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(10)),
+                );
+            }
+            result => return result.map_err(Into::into),
+        }
+    }
+}
+
+#[cfg(test)]
+fn fixture_metadata_busy(journal: &Journal, deadline: Instant) -> Result<bool, SupervisorError> {
+    use std::io::{Read, Write};
+    let Some(program) = journal
+        .runtime_policy
+        .as_deref()
+        .and_then(|policy| policy.configuration.programs.first())
+    else {
+        return Ok(false);
+    };
+    if program.arguments.get(3).map(String::as_str) != Some("journal-contention") {
+        return Ok(false);
+    }
+    let trace = program.arguments.get(1).ok_or(SupervisorError::Protocol)?;
+    if !std::path::Path::new(trace)
+        .with_extension("writer-armed")
+        .exists()
+    {
+        return Ok(false);
+    }
+    let destination = program.arguments.get(4).ok_or(SupervisorError::Protocol)?;
+    let mut stream = UnixStream::connect(destination)?;
+    let mut bounded = DeadlineIo::new(&mut stream, deadline)?;
+    bounded.write_all(b"B")?;
+    let mut release = [0];
+    bounded.read_exact(&mut release)?;
+    if release != *b"R" {
+        return Err(SupervisorError::Protocol);
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

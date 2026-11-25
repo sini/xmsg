@@ -180,7 +180,7 @@ impl CallerAuthority {
     #[cfg(test)]
     pub(crate) fn restore_fixture(&self, db: &rusqlite::Connection) -> Result<(), ErrorCode> {
         let rows = {
-            let mut query=db.prepare("SELECT a.id,a.principal,a.payload,c.receipt FROM admissions a JOIN caller_receipts c ON c.admission_id=a.id").map_err(storage)?;
+            let mut query=db.prepare("SELECT a.id,a.principal,a.payload,c.receipt FROM admissions a JOIN caller_receipts c ON c.admission_id=a.id").map_err(crate::journal::metadata_error)?;
             let rows = query
                 .query_map([], |r| {
                     Ok((
@@ -190,9 +190,9 @@ impl CallerAuthority {
                         r.get::<_, String>(3)?,
                     ))
                 })
-                .map_err(storage)?
+                .map_err(crate::journal::metadata_error)?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(storage)?;
+                .map_err(crate::journal::metadata_error)?;
             rows
         };
         let mut state = self.state.lock().map_err(storage)?;

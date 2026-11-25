@@ -52,6 +52,8 @@ pub enum ErrorCode {
     NativeDescriptorLimitUnsupported,
     #[error("native_descriptor_outside_limit")]
     NativeDescriptorOutsideLimit,
+    #[error("journal_busy")]
+    JournalBusy,
     #[error("invalid_configuration")]
     InvalidConfiguration,
     #[error("unknown_target")]

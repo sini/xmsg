@@ -39,8 +39,17 @@ jobs:
           "$XMSG_EXECUTOR_FIXTURE_DAEMON" --version
           "$XMSG_EXECUTOR_FIXTURE_PYTHON" --version
           manifest=extensions/executor/Cargo.toml
-          cargo +1.88 test --manifest-path "$manifest" --locked -- --list > .artifacts/executor/list.log
-          cargo +1.88 test --manifest-path "$manifest" --locked -- --test-threads=1 2>&1 | tee .artifacts/executor/tests.log
+          run_captured() {
+            local capture_base="$1"
+            shift
+            local capture_status=0
+            "$@" > "$capture_base.log" 2> "$capture_base.stderr.log" || capture_status=$?
+            cat "$capture_base.log"
+            cat "$capture_base.stderr.log" >&2
+            return "$capture_status"
+          }
+          run_captured .artifacts/executor/list cargo +1.88 test --manifest-path "$manifest" --locked -- --list
+          run_captured .artifacts/executor/tests cargo +1.88 test --manifest-path "$manifest" --locked -- --test-threads=1
           platform=linux
           if [[ "$RUNNER_OS" == macOS ]]; then platform=darwin; fi
           python3 extensions/executor/scripts/census.py --self-test
@@ -53,3 +62,125 @@ jobs:
           name: executor-contracts-${{ runner.os }}
           path: .artifacts/executor
           if-no-files-found: error
+  runtime-source-faults:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 8
+      SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install declared minimum toolchain
+        run: rustup toolchain install 1.88 --profile minimal
+      - name: Prefetch public dependencies and run the reviewed fake-only source controller
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/executor-runtime/shard-${{ matrix.shard }}"
+          mkdir -p "$receipt"
+          temporary=$(mktemp -d "/tmp/xmsg-runtime-${{ matrix.shard }}.XXXXXX")
+          mkdir -p "$temporary/home" "$temporary/tmp" "$receipt/cargo"
+          clean=(env -i "PATH=$PATH" "HOME=$temporary/home" "TMPDIR=$temporary/tmp"
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" "RUSTUP_TOOLCHAIN=1.88"
+            "CARGO_HOME=$receipt/cargo" "CARGO_BUILD_JOBS=8" "CI=true"
+            "RUNNER_TRACKING_ID=${RUNNER_TRACKING_ID:-}")
+          "${clean[@]}" cargo fetch --locked
+          "${clean[@]}" cargo fetch --locked --manifest-path extensions/executor/Cargo.toml
+          "${clean[@]}" CARGO_NET_OFFLINE=true XMSG_BUILD_REVISION="$SOURCE_HEAD" \
+            CARGO_TARGET_DIR="$receipt/target-daemon" cargo build --locked -j4 \
+            --no-default-features --features daemon --bin xmsg --message-format=json \
+            > "$receipt/daemon-build.jsonl" 2> "$receipt/daemon-build.stderr"
+          "${clean[@]}" CARGO_NET_OFFLINE=true CI_EXPECTED_HEAD="$SOURCE_HEAD" \
+            CI_RUNTIME_SHARD="${{ matrix.shard }}" CI_RUNTIME_RECEIPT="$receipt" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          root = Path.cwd()
+          receipt = Path(os.environ['CI_RUNTIME_RECEIPT'])
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert head == os.environ['CI_EXPECTED_HEAD']
+          assert not subprocess.check_output(['git', 'status', '--porcelain'])
+          assert not any(key.startswith(('GITHUB', 'ACTIONS')) or 'TOKEN' in key or key.endswith('API_KEY') for key in os.environ)
+          manifest = root / 'extensions/executor/fixtures/runtime-mutants.json'
+          runner = root / 'extensions/executor/scripts/control_faults.py'
+          cases = json.loads(manifest.read_bytes())
+          identifiers = [case['id'] for case in cases]
+          assert len(identifiers) == len(set(identifiers)) and len(identifiers) >= 6
+          assert all(re.fullmatch(r'[a-z][a-z0-9-]*', name) for name in identifiers)
+          shard = int(os.environ['CI_RUNTIME_SHARD'])
+          selected = identifiers[shard::6]
+          assert 0 <= shard < 6 and selected
+          compiler = [json.loads(line) for line in (receipt / 'daemon-build.jsonl').read_text().splitlines() if line.startswith('{')]
+          artifacts = [row for row in compiler if row.get('reason') == 'compiler-artifact' and row.get('executable') and row.get('target', {}).get('kind') == ['bin'] and row['target']['name'] == 'xmsg']
+          assert len(artifacts) == 1 and artifacts[0]['profile']['test'] is False and 'daemon' in artifacts[0]['features'] and 'test-hooks' not in artifacts[0]['features']
+          daemon = Path(artifacts[0]['executable']).resolve(strict=True)
+          python = Path(sys.executable).resolve(strict=True)
+          digest = lambda data: hashlib.sha256(data).hexdigest()
+          fixtures = {'XMSG_EXECUTOR_FIXTURE_DAEMON': {'file': str(daemon), 'sha256': digest(daemon.read_bytes())},
+                      'XMSG_EXECUTOR_FIXTURE_PYTHON': {'file': str(python), 'sha256': digest(python.read_bytes())}}
+          metadata = {'head': head, 'shard': shard, 'cases': selected, 'manifest_sha256': digest(manifest.read_bytes()),
+                      'runner_sha256': digest(runner.read_bytes()), 'fixture_binary_inputs': fixtures,
+                      'daemon_compiler_json_sha256': digest((receipt / 'daemon-build.jsonl').read_bytes()),
+                      'rust': subprocess.check_output(['rustc', '--version'], text=True).strip(),
+                      'cargo': subprocess.check_output(['cargo', '--version'], text=True).strip(),
+                      'python': sys.version, 'evidence_class': 'fake_only', 'test_environment_keys': sorted(os.environ)}
+          (receipt / 'shard-receipt.json').write_text(json.dumps(metadata, indent=2) + '\n')
+          environment = {**os.environ, **{key: value['file'] for key, value in fixtures.items()},
+                         'XMSG_EXECUTOR_FIXTURE_DAEMON_SHA256': fixtures['XMSG_EXECUTOR_FIXTURE_DAEMON']['sha256']}
+          command = [sys.executable, str(runner), '--manifest', str(manifest), '--evidence', str(receipt / 'proof')]
+          for name in selected:
+              command.extend(['--case', name])
+          subprocess.run(command, env=environment, check=True)
+          assert not subprocess.check_output(['git', 'status', '--porcelain'])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: executor-runtime-shard-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/executor-runtime/shard-${{ matrix.shard }}/shard-receipt.json
+            ${{ runner.temp }}/executor-runtime/shard-${{ matrix.shard }}/daemon-build.jsonl
+            ${{ runner.temp }}/executor-runtime/shard-${{ matrix.shard }}/daemon-build.stderr
+            ${{ runner.temp }}/executor-runtime/shard-${{ matrix.shard }}/proof
+            !${{ runner.temp }}/executor-runtime/shard-${{ matrix.shard }}/proof/variants/**
+          if-no-files-found: error
+  runtime-source-completion:
+    needs: runtime-source-faults
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: executor-runtime-shard-*
+          path: ${{ runner.temp }}/executor-runtime-shards
+      - name: Require all registered cases and refusal controls
+        env:
+          SOURCE_RESULT: ${{ needs.runtime-source-faults.result }}
+        run: |
+          test "$SOURCE_RESULT" = success
+          python3 extensions/executor/scripts/runtime_faults_completion.py \
+            --artifacts "$RUNNER_TEMP/executor-runtime-shards" \
+            --head '${{ github.event.pull_request.head.sha || github.sha }}' \
+            --output "$RUNNER_TEMP/executor-runtime-completion.json" --refusal-controls
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: executor-runtime-completion
+          path: ${{ runner.temp }}/executor-runtime-completion.json
+          if-no-files-found: warn

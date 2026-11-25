@@ -569,3 +569,41 @@ fn fixture_restore_refuses_missing_revoked_expired_or_unprotected_record() {
         Err(MissingTrustProperty::ProtectedPolicyStore)
     ));
 }
+
+#[test]
+fn initial_lookup_requires_the_exact_caller_tuple() {
+    let provider = eligible();
+    let qualified = provider.qualify(&context(), &runtime(), 1, 100);
+    assert!(
+        qualified.is_ok(),
+        "exact qualified caller tuple was ignored"
+    );
+    for axis in 0..11 {
+        let mut facts = runtime();
+        match axis {
+            0 => facts.caller_pin_id = "other-pin".into(),
+            1 => facts.caller_runtime_version = "other-version".into(),
+            2 => facts.caller_artifact_sha256 = "2".repeat(64),
+            3 => facts.caller_mode = "other-mode".into(),
+            4 => facts.operating_system = "other-os".into(),
+            5 => facts.architecture = "other-architecture".into(),
+            6 => facts.host = "other-host".into(),
+            7 => facts.kernel = "other-kernel".into(),
+            8 => facts.caller_configuration_sha256 = "4".repeat(64),
+            9 => facts.caller_protocol = "other-protocol".into(),
+            _ => facts.executor_sha256 = "1".repeat(64),
+        }
+        assert!(
+            provider.qualify(&context(), &facts, 1, 100).is_err(),
+            "unqualified caller tuple was accepted: axis {axis}"
+        );
+    }
+    for source in ["claude", "agy"] {
+        let mut changed = context();
+        changed.scope = checked_scope(&stamp(source), &"b".repeat(32), &"c".repeat(64)).unwrap();
+        assert!(
+            provider.qualify(&changed, &runtime(), 1, 100).is_err(),
+            "unqualified caller tuple was accepted: harness {source}"
+        );
+    }
+}

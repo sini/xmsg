@@ -298,5 +298,35 @@
     "test_module": "runtime_process::descriptor_tests",
     "test_file": "extensions/executor/src/runtime_process.rs",
     "assertion": "native exec inherited the deliberately unowned socket"
+  },
+  {
+    "id": "runtime-unqualified-caller-tuple",
+    "file": "extensions/executor/src/caller_policy.rs",
+    "needle": ".filter(|record| record.matches(context, runtime, policy_revision, now));",
+    "replacement": ".filter(|_| true);",
+    "test": "initial_lookup_requires_the_exact_caller_tuple",
+    "test_module": "caller_policy::tests",
+    "test_file": "extensions/executor/src/caller_policy_tests.rs",
+    "assertion": "unqualified caller tuple was accepted"
+  },
+  {
+    "id": "runtime-qualified-caller-tuple-ignored",
+    "file": "extensions/executor/src/caller_policy.rs",
+    "needle": ".filter(|record| record.matches(context, runtime, policy_revision, now));",
+    "replacement": ".filter(|_| false);",
+    "test": "initial_lookup_requires_the_exact_caller_tuple",
+    "test_module": "caller_policy::tests",
+    "test_file": "extensions/executor/src/caller_policy_tests.rs",
+    "assertion": "exact qualified caller tuple was ignored"
+  },
+  {
+    "id": "runtime-metadata-busy-fatal",
+    "file": "extensions/executor/src/runtime_process.rs",
+    "needle": "if Instant::now() >= deadline {",
+    "replacement": "if true || Instant::now() >= deadline {",
+    "test": "short_journal_writer_preserves_owned_runtime_and_reconnect",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs",
+    "assertion": "short metadata contention lost the same owned runtime"
   }
 ]

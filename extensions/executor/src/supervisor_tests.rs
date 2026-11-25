@@ -423,16 +423,86 @@ enum AcpScenario {
     Fairness,
     PrelaunchFailure,
     Reconnect,
+    WriterShort,
+    WriterHeld,
     UnsupportedRequest,
 }
 #[test]
 fn unsupported_native_request_gets_bounded_failure_without_human_or_terminal_execution() {
     real_acp_fixture(AcpScenario::UnsupportedRequest);
 }
+#[test]
+fn short_journal_writer_preserves_owned_runtime_and_reconnect() {
+    real_acp_fixture(AcpScenario::WriterShort);
+}
+#[test]
+fn held_journal_writer_has_bounded_unknown_without_native_replay() {
+    real_acp_fixture(AcpScenario::WriterHeld);
+}
+fn acp_lease_state(root: &Path, identity: &ExecutionIdentity) -> String {
+    let lease = root
+        .join(component(&identity.session_id, identity.generation))
+        .join("execution.lock");
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(lease)
+    {
+        Ok(file) => file,
+        Err(error) => return format!("open:{:?}", error.kind()),
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) }, 0);
+        "free".into()
+    } else {
+        format!("held:{:?}", std::io::Error::last_os_error().kind())
+    }
+}
+fn acp_failure_snapshot(
+    service: &ControlService,
+    trace: &Path,
+    runtime: &Path,
+    identity: &ExecutionIdentity,
+    elapsed: std::time::Duration,
+) -> serde_json::Value {
+    let journal = service.journal.lock().unwrap();
+    let rows = |sql: &str| -> serde_json::Value {
+        let result = (|| -> rusqlite::Result<Vec<String>> {
+            let mut statement = journal.db.prepare(sql)?;
+            let values = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(values)
+        })();
+        match result {
+            Ok(values) => serde_json::json!(values),
+            Err(error) => serde_json::json!({"error":error.to_string()}),
+        }
+    };
+    let raw = fs::read(trace).unwrap_or_default();
+    let methods: Vec<_> = String::from_utf8_lossy(&raw)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .map(|frame| serde_json::json!({"id":frame["id"],"method":frame["method"]}))
+        .collect();
+    serde_json::json!({"elapsed_ms":elapsed.as_millis(),"unix_now":crate::runtime_process::unix_now().ok(),
+        "lease":acp_lease_state(runtime,identity),"trace_bytes":raw.len(),"trace_methods":methods,
+        "executions":rows("SELECT session_id||':'||generation||':'||state||':'||cursor FROM executions ORDER BY admission_id"),
+        "sessions":rows("SELECT id||':'||generation||':'||state||':'||coalesce(active_turn,'-') FROM sessions ORDER BY id"),
+        "native_operations":rows("SELECT admission_id||':'||state||':'||coalesce(rpc_id,'-') FROM native_operations ORDER BY admission_id"),
+        "bindings":rows("SELECT session_id||':'||generation||':'||json_extract(binding,'$.expires_at') FROM native_bindings ORDER BY session_id")})
+}
 fn real_acp_fixture(scenario: AcpScenario) {
     let fairness = matches!(scenario, AcpScenario::Fairness);
     let prelaunch_failure = matches!(scenario, AcpScenario::PrelaunchFailure);
-    let reconnect = matches!(scenario, AcpScenario::Reconnect);
+    let reconnect = matches!(
+        scenario,
+        AcpScenario::Reconnect | AcpScenario::WriterShort | AcpScenario::WriterHeld
+    );
+    let writer_probe = matches!(scenario, AcpScenario::WriterShort | AcpScenario::WriterHeld);
+    let short_writer = matches!(scenario, AcpScenario::WriterShort);
+    let scenario_started = std::time::Instant::now();
     let unsupported = matches!(scenario, AcpScenario::UnsupportedRequest);
     use crate::runtime_config::{
         PinnedExecutable, ProgramConfig, RuntimeConfig, ServicePaths, WorkspaceConfig,
@@ -534,6 +604,16 @@ fn real_acp_fixture(scenario: AcpScenario) {
             account_home: None,
         },
     };
+    if writer_probe {
+        configuration.control.defaults[0]
+            .resolved
+            .budget
+            .worker_slots = 1;
+        configuration.programs[0].arguments.extend([
+            "journal-contention".into(),
+            buffer_path.to_string_lossy().into_owned(),
+        ]);
+    }
     if fairness {
         configuration.programs[0].arguments.extend([
             "fairness".into(),
@@ -831,11 +911,193 @@ fn real_acp_fixture(scenario: AcpScenario) {
         assert_eq!(started.identity.session_id, "session-4");
     }
     assert_eq!(started.state, ExecutionState::Running);
-    let mut prompt = accept_fixture(&barrier, "real ACP prompt effect").unwrap();
+    assert_eq!(
+        acp_lease_state(&runtime.root, &started.identity),
+        "held:WouldBlock",
+        "intended supervisor execution lease did not survive native exec"
+    );
+    let prompt_result = accept_fixture(&barrier, "real ACP prompt effect");
+    assert!(
+        prompt_result.is_ok(),
+        "first prompt failed: {:?}; snapshot={}",
+        prompt_result.as_ref().err(),
+        acp_failure_snapshot(
+            &service,
+            &trace,
+            &runtime.root,
+            &started.identity,
+            scenario_started.elapsed()
+        )
+    );
+    let mut prompt = prompt_result.unwrap();
     let mut reached = [0];
     prompt.read_exact(&mut reached).unwrap();
     assert_eq!(reached, [b'P']);
-    if reconnect {
+    if writer_probe {
+        let before = acp_failure_snapshot(
+            &service,
+            &trace,
+            &runtime.root,
+            &started.identity,
+            scenario_started.elapsed(),
+        );
+        let writer = rusqlite::Connection::open(&configuration.paths.journal).unwrap();
+        writer
+            .busy_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        fs::write(trace.with_extension("writer-armed"), b"armed").unwrap();
+        let mut observed =
+            accept_fixture(&buffer_barrier, "actual metadata Busy observation").unwrap();
+        let mut notice = [0];
+        observed.read_exact(&mut notice).unwrap();
+        assert_eq!(notice, [b'B']);
+        assert_eq!(
+            acp_lease_state(&runtime.root, &started.identity),
+            "held:WouldBlock"
+        );
+        let before_methods: Vec<serde_json::Value> = fs::read_to_string(&trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect();
+        assert_eq!(
+            before_methods
+                .iter()
+                .filter(|frame| frame["method"] == "session/prompt")
+                .count(),
+            1
+        );
+        let held_started = std::time::Instant::now();
+        if short_writer {
+            writer.execute_batch("ROLLBACK").unwrap();
+        }
+        observed.write_all(b"R").unwrap();
+        if !short_writer {
+            let probe = attach_existing(&runtime.root, &started.identity);
+            assert!(
+                probe.is_err(),
+                "unverifiable held writer published a known owned execution"
+            );
+            let wait = std::time::Instant::now() + Duration::from_secs(3);
+            while acp_lease_state(&runtime.root, &started.identity) == "held:WouldBlock"
+                && std::time::Instant::now() < wait
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(acp_lease_state(&runtime.root,&started.identity),"free","held writer did not terminate the owned supervisor within the existing authority budget");
+            assert!(held_started.elapsed() < Duration::from_secs(3));
+            writer.execute_batch("ROLLBACK").unwrap();
+            let health = rusqlite::Connection::open(&configuration.paths.journal).unwrap();
+            health.busy_timeout(Duration::ZERO).unwrap();
+            health.execute_batch("BEGIN EXCLUSIVE; ROLLBACK").unwrap();
+        }
+        let request = ControlRequest {
+            version: 1,
+            request_id: "writer-probe-reconnect".into(),
+            target: Some(Target::Execution {
+                session_id: started.identity.session_id.clone(),
+                generation: 1,
+            }),
+            action: Action::Resume(crate::protocol::ResumeArgs {
+                kind: crate::protocol::ResumeKind::Reconnect,
+            }),
+            deadline: None,
+        };
+        service.lifecycle(peer(), request.clone(), now).unwrap();
+        crate::resume::process_one(&service, &configuration, &crate::runtime_process::unix_now)
+            .unwrap();
+        let report = service
+            .lifecycle(peer(), request, now)
+            .unwrap()
+            .reconnect
+            .unwrap();
+        let executions: i64 = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row("SELECT COUNT(*) FROM executions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            executions, 1,
+            "metadata contention launched an implicit replacement"
+        );
+        assert_eq!(report.generation, started.identity.generation);
+        if short_writer {
+            assert_eq!(report.state,crate::protocol::ReconnectState::SameOwnedExecution,
+                "short metadata contention lost the same owned runtime: report={report:?}; before={before}; after={}",
+                acp_failure_snapshot(&service,&trace,&runtime.root,&started.identity,scenario_started.elapsed()));
+            assert_eq!(
+                report.source,
+                crate::protocol::ObservationSource::Supervisor
+            );
+            assert_eq!(
+                acp_lease_state(&runtime.root, &started.identity),
+                "held:WouldBlock"
+            );
+        } else {
+            assert_eq!(report.state, crate::protocol::ReconnectState::Unknown);
+            let observation = controller
+                .reconcile(&service, &started.identity.session_id, 1, now)
+                .unwrap();
+            assert_eq!(observation.state, ExecutionState::Unknown);
+            let journal = service.journal.lock().unwrap();
+            let state: String = journal
+                .db
+                .query_row(
+                    "SELECT state FROM sessions WHERE id=?1",
+                    [&started.identity.session_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                state, "unknown",
+                "unknown execution did not retain its quota state"
+            );
+            let count: i64 = journal
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions WHERE state NOT IN('ended','failed')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "unknown execution freed its quota without owned absence proof"
+            );
+            drop(journal);
+            let blocked = service.lifecycle(
+                peer(),
+                ControlRequest::dispatch(
+                    "after-unknown-writer".into(),
+                    "must not replace unknown execution".into(),
+                ),
+                now,
+            );
+            let blocked = blocked.unwrap();
+            assert!(matches!(blocked.receipt.authorization, crate::protocol::Authorization::Denied { ref code }
+                if code == &ErrorCode::ResourceLimit.to_string()),
+                "unknown execution allowed a replacement admission without owned absence proof: {blocked:?}");
+            assert_eq!(
+                blocked.receipt.admission,
+                crate::protocol::Admission::NotAdmitted
+            );
+            assert!(blocked.dispatch.is_none());
+        }
+        let after_methods: Vec<serde_json::Value> = fs::read_to_string(&trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect();
+        assert_eq!(
+            after_methods, before_methods,
+            "metadata contention replayed native input or emitted another effect"
+        );
+    }
+
+    if reconnect && !writer_probe {
         let before = fs::read_to_string(&trace).unwrap();
         let request = ControlRequest {
             version: 1,
@@ -873,7 +1135,15 @@ fn real_acp_fixture(scenario: AcpScenario) {
         let report = replay.reconnect.unwrap();
         assert_eq!(
             report.state,
-            crate::protocol::ReconnectState::SameOwnedExecution
+            crate::protocol::ReconnectState::SameOwnedExecution,
+            "reconnect report={report:?}; snapshot={}",
+            acp_failure_snapshot(
+                &service,
+                &trace,
+                &runtime.root,
+                &started.identity,
+                scenario_started.elapsed()
+            )
         );
         assert_eq!(report.generation, 1);
         assert_eq!(
@@ -914,7 +1184,9 @@ fn real_acp_fixture(scenario: AcpScenario) {
         "absent owner bus configuration created a content service"
     );
     assert_eq!(frames[4]["params"]["prompt"][0]["text"], "only fake brief");
-    prompt.write_all(b"R").unwrap();
+    if short_writer || !writer_probe {
+        prompt.write_all(b"R").unwrap();
+    }
     if unsupported {
         let mut denied =
             accept_fixture(&buffer_barrier, "actual native method-not-found response").unwrap();

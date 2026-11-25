@@ -600,7 +600,7 @@ impl Journal {
         .transpose()
     }
     pub(crate) fn proxy_binding(&self, id: &ExecutionIdentity) -> Result<ProxyBinding, ErrorCode> {
-        let (service,resolved):(String,String)=self.db.query_row("SELECT e.service_id,a.resolved FROM executions e JOIN admissions a ON a.id=e.admission_id WHERE e.session_id=?1 AND e.generation=?2 AND e.identity=?3 AND e.state='running'",params![id.session_id,integer(id.generation)?,serde_json::to_string(id).map_err(storage)?],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?.ok_or(ErrorCode::StaleGeneration)?;
+        let (service,resolved):(String,String)=self.db.query_row("SELECT e.service_id,a.resolved FROM executions e JOIN admissions a ON a.id=e.admission_id WHERE e.session_id=?1 AND e.generation=?2 AND e.identity=?3 AND e.state='running'",params![id.session_id,integer(id.generation)?,serde_json::to_string(id).map_err(storage)?],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(journal::metadata_error)?.ok_or(ErrorCode::StaleGeneration)?;
         let resolved: ResolvedDispatch = serde_json::from_str(&resolved).map_err(storage)?;
         ProxyBinding::new(
             id.session_id.clone(),
@@ -788,10 +788,17 @@ impl Journal {
         &mut self,
         id: &ExecutionIdentity,
     ) -> Result<bool, ErrorCode> {
-        if journal::runtime_disabled(&self.db)? {
+        let tx = self.db.transaction().map_err(journal::metadata_error)?;
+        let disabled: bool = tx
+            .query_row(
+                "SELECT disabled FROM runtime_control WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(journal::metadata_error)?;
+        if disabled {
             return Ok(true);
         }
-        let tx = self.db.transaction().map_err(storage)?;
         let cfg = journal::config(&tx)?;
         let profile: Option<String> = tx
             .query_row(

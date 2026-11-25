@@ -115,6 +115,14 @@ replacement. These paths are fake-tested, not qualified native capabilities.
 `load_stored_conversation` remains unsupported without safe prior-retirement
 proof; an ACP load mapping alone does not establish that proof.
 
+Transient SQLite `Busy`/`Locked` errors in runtime metadata reads wait within the
+existing two-second authority deadline and execution expiry. Waiting performs no
+native, content or approval effects; effect admission still rechecks current
+caller, adapter, grant and policy under its write transaction. An exhausted
+metadata deadline terminates the owned process group and remains `unknown`,
+retaining quota until owned absence is proved. It never replays an uncertain
+submission or launches an implicit replacement.
+
 A known failure before any execution row/spawn intent becomes a durable typed
 `pre_launch_failure` with `failed` / `not_attempted`, audit and result. It is
 excluded from broker selection and direct launch leases, so later work can

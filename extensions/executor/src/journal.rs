@@ -18,6 +18,16 @@ pub(crate) struct Journal {
     pub(crate) db: Connection,
     pub(crate) runtime_policy: Option<std::sync::Arc<crate::runtime_policy::RuntimePolicy>>,
 }
+pub(crate) fn metadata_error(error: rusqlite::Error) -> ErrorCode {
+    if matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    ) {
+        ErrorCode::JournalBusy
+    } else {
+        ErrorCode::Storage
+    }
+}
 fn sql_u64(value: u64) -> Result<i64, ErrorCode> {
     i64::try_from(value).map_err(|_| ErrorCode::InvalidConfiguration)
 }
@@ -49,14 +59,14 @@ impl Journal {
             &path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
-        .map_err(storage)?;
+        .map_err(metadata_error)?;
         db.busy_timeout(std::time::Duration::ZERO)
             .map_err(storage)?;
         let after = std::fs::symlink_metadata(&path).map_err(storage)?;
         if after.dev() != metadata.dev() || after.ino() != metadata.ino() {
             return Err(ErrorCode::InvalidConfiguration);
         }
-        let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_operations')",[],|r|r.get(0)).map_err(storage)?;
+        let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_operations')",[],|r|r.get(0)).map_err(metadata_error)?;
         if !exists {
             return Err(ErrorCode::InvalidConfiguration);
         }
