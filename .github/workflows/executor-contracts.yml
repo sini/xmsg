@@ -40,6 +40,9 @@ jobs:
           "$XMSG_EXECUTOR_FIXTURE_PYTHON" --version
           manifest=extensions/executor/Cargo.toml
           cargo +1.88 test --manifest-path "$manifest" --locked -- --list > .artifacts/executor/list.log
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            export XMSG_EXECUTOR_FD_DIAGNOSTICS="$PWD/.artifacts/executor/fd-full-suite"
+          fi
           cargo +1.88 test --manifest-path "$manifest" --locked -- --test-threads=1 2>&1 | tee .artifacts/executor/tests.log
           platform=linux
           if [[ "$RUNNER_OS" == macOS ]]; then platform=darwin; fi
