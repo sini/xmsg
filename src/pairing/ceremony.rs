@@ -40,6 +40,33 @@ pub fn ed25519_device_id_from_cert(cert_der: &[u8]) -> Result<SpkiDeviceId, Pair
     SpkiDeviceId::from_spki_der(&spki).map_err(|e| PairingError::KeyAlgorithm(e.to_string()))
 }
 
+/// Loads an `Ed25519KeyPair` from PKCS#8 DER (v1 or v2, including OpenSSL 3.0 variants)
+/// paired with the node's own certificate DER.
+pub fn ed25519_keypair_from_der(
+    key_der: &[u8],
+    cert_der: &[u8],
+) -> Result<Ed25519KeyPair, PairingError> {
+    if let Ok(kp) = Ed25519KeyPair::from_pkcs8_maybe_unchecked(key_der) {
+        return Ok(kp);
+    }
+    let spki = spki_der_from_cert(cert_der)
+        .map_err(|e| PairingError::KeyAlgorithm(e.to_string()))?;
+    let pubkey = extract_ed25519_pubkey(&spki)
+        .map_err(|e| PairingError::KeyAlgorithm(e.to_string()))?;
+    // RFC 8410 Ed25519 OID 1.3.101.112 (06 03 2b 65 70) followed by OCTET STRING (04 22 04 20 <seed>).
+    let oid_and_hdr = [0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+    if let Some(pos) = key_der.windows(oid_and_hdr.len()).position(|w| w == oid_and_hdr) {
+        let seed_start = pos + oid_and_hdr.len();
+        if let Some(seed) = key_der.get(seed_start..seed_start + 32) {
+            return Ed25519KeyPair::from_seed_and_public_key(seed, &pubkey)
+                .map_err(|_| PairingError::KeyAlgorithm("own key is not Ed25519 PKCS#8".into()));
+        }
+    }
+    Err(PairingError::KeyAlgorithm(
+        "own key is not Ed25519 PKCS#8".into(),
+    ))
+}
+
 fn check_pinned_ed25519_spki(
     end_entity: &CertificateDer<'_>,
     expected_peer: Option<[u8; 32]>,

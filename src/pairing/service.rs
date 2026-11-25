@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use ring::signature::Ed25519KeyPair;
 use rusqlite::Connection;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use serde::Serialize;
@@ -19,9 +18,10 @@ use super::budgets::{
     OUTBOUND_PROBE_TIMEOUT,
 };
 use super::ceremony::{
-    build_pairing_client_config, ed25519_device_id_from_cert, execute_initiator_exchange,
-    execute_responder_exchange, export_pairing_keying_material, spki_der_from_cert, unix_now_u32,
-    InitiatorInputs, LiveCeremonySlots, ResponderInputs, PAIRING_ALPN,
+    build_pairing_client_config, ed25519_device_id_from_cert, ed25519_keypair_from_der,
+    execute_initiator_exchange, execute_responder_exchange, export_pairing_keying_material,
+    spki_der_from_cert, unix_now_u32, InitiatorInputs, LiveCeremonySlots, ResponderInputs,
+    PAIRING_ALPN,
 };
 use super::codec::{
     ExposurePolicy, Offer, PairingProfile, ReceiptVerificationContext, SpkiDeviceId,
@@ -585,8 +585,7 @@ impl PairingService {
         let own_id = ed25519_device_id_from_cert(&cert_der)?.0;
         let own_spki = spki_der_from_cert(&cert_der)
             .map_err(|e| PairingError::KeyAlgorithm(e.to_string()))?;
-        let signing_key = Ed25519KeyPair::from_pkcs8(key_der.secret_der())
-            .map_err(|_| PairingError::KeyAlgorithm("own key is not Ed25519 PKCS#8".into()))?;
+        let signing_key = ed25519_keypair_from_der(key_der.secret_der(), &cert_der)?;
 
         let deny_peers = Some(fed.current_peers());
         let (client_cfg, key_alg_flag) = build_pairing_client_config(
@@ -819,7 +818,7 @@ impl PairingService {
             Ok(s) => s,
             Err(_) => return,
         };
-        let signing_key = match Ed25519KeyPair::from_pkcs8(key_der.secret_der()) {
+        let signing_key = match ed25519_keypair_from_der(key_der.secret_der(), &cert_der) {
             Ok(k) => k,
             Err(_) => return,
         };
