@@ -167,6 +167,7 @@
   "harness_model_and_cross_host_environment_are_distinct",
   "human_operator::tests::exact_typed_confirmation_selects_once_and_carries_current_binding",
   "human_operator::tests::no_blanket_yes_stale_confirmation_or_persistent_permission",
+  "human_operator::tests::role_client_uses_the_same_canonical_parent_as_the_bound_server",
   "launch_environment::tests::environment_is_fixed_and_has_no_arbitrary_provider_or_model_passthrough",
   "launch_environment::tests::owned_alternate_home_is_refused_and_canonical_alias_is_allowed",
   "lifecycle::tests::adapter_and_native_artifact_drift_each_block_queued_effects",

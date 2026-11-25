@@ -91,9 +91,10 @@ fn exchange<B: serde::Serialize, R: serde::de::DeserializeOwned>(
     body: &B,
 ) -> Result<R, ErrorCode> {
     use xmsg::client::caller_attribution as wire;
-    wire::private_socket(socket, xmsg::client::current_uid()).map_err(failure)?;
+    let socket = crate::unix::private_parent(socket, xmsg::client::current_uid())?;
+    wire::private_socket(&socket, xmsg::client::current_uid()).map_err(failure)?;
     let expires = Instant::now() + Duration::from_secs(2);
-    let mut stream = wire::connect(socket, expires).map_err(failure)?;
+    let mut stream = wire::connect(&socket, expires).map_err(failure)?;
     if crate::unix::peer(&stream)?.uid != xmsg::client::current_uid() {
         return Err(ErrorCode::PeerUid);
     }
@@ -233,6 +234,67 @@ pub(crate) fn confirm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn role_client_uses_the_same_canonical_parent_as_the_bound_server() {
+        use std::os::{fd::AsRawFd, unix::fs::PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("private");
+        std::fs::create_dir(&actual).unwrap();
+        std::fs::set_permissions(&actual, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let socket = alias.join("role.sock");
+        let listener = crate::unix::bind_private_socket(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (result, connected) = std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let mut ready = libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                if unsafe { libc::poll(&mut ready, 1, 2000) } != 1 {
+                    return false;
+                }
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut input = BufReader::new(stream.try_clone().unwrap());
+                assert_eq!(
+                    crate::unix::line(&mut input, 256).unwrap(),
+                    b"synthetic-role-proof"
+                );
+                let _: serde_json::Value = serde_json::from_slice(
+                    &crate::unix::line(&mut input, crate::framing::MAX_FRAME_BYTES).unwrap(),
+                )
+                .unwrap();
+                stream
+                    .write_all(b"{\"status\":\"error\",\"code\":\"attestation_unavailable\"}\n")
+                    .unwrap();
+                true
+            });
+            let result = request::<_, serde_json::Value>(
+                &socket,
+                b"synthetic-role-proof",
+                &serde_json::json!({"request":"fixture"}),
+            );
+            (result, server.join().unwrap())
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            ErrorCode::AttestationUnavailable,
+            "role client rejected the server's validated canonical-parent alias before connecting"
+        );
+        assert!(
+            connected,
+            "role client did not reach the bound canonical endpoint"
+        );
+    }
     fn pending() -> NativePending {
         NativePending {
             approval_id: "ask".into(),

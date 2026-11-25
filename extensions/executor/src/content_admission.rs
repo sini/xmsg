@@ -68,9 +68,9 @@ impl ContentStore for BoundContentJournal {
             if Instant::now() >= self.expires || self.native.expires_at <= now {
                 return Err(ErrorCode::DeadlineExpired);
             }
-            if !policy
+            if policy
                 .as_deref()
-                .is_some_and(|p| p.configuration.bus.is_some())
+                .is_none_or(|p| p.configuration.bus.is_none())
             {
                 return Err(ErrorCode::NotSupported);
             }
