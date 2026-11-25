@@ -359,6 +359,7 @@ impl TextBus for AgentClient {
             AgentClient::list(
                 self,
                 ListQuery {
+                    tag: None,
                     name: a.name.clone(),
                     node: a.node.clone(),
                     kind: a.kind.clone(),
