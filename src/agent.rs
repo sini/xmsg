@@ -276,6 +276,7 @@ pub fn resolve_caller_session(
 #[derive(Debug, Clone)]
 pub enum CallerTrace {
     Session(Session),
+    SessionWithReg(Session, String),
     CodexOwner {
         owner_pid: u32,
         owner_starttime: String,
@@ -304,7 +305,7 @@ pub fn resolve_caller_session_peer(
         None,
         peer,
     )? {
-        CallerTrace::Session(s) => Ok(s),
+        CallerTrace::Session(s) | CallerTrace::SessionWithReg(s, _) => Ok(s),
         CallerTrace::CodexOwner { .. } => Err(AppError::NotRecipient(
             "codex MCP call is missing runtime _meta (sessionId/threadId); refresh MCP or restart the codex session"
                 .to_string(),
@@ -383,14 +384,19 @@ fn resolve_caller_session_peer_inner(
                     }
                 }
                 let mut session: Session = entry.clone().into();
+                let mut reg = None;
                 if let Some(c) = conn {
                     if let Ok(Some(claim)) =
                         crate::claim::get_active_claim_for_proc(c, entry.pid, &entry.proc_start)
                     {
                         session.session_id = claim.address();
+                        reg = Some(claim.reg());
                     }
                 }
-                return Ok(CallerTrace::Session(session));
+                return Ok(match reg {
+                    Some(r) => CallerTrace::SessionWithReg(session, r),
+                    None => CallerTrace::Session(session),
+                });
             }
         }
 
@@ -403,7 +409,7 @@ fn resolve_caller_session_peer_inner(
                     && !info.starttime.is_empty()
                     && info.starttime == st
                 {
-                    return Ok(CallerTrace::Session(Session {
+                    let session = Session {
                         session_id: info.conversation_id.clone(),
                         name: info
                             .label
@@ -423,7 +429,12 @@ fn resolve_caller_session_peer_inner(
                         updated_at: info.registered_at.max(0) as u64,
                         harness: "agy".to_string(),
                         registered: Some(info.has_credentials()),
-                    }));
+                    };
+                    return Ok(if info.reg.is_empty() {
+                        CallerTrace::Session(session)
+                    } else {
+                        CallerTrace::SessionWithReg(session, info.reg.clone())
+                    });
                 }
             }
         }
@@ -433,7 +444,7 @@ fn resolve_caller_session_peer_inner(
             let pi_lock = pi_store.read().unwrap();
             for info in pi_lock.values() {
                 if info.pid == curr_pid && info.starttime == st {
-                    return Ok(CallerTrace::Session(Session {
+                    let session = Session {
                         session_id: info.session_id.clone(),
                         name: info.name.clone().or_else(|| Some(info.session_id.clone())),
                         pid: info.pid,
@@ -446,7 +457,12 @@ fn resolve_caller_session_peer_inner(
                         updated_at: info.registered_at as u64,
                         harness: "pi".to_string(),
                         registered: Some(true),
-                    }));
+                    };
+                    return Ok(if info.reg.is_empty() {
+                        CallerTrace::Session(session)
+                    } else {
+                        CallerTrace::SessionWithReg(session, info.reg.clone())
+                    });
                 }
             }
         }
@@ -1359,7 +1375,7 @@ pub async fn handle_agent_frame(
                             .to_string(),
                     ))
                 }
-                Ok(CallerTrace::Session(parent)) => {
+                Ok(CallerTrace::Session(parent)) | Ok(CallerTrace::SessionWithReg(parent, _)) => {
                     resolve_as_agent(state, parent, as_agent.as_deref(), false)
                 }
                 Err(e) => Err(e),
@@ -1410,7 +1426,7 @@ pub async fn handle_agent_frame(
                             .to_string(),
                     ))
                 }
-                Ok(CallerTrace::Session(parent)) => {
+                Ok(CallerTrace::Session(parent)) | Ok(CallerTrace::SessionWithReg(parent, _)) => {
                     resolve_as_agent(state, parent, as_agent.as_deref(), false)
                 }
                 Err(e) => Err(e),
@@ -1456,7 +1472,7 @@ pub async fn handle_agent_frame(
                             .to_string(),
                     ))
                 }
-                Ok(CallerTrace::Session(parent)) => {
+                Ok(CallerTrace::Session(parent)) | Ok(CallerTrace::SessionWithReg(parent, _)) => {
                     resolve_as_agent(state, parent, as_agent.as_deref(), false)
                 }
                 Err(e) => Err(e),
@@ -1515,7 +1531,7 @@ pub async fn handle_agent_frame(
                             .to_string(),
                     ))
                 }
-                Ok(CallerTrace::Session(parent)) => {
+                Ok(CallerTrace::Session(parent)) | Ok(CallerTrace::SessionWithReg(parent, _)) => {
                     resolve_as_agent(state, parent, as_agent.as_deref(), false)
                 }
                 Err(e) => Err(e),
@@ -1601,7 +1617,7 @@ pub async fn handle_agent_frame(
                             .to_string(),
                     ))
                 }
-                Ok(CallerTrace::Session(parent)) => {
+                Ok(CallerTrace::Session(parent)) | Ok(CallerTrace::SessionWithReg(parent, _)) => {
                     resolve_as_agent(state, parent, as_agent.as_deref(), true)
                 }
                 Err(e) => Err(e),
@@ -1630,7 +1646,7 @@ pub async fn handle_agent_frame(
             pin_name,
             ..
         } => match caller_trace {
-            Ok(CallerTrace::Session(parent)) => {
+            Ok(CallerTrace::Session(parent)) | Ok(CallerTrace::SessionWithReg(parent, _)) => {
                 handle_subagent_frame(
                     state,
                     &parent,
@@ -1688,7 +1704,7 @@ fn context_owner(
 ) -> Result<Session, AppError> {
     let denied = || AppError::Denied("context requires the attested session owner".to_string());
     let caller = match caller_trace {
-        Ok(CallerTrace::Session(session))
+        Ok(CallerTrace::Session(session)) | Ok(CallerTrace::SessionWithReg(session, _))
             if codex_session.is_none() && codex_thread.is_none() && codex_turn.is_none() =>
         {
             session
@@ -1848,7 +1864,7 @@ fn handle_agent_tag_with_before_lock(
     };
     let denied = || AppError::Denied("tag requires the attested session owner".to_string());
     let (caller, codex_owner, traced_reg) = match caller_trace {
-        Ok(CallerTrace::Session(session))
+        Ok(CallerTrace::SessionWithReg(session, reg))
             if codex_session.is_none() && codex_thread.is_none() && codex_turn.is_none() =>
         {
             if session.harness == "svc" {
@@ -1859,17 +1875,14 @@ fn handle_agent_tag_with_before_lock(
                     "tag requires a whole session, not a subagent".to_string(),
                 ));
             }
-            let reg = {
-                let db = state
-                    .db
-                    .lock()
-                    .map_err(|e| AppError::Internal(format!("db lock poisoned: {e}")))?;
-                lookup_current_reg(state, &db, &session, None)?
-            }
-            .ok_or_else(|| {
-                AppError::Denied("tag requires a registered live session".to_string())
-            })?;
             (session, None, reg)
+        }
+        Ok(CallerTrace::Session(_))
+            if codex_session.is_none() && codex_thread.is_none() && codex_turn.is_none() =>
+        {
+            return Err(AppError::Denied(
+                "tag requires a registered live session".to_string(),
+            ));
         }
         Ok(CallerTrace::CodexOwner {
             owner_pid,
@@ -4039,7 +4052,10 @@ mod tests {
         };
         let res = handle_agent_tag_with_before_lock(
             &state,
-            Ok(CallerTrace::Session(caller.clone())),
+            Ok(CallerTrace::SessionWithReg(
+                caller.clone(),
+                "claude:1001:st1:10".into(),
+            )),
             Some("review".into()),
             None,
             None,
@@ -4102,7 +4118,10 @@ mod tests {
         };
         let res = handle_agent_tag_with_before_lock(
             &state,
-            Ok(CallerTrace::Session(agy_caller.clone())),
+            Ok(CallerTrace::SessionWithReg(
+                agy_caller.clone(),
+                "agy:mint1".into(),
+            )),
             Some("review".into()),
             None,
             None,
@@ -4137,7 +4156,10 @@ mod tests {
         }
         let res = handle_agent_tag_with_before_lock(
             &state,
-            Ok(CallerTrace::Session(caller)),
+            Ok(CallerTrace::SessionWithReg(
+                caller.clone(),
+                "claude:1001:st1:10".into(),
+            )),
             Some("review".into()),
             None,
             None,
@@ -4157,6 +4179,43 @@ mod tests {
         assert!(
             matches!(res, Err(AppError::Denied(_))),
             "expected Denied on same-pid Claude re-claim, got {res:?}"
+        );
+        assert_eq!(count_session_tags(&state), 0);
+
+        // 3b. Claude same-pid re-claim AFTER trace and BEFORE handler entry (before_lock is no-op)
+        let state = test_app_state();
+        {
+            let db = state.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO instance_claims (id, pid, proc_start, suffix, released, created_at) VALUES (?1, 1001, 'st1', 1, 0, 10)",
+                [claude_id],
+            )
+            .unwrap();
+        }
+        let traced_claude = CallerTrace::SessionWithReg(caller, "claude:1001:st1:10".into());
+        {
+            let db = state.db.lock().unwrap();
+            db.execute(
+                "INSERT OR REPLACE INTO instance_claims (id, pid, proc_start, suffix, released, created_at) VALUES (?1, 1001, 'st1', 1, 0, 20)",
+                [claude_id],
+            )
+            .unwrap();
+        }
+        let res = handle_agent_tag_with_before_lock(
+            &state,
+            Ok(traced_claude),
+            Some("review".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            || {},
+        );
+        assert!(
+            matches!(res, Err(AppError::Denied(_))),
+            "expected Denied on same-pid Claude re-claim between trace and handler entry, got {res:?}"
         );
         assert_eq!(count_session_tags(&state), 0);
 
@@ -4180,7 +4239,10 @@ mod tests {
         }
         let res = handle_agent_tag_with_before_lock(
             &state,
-            Ok(CallerTrace::Session(agy_caller)),
+            Ok(CallerTrace::SessionWithReg(
+                agy_caller.clone(),
+                "agy:mint1".into(),
+            )),
             Some("review".into()),
             None,
             None,
@@ -4198,6 +4260,49 @@ mod tests {
         assert!(
             matches!(res, Err(AppError::Denied(_))),
             "expected Denied on same-pid agy re-mint, got {res:?}"
+        );
+        assert_eq!(count_session_tags(&state), 0);
+
+        // 4b. Agy same-pid re-mint AFTER trace and BEFORE handler entry (before_lock is no-op)
+        let state = test_app_state();
+        {
+            let mut store = state.agy_store.write().unwrap();
+            store.insert(
+                agy_id.to_string(),
+                crate::agy::AgySessionInfo {
+                    session_key: agy_id.to_string(),
+                    conversation_id: agy_id.to_string(),
+                    pid: 3001,
+                    starttime: "3001".into(),
+                    label: Some("a1".into()),
+                    credentials: None,
+                    registered_at: 10,
+                    reg: "agy:mint1".into(),
+                },
+            );
+        }
+        let traced_agy = CallerTrace::SessionWithReg(agy_caller, "agy:mint1".into());
+        {
+            let mut store = state.agy_store.write().unwrap();
+            if let Some(info) = store.get_mut(agy_id) {
+                info.reg = "agy:mint2".into();
+            }
+        }
+        let res = handle_agent_tag_with_before_lock(
+            &state,
+            Ok(traced_agy),
+            Some("review".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            || {},
+        );
+        assert!(
+            matches!(res, Err(AppError::Denied(_))),
+            "expected Denied on same-pid agy re-mint between trace and handler entry, got {res:?}"
         );
         assert_eq!(count_session_tags(&state), 0);
 

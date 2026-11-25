@@ -234,7 +234,8 @@ pub async fn trace_caller_peer(
     )
     .await;
     match crate::agent::trace_caller_or_codex_owner(state, peer)? {
-        crate::agent::CallerTrace::Session(s) => Ok(s),
+        crate::agent::CallerTrace::Session(s)
+        | crate::agent::CallerTrace::SessionWithReg(s, _) => Ok(s),
         crate::agent::CallerTrace::CodexOwner { .. } => Err(AppError::NotRecipient(
             "codex MCP call is missing runtime _meta (sessionId/threadId); refresh MCP or restart the codex session"
                 .to_string(),
@@ -1521,7 +1522,7 @@ pub async fn deliver_with_in_reply_to(
                 };
                 match res {
                     Ok(_) => {
-                        return Ok((session.session_id.clone(), "agy".to_string(), "delivered"))
+                        return Ok((session.session_id.clone(), "agy".to_string(), "delivered"));
                     }
                     Err(AppError::CredentialsStale(_)) => {}
                     Err(e) => return Err(e),
@@ -2262,7 +2263,9 @@ pub fn format_daemon_path_timeout_err(timeout: Duration, is_macos: bool) -> Stri
             "timed out after {secs} s opening attachment path in daemon (hint: on macOS, background launchd daemons block on TCC prompts for protected folders such as Documents, Desktop, or Downloads; stage bytes via data/upload or use xmsg mcp)"
         )
     } else {
-        format!("timed out after {secs} s opening attachment path in daemon; stage bytes via data/upload")
+        format!(
+            "timed out after {secs} s opening attachment path in daemon; stage bytes via data/upload"
+        )
     }
 }
 
@@ -2613,10 +2616,12 @@ pub async fn send_with_attachments(
             .await?;
             match held {
                 Reservation::Mine(id) => id,
-                Reservation::Held(r) if r.body != text || r.refs_digest != refs_digest || r.to_ref != to => {
+                Reservation::Held(r)
+                    if r.body != text || r.refs_digest != refs_digest || r.to_ref != to =>
+                {
                     return Err(AppError::Conflict(format!(
                         "idempotency key '{key}' was already used with a different message body or recipient"
-                    )))
+                    )));
                 }
                 Reservation::Held(r) => {
                     // The key follows its message's record, which a later delivery (an ack,
@@ -2626,7 +2631,9 @@ pub async fn send_with_attachments(
                             .db
                             .lock()
                             .map_err(db_err)
-                            .and_then(|db| storage::get_message(&db, &r.message_id).map_err(db_err))?
+                            .and_then(|db| {
+                                storage::get_message(&db, &r.message_id).map_err(db_err)
+                            })?
                             .map_or(r.outcome, |m| m.outcome),
                         _ => r.outcome,
                     };
@@ -3232,7 +3239,7 @@ pub async fn reply_with_attachments(
                 {
                     return Err(AppError::Conflict(format!(
                         "idempotency key '{key}' was already used with a different reply"
-                    )))
+                    )));
                 }
                 Reservation::Held(r) => {
                     return match r.seq {
@@ -3389,7 +3396,9 @@ pub(crate) async fn stage_codex_reply(
         .map_err(db_err)?
     };
     if let Some(generation) = live.as_ref().map(|s| s.generation).or(parked_generation) {
-        let envelope = format!("[xmsg] reply to message_id={message_id} — message_id={reply_id}; reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{text}");
+        let envelope = format!(
+            "[xmsg] reply to message_id={message_id} — message_id={reply_id}; reply with the xmsg reply tool (tools: send, reply, list, replies)\n\n{text}"
+        );
         let queued = storage::PiPendingMessage {
             id: reply_id.clone(),
             session_id: ret_session_id.clone(),

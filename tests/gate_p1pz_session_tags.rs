@@ -1962,6 +1962,8 @@ fn compat_912ca97a_oracles() {
         let stop_spy_bg = Arc::clone(&stop_spy);
         let ok_count = Arc::new(AtomicUsize::new(0));
         let ok_count_bg = Arc::clone(&ok_count);
+        let active_conns = Arc::new(AtomicUsize::new(0));
+        let active_conns_bg = Arc::clone(&active_conns);
         let spy_handle = std::thread::spawn(move || {
             let mut conns = Vec::new();
             while !stop_spy_bg.load(Ordering::Relaxed) {
@@ -1969,6 +1971,7 @@ fn compat_912ca97a_oracles() {
                     Ok((mut client, _)) => {
                         let upstream_sock = real_agent_sock.clone();
                         let ok_c = Arc::clone(&ok_count_bg);
+                        let act_c = Arc::clone(&active_conns_bg);
                         conns.push(std::thread::spawn(move || {
                             let mut upstream = UnixStream::connect(&upstream_sock).unwrap();
                             let mut cr = BufReader::new(client.try_clone().unwrap());
@@ -1991,8 +1994,10 @@ fn compat_912ca97a_oracles() {
                                 Some("bad_request"),
                                 "O5h: 912ca97a daemon must not reject mcp_start as bad_request: req={req_line} resp={resp_v}"
                             );
-                            if resp_v.get("error").is_none() {
+                            let accepted = resp_v.get("error").is_none();
+                            if accepted {
                                 ok_c.fetch_add(1, Ordering::Relaxed);
+                                act_c.fetch_add(1, Ordering::Relaxed);
                             }
                             // Relay any held-connection traffic until EOF
                             let mut up2 = upstream.try_clone().unwrap();
@@ -2004,6 +2009,9 @@ fn compat_912ca97a_oracles() {
                             let _ = std::io::copy(&mut ur, &mut cl2);
                             let _ = cl2.shutdown(std::net::Shutdown::Write);
                             let _ = t1.join();
+                            if accepted {
+                                act_c.fetch_sub(1, Ordering::Relaxed);
+                            }
                         }));
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2092,7 +2100,7 @@ fn compat_912ca97a_oracles() {
 
         let ok_before_agy = ok_count.load(Ordering::Relaxed);
         let agy_mcp_script = format!(
-            "(echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"agy\",\"version\":\"1\"}}}}}}'; sleep 12) | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} >/dev/null 2>&1 & MCP_PID=$!; echo AGY_MCP_STARTED; read _; kill $MCP_PID 2>/dev/null || true; wait $MCP_PID 2>/dev/null || true",
+            "(echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"agy\",\"version\":\"1\"}}}}}}'; sleep 12) | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} >/dev/null 2>&1 & MCP_PID=$!; echo MCP_PID:$MCP_PID; read _; kill $MCP_PID 2>/dev/null || true; wait $MCP_PID 2>/dev/null || true",
             d_old.dir.db.display(),
             spy_sock.display(),
             d_old.dir.http_sock.display(),
@@ -2111,7 +2119,12 @@ fn compat_912ca97a_oracles() {
         let mut agy_out = BufReader::new(agy_child.stdout.take().unwrap());
         let mut agy_started = String::new();
         agy_out.read_line(&mut agy_started).unwrap();
-        assert_eq!(agy_started.trim(), "AGY_MCP_STARTED");
+        let mcp_pid: i32 = agy_started
+            .trim()
+            .strip_prefix("MCP_PID:")
+            .expect("expected MCP_PID:<pid>")
+            .parse()
+            .expect("valid MCP_PID");
 
         let mut agy_ok = false;
         for _ in 0..30 {
@@ -2141,8 +2154,13 @@ fn compat_912ca97a_oracles() {
 
         std::thread::sleep(Duration::from_secs(10));
         assert!(
-            agy_child.try_wait().unwrap().is_none(),
-            "O5h: held mcp_start connection must persist for 10 s against 912ca97a"
+            active_conns.load(Ordering::Relaxed) >= 1,
+            "O5h: relayed mcp_start connection must remain open after 10 s hold on 912ca97a"
+        );
+        assert_eq!(
+            unsafe { libc::kill(mcp_pid, 0) },
+            0,
+            "O5h: MCP process (pid={mcp_pid}) must remain alive after 10 s hold on 912ca97a"
         );
         let (_, held_agy_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
         assert!(
