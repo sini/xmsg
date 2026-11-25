@@ -1067,28 +1067,141 @@ fn o3_lifecycle_claude_pi_plugin_and_o5c_o5d() {
     });
 }
 
-fn copy_sh_fixture(dst: &Path) {
+fn copy_exe_fixture(src: &Path, dst: &Path) {
     let st = std::process::Command::new("sh")
         .args([
             "-c",
             "cp \"$1\" \"$2\" && chmod 0755 \"$2\"",
             "_",
-            "/bin/sh",
+            src.to_str().unwrap(),
             dst.to_str().unwrap(),
         ])
         .status()
         .unwrap();
-    assert!(st.success(), "copy_sh_fixture failed: {st}");
+    assert!(st.success(), "copy_exe_fixture failed: {st}");
+}
+
+fn p1pz_child_mode_if_requested() -> bool {
+    let Ok(mode) = std::env::var("XMSG_P1PZ_CHILD_MODE") else {
+        return false;
+    };
+    let lock_path = std::env::var("XMSG_P1PZ_LOCK_PATH").unwrap();
+    use std::os::unix::io::AsRawFd;
+    let _lock_file = {
+        let f = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0, "child flock failed on {lock_path}: {}", std::io::Error::last_os_error());
+        f
+    };
+    match mode.as_str() {
+        "codex" => {
+            let root_id = std::env::var("XMSG_P1PZ_ROOT_ID").unwrap();
+            let source = std::env::var("XMSG_P1PZ_SOURCE").unwrap();
+            let cwd = std::env::var("XMSG_P1PZ_CWD").unwrap();
+            let sock = std::env::var("XMSG_AGENT_SOCK").unwrap();
+            let hook = json!({
+                "session_id": root_id,
+                "cwd": cwd,
+                "hook_event_name": "SessionStart",
+                "source": source,
+            });
+            let mut reg = std::process::Command::new(BIN)
+                .args(["register", "codex", "--hook", "--event", "SessionStart", "--sock", &sock])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            writeln!(reg.stdin.take().unwrap(), "{hook}").unwrap();
+            let reg_out = reg.wait_with_output().unwrap();
+            assert!(reg_out.status.success(), "codex register failed");
+            let reg_err = String::from_utf8_lossy(&reg_out.stderr).replace('\n', " ");
+            println!("REGISTERED:{reg_err}");
+
+            // Read commands on stdin: "tag <name>" or "quit"
+            let stdin = std::io::stdin();
+            for line in BufReader::new(stdin.lock()).lines() {
+                let cmd = line.unwrap();
+                let cmd = cmd.trim();
+                if cmd == "quit" {
+                    break;
+                }
+                if let Some(tag) = cmd.strip_prefix("tag ") {
+                    let db = std::env::var("XMSG_DB_PATH").unwrap();
+                    let http = std::env::var("XMSG_HTTP_SOCK").unwrap();
+                    let mut mcp = std::process::Command::new(BIN)
+                        .args(["mcp", "--db-path", &db, "--agent-sock", &sock, "--http-sock", &http])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .unwrap();
+                    let mut min = mcp.stdin.take().unwrap();
+                    writeln!(
+                        min,
+                        "{}",
+                        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"1"}}})
+                    ).unwrap();
+                    writeln!(
+                        min,
+                        "{}",
+                        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tag","arguments":{"add":tag},"_meta":{"sessionId":root_id,"threadId":root_id,"turnId":"t1"}}})
+                    ).unwrap();
+                    drop(min);
+                    let mout = mcp.wait_with_output().unwrap();
+                    let mstdout = String::from_utf8_lossy(&mout.stdout).replace('\n', " ");
+                    println!("TAGGED:{mstdout}");
+                }
+            }
+        }
+        "agy" => {
+            let reg_sock = std::env::var("XMSG_REGISTER_SOCK").unwrap();
+            let reg_out = std::process::Command::new(BIN)
+                .args(["register", "agy", "--sock", &reg_sock])
+                .output()
+                .unwrap();
+            assert!(
+                reg_out.status.success(),
+                "register agy failed: {}",
+                String::from_utf8_lossy(&reg_out.stderr)
+            );
+            if let Ok(tag) = std::env::var("XMSG_P1PZ_TAG") {
+                let tag_out = std::process::Command::new(BIN)
+                    .args(["tag", "add", &tag, "--json"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    tag_out.status.success(),
+                    "agy tag add failed: {}",
+                    String::from_utf8_lossy(&tag_out.stderr)
+                );
+            }
+            println!("AGY_READY");
+            let mut buf = String::new();
+            let _ = std::io::stdin().read_line(&mut buf);
+        }
+        other => panic!("unknown XMSG_P1PZ_CHILD_MODE={other}"),
+    }
+    true
 }
 
 #[test]
 fn o3_claude_codex_agy_holders_and_lifecycle() {
+    if p1pz_child_mode_if_requested() {
+        return;
+    }
     let dir = NodeDir::new("p1ccal");
-    // Create distinct codex-fixture and agy-fixture executables via external cp+chmod (avoiding ETXTBSY).
+    // Copy the test binary itself (real native ELF/Mach-O executable) to distinct fixture names.
+    let self_exe = std::env::current_exe().unwrap();
     let codex_bin = dir.run.join("codex-fixture");
-    copy_sh_fixture(&codex_bin);
+    copy_exe_fixture(&self_exe, &codex_bin);
     let agy_bin = dir.run.join("agy-fixture");
-    copy_sh_fixture(&agy_bin);
+    copy_exe_fixture(&self_exe, &agy_bin);
 
     let codex_home = dir.run.join("codex-home");
     let sessions_dir = codex_home.join("sessions/2026/11/24");
@@ -1147,12 +1260,10 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
     writeln!(r_in, "bye").unwrap();
     let _ = child_reclaim.wait();
 
-    // 2. O1a Codex holder + O3e (healthy restart keeps tags) + O3g (park/resume increments gen, drops tags).
     let codex_root = "92222222-2222-4222-8222-222222222222";
     let lock_dir = codex_home.join("thread-writer-locks");
     fs::create_dir_all(&lock_dir).unwrap();
     let lock_path = lock_dir.join(format!("{codex_root}.lock"));
-    fs::write(&lock_path, "").unwrap();
     let rollout_path = sessions_dir.join(format!("rollout-2026-11-24T00-00-00-{codex_root}.jsonl"));
     let meta_line = json!({
         "timestamp": "2026-11-24T00:00:00Z",
@@ -1160,89 +1271,77 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
         "payload": { "id": codex_root, "session_id": codex_root, "cwd": d.dir.run.display().to_string() }
     });
     fs::write(&rollout_path, format!("{meta_line}\n")).unwrap();
-    let spawn_codex_owner = |d: &Daemon, root_id: &str, source: &str| {
-        use std::os::unix::process::CommandExt;
-        let mut cmd = std::process::Command::new(&codex_bin);
-        cmd.arg0("sh");
-        let lock_c = std::ffi::CString::new(lock_path.to_str().unwrap()).unwrap();
-        unsafe {
-            cmd.pre_exec(move || {
-                let fd = libc::open(lock_c.as_ptr(), libc::O_RDWR);
-                if fd < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if fd != 9 {
-                    if libc::dup2(fd, 9) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    libc::close(fd);
-                }
-                Ok(())
-            });
-        }
-        let hook_json = json!({
-            "session_id": root_id,
-            "cwd": d.dir.run.display().to_string(),
+
+    // Negative control: unattested daemon without --codex-exe denies registration
+    {
+        let dir_unatt = NodeDir::new("p1cxunatt");
+        let d_unatt = Daemon::start(dir_unatt, BIN, "UNATT", None, vec![]);
+        let hook = json!({
+            "session_id": codex_root,
+            "cwd": d_unatt.dir.run.display().to_string(),
             "hook_event_name": "SessionStart",
-            "source": source,
-        })
-        .to_string();
-        let reg_out_file = d.dir.run.join(format!("codex_reg_{source}.out"));
-        let script = format!(
-            "printf '%s\\n' '{hook_json}' | {BIN} register codex --hook --event SessionStart --sock {} >{} 2>&1; echo \"REGISTERED:$(cat {})\"; while IFS= read -r cmd; do eval \"$cmd\"; done",
-            d.dir.agent_sock.display(),
-            reg_out_file.display(),
-            reg_out_file.display(),
+            "source": "startup",
+        });
+        let mut reg = d_unatt.dir.cmd(BIN);
+        reg.args([
+            "register", "codex", "--hook", "--event", "SessionStart",
+            "--sock", &d_unatt.dir.agent_sock.display().to_string(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let mut child = reg.spawn().unwrap();
+        writeln!(child.stdin.take().unwrap(), "{hook}").unwrap();
+        let out = child.wait_with_output().unwrap();
+        let err_s = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err_s.contains("does not descend from a trusted --codex-exe process"),
+            "negative control must deny unattested codex hook: {err_s}"
         );
-        cmd.args(["-c", &script])
-            .env("XMSG_HTTP_SOCK", &d.dir.http_sock)
-            .env("XMSG_AGENT_SOCK", &d.dir.agent_sock)
-            .env("XMSG_REGISTER_SOCK", &d.dir.register_sock)
-            .env("XMSG_DB", &d.dir.db)
+    }
+
+    let spawn_codex_owner = |d: &Daemon, source: &str| {
+        let mut cmd = d.dir.cmd(codex_bin.to_str().unwrap());
+        cmd.args(["--exact", "o3_claude_codex_agy_holders_and_lifecycle", "--nocapture"])
+            .env("XMSG_P1PZ_CHILD_MODE", "codex")
+            .env("XMSG_P1PZ_LOCK_PATH", &lock_path)
+            .env("XMSG_P1PZ_ROOT_ID", codex_root)
+            .env("XMSG_P1PZ_SOURCE", source)
+            .env("XMSG_P1PZ_CWD", &d.dir.run)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = cmd.spawn().unwrap();
-        let mut c_out = BufReader::new(child.stdout.take().unwrap());
-        let mut line = String::new();
-        c_out.read_line(&mut line).unwrap();
-        assert!(line.starts_with("REGISTERED:"), "codex register failed: {line}");
-        let reg_line = line.clone();
-        (child, c_out, reg_line)
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let mut lines = Vec::new();
+        let reg_line = loop {
+            let mut l = String::new();
+            let n = out.read_line(&mut l).unwrap();
+            assert!(n > 0, "codex-fixture EOF before REGISTERED: {lines:?}");
+            if l.starts_with("REGISTERED:") {
+                break l;
+            }
+            lines.push(l);
+        };
+        assert_eq!(reg_line.trim(), "REGISTERED:", "positive codex registration must have no denial notice: {reg_line}");
+        (child, out)
     };
 
-    let (mut codex_p1, mut codex_out1, reg_line1) = spawn_codex_owner(&d, codex_root, "startup");
+    let (mut codex_p1, mut codex_out1) = spawn_codex_owner(&d, "startup");
     let mut codex_in1 = codex_p1.stdin.take().unwrap();
-    let init_line = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"1"}}});
-    let call_line = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tag","arguments":{"add":"codex.tag"},"_meta":{"sessionId":codex_root,"threadId":codex_root,"turnId":"t1"}}});
-    let tag_script_path = d.dir.run.join("codex_tag.sh");
-    fs::write(
-        &tag_script_path,
-        format!(
-            "printf '%s\\n%s\\n' '{init_line}' '{call_line}' | {BIN} mcp --db-path {} --agent-sock {} --http-sock {}\n",
-            d.dir.db.display(),
-            d.dir.agent_sock.display(),
-            d.dir.http_sock.display(),
-        ),
-    )
-    .unwrap();
-    writeln!(codex_in1, "sh {} 2>&1 | while IFS= read -r l; do echo \"MCP:$l\"; done; echo TAGGED", tag_script_path.display()).unwrap();
-    let mut mcp_lines = Vec::new();
+    writeln!(codex_in1, "tag codex.tag").unwrap();
     loop {
-        let mut tline = String::new();
-        let n = codex_out1.read_line(&mut tline).unwrap();
-        assert!(n > 0, "codex_out1 EOF before TAGGED: {mcp_lines:?}");
-        if tline.trim() == "TAGGED" {
+        let mut l = String::new();
+        let n = codex_out1.read_line(&mut l).unwrap();
+        assert!(n > 0, "codex-fixture EOF before TAGGED");
+        if l.starts_with("TAGGED:") {
+            assert!(l.contains("codex.tag"), "expected codex.tag in MCP output: {l}");
             break;
         }
-        mcp_lines.push(tline);
     }
 
     let (_, cx_list) = http_get(&d.dir.http_sock, "/v1/recipients?tag=codex.tag");
-    assert_eq!(cx_list["total"], 1, "O1a codex holder must be listed: {cx_list} (reg={reg_line1}, mcp_lines={mcp_lines:?})");
+    assert_eq!(cx_list["total"], 1, "O1a codex holder must be listed: {cx_list}");
 
     // O3e: healthy restart keeps codex tag row on codex:1 in session_tag (sweep_startup_tags preserves it)
     d.stop();
@@ -1260,78 +1359,56 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
     }
 
     // O3g: park (exit owner) and resume on new owner -> generation increments, tag dropped
+    writeln!(codex_in1, "quit").unwrap();
     drop(codex_in1);
     let _ = codex_p1.wait();
-    let (mut codex_p2, _codex_out2, _reg_line2) = spawn_codex_owner(&d, codex_root, "resume");
+    let (mut codex_p2, _codex_out2) = spawn_codex_owner(&d, "resume");
     let (_, cx_resumed) = http_get(&d.dir.http_sock, "/v1/recipients?tag=codex.tag");
     assert_eq!(cx_resumed["total"], 0, "O3g codex resume drops old tag: {cx_resumed}");
     let _ = codex_p2.kill();
     let _ = codex_p2.wait();
 
-    // 3. O1a agy holder + O3f (agy takeover drops old tags)
+    // 3. O1a agy holder + O3f (agy takeover by new process drops old tags)
     let agy_id = "93333333-3333-4333-8333-333333333333";
     let agy_presence_dir = d.dir.run.join("agy-presence");
     fs::create_dir_all(&agy_presence_dir).unwrap();
     let agy_lock_path = agy_presence_dir.join(format!("{agy_id}.lock"));
-    fs::write(&agy_lock_path, "").unwrap();
-    let spawn_agy_holder = |d: &Daemon, tag_to_add: Option<&str>| {
-        use std::os::unix::process::CommandExt;
-        let tag_step = tag_to_add.map_or_else(String::new, |t| format!("{BIN} tag add {t} --json 2>&1;"));
-        let script = format!(
-            "{BIN} register agy --sock {} 2>&1; {tag_step} echo AGY_READY; read _",
-            d.dir.register_sock.display()
-        );
+
+    let spawn_agy_holder = |d: &Daemon, tag: Option<&str>| {
         let mut cmd = d.dir.cmd(agy_bin.to_str().unwrap());
-        cmd.arg0("sh");
-        let lock_c = std::ffi::CString::new(agy_lock_path.to_str().unwrap()).unwrap();
-        unsafe {
-            cmd.pre_exec(move || {
-                let fd = libc::open(lock_c.as_ptr(), libc::O_RDWR);
-                if fd < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if fd != 9 {
-                    if libc::dup2(fd, 9) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    libc::close(fd);
-                }
-                Ok(())
-            });
-        }
-        cmd.args(["-c", &script])
+        cmd.args(["--exact", "o3_claude_codex_agy_holders_and_lifecycle", "--nocapture"])
+            .env("XMSG_P1PZ_CHILD_MODE", "agy")
+            .env("XMSG_P1PZ_LOCK_PATH", &agy_lock_path)
             .env("ANTIGRAVITY_CONVERSATION_ID", agy_id)
             .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33399")
             .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-agy-test")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(t) = tag {
+            cmd.env("XMSG_P1PZ_TAG", t);
+        }
         let mut child = cmd.spawn().unwrap();
         let mut out = BufReader::new(child.stdout.take().unwrap());
-        let mut lines = Vec::new();
         loop {
-            let mut line = String::new();
-            let n = out.read_line(&mut line).unwrap();
-            assert!(n > 0, "agy holder EOF before AGY_READY: {lines:?}");
-            if line.trim() == "AGY_READY" {
+            let mut l = String::new();
+            let n = out.read_line(&mut l).unwrap();
+            assert!(n > 0, "agy-fixture EOF before AGY_READY");
+            if l.trim() == "AGY_READY" {
                 break;
             }
-            lines.push(line);
         }
-        (child, lines)
+        child
     };
 
-    let (mut agy1, agy1_lines) = spawn_agy_holder(&d, Some("agy.tag"));
+    let mut agy1 = spawn_agy_holder(&d, Some("agy.tag"));
     let (_, agy_list) = http_get(&d.dir.http_sock, "/v1/recipients?tag=agy.tag");
-    assert_eq!(agy_list["total"], 1, "O1a agy holder must be listed: {agy_list} (agy1_lines={agy1_lines:?})");
+    assert_eq!(agy_list["total"], 1, "O1a agy holder must be listed: {agy_list}");
 
     // O3f: agy takeover by new process -> drops old tag
     let _ = agy1.kill();
     let _ = agy1.wait();
-    let (mut agy2, _agy2_lines) = spawn_agy_holder(&d, None);
+    let mut agy2 = spawn_agy_holder(&d, None);
     let (_, agy_takeover) = http_get(&d.dir.http_sock, "/v1/recipients?tag=agy.tag");
     assert_eq!(agy_takeover["total"], 0, "O3f agy takeover drops old tag: {agy_takeover}");
     let _ = agy2.kill();
@@ -1348,8 +1425,6 @@ fn compat_912ca97a_oracles() {
     // O5f: re-pinned AgentClient::list against old daemon succeeds
     let self_exe = std::env::current_exe().unwrap();
     let dir_old = NodeDir::new("p1old");
-    let agy_old_bin = dir_old.run.join("agy-fixture");
-    copy_sh_fixture(&agy_old_bin);
     let d_old = Daemon::start(
         dir_old,
         &prev,
@@ -1359,7 +1434,7 @@ fn compat_912ca97a_oracles() {
             "--svc-exe".into(),
             format!("bridge={}", self_exe.display()),
             "--agy-exe".into(),
-            agy_old_bin.display().to_string(),
+            self_exe.display().to_string(),
         ],
     );
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1677,65 +1752,41 @@ fn compat_912ca97a_oracles() {
         let agy_old_presence = d_old.dir.run.join("agy-presence");
         fs::create_dir_all(&agy_old_presence).unwrap();
         let agy_old_lock = agy_old_presence.join(format!("{agy_old_id}.lock"));
-        fs::write(&agy_old_lock, "").unwrap();
-        let agy_script = format!(
-            "{BIN} register agy --sock {} 2>&1 && (echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"agy\",\"version\":\"1\"}}}}}}'; sleep 0.3) | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} 2>&1 && echo AGY_MCP_DONE; read _",
-            d_old.dir.register_sock.display(),
-            d_old.dir.db.display(),
-            d_old.dir.agent_sock.display(),
-            d_old.dir.http_sock.display(),
-        );
-        let mut agy_sh = d_old.dir.cmd(agy_old_bin.to_str().unwrap());
-        {
-            use std::os::unix::process::CommandExt;
-            agy_sh.arg0("sh");
-            let lock_c = std::ffi::CString::new(agy_old_lock.to_str().unwrap()).unwrap();
-            unsafe {
-                agy_sh.pre_exec(move || {
-                    let fd = libc::open(lock_c.as_ptr(), libc::O_RDWR);
-                    if fd < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    if fd != 9 {
-                        if libc::dup2(fd, 9) < 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        libc::close(fd);
-                    }
-                    Ok(())
-                });
-            }
-        }
-        agy_sh
-            .args(["-c", &agy_script])
+        let _agy_old_lock_file = {
+            use std::os::unix::io::AsRawFd;
+            let f = fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&agy_old_lock)
+                .unwrap();
+            let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            assert_eq!(rc, 0);
+            f
+        };
+        let reg_agy_old = d_old.dir
+            .cmd(BIN)
+            .args([
+                "register",
+                "agy",
+                "--sock",
+                &d_old.dir.register_sock.display().to_string(),
+            ])
             .env("ANTIGRAVITY_CONVERSATION_ID", agy_old_id)
             .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33398")
             .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-old-agy")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut agy_child = agy_sh.spawn().unwrap();
-        let mut agy_in = agy_child.stdin.take().unwrap();
-        let mut agy_out = BufReader::new(agy_child.stdout.take().unwrap());
-        let mut agy_err = agy_child.stderr.take().unwrap();
-        let mut agy_lines = Vec::new();
-        loop {
-            let mut al = String::new();
-            let n = agy_out.read_line(&mut al).unwrap();
-            if n == 0 {
-                let mut err_s = String::new();
-                let _ = std::io::Read::read_to_string(&mut agy_err, &mut err_s);
-                let st = agy_child.try_wait();
-                panic!("O5h agy mcp_start against 912ca97a EOF: lines={agy_lines:?} stderr={err_s} status={st:?}");
-            }
-            if al.trim() == "AGY_MCP_DONE" {
-                break;
-            }
-            agy_lines.push(al);
-        }
+            .output()
+            .unwrap();
+        assert!(reg_agy_old.status.success(), "O5h register agy failed");
+        let _ = call_mcp_tools(
+            &d_old.dir,
+            &[json!({ "name": "list", "arguments": {} })],
+            &[
+                ("ANTIGRAVITY_CONVERSATION_ID", agy_old_id),
+                ("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33398"),
+                ("ANTIGRAVITY_CSRF_TOKEN", "csrf-old-agy"),
+            ],
+        );
         let (_, old_agy_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
         assert!(
             old_agy_list["recipients"]
@@ -1745,8 +1796,6 @@ fn compat_912ca97a_oracles() {
                 .any(|r| r["address"].as_str().is_some_and(|a| a.starts_with(&format!("{agy_old_id}@")))),
             "O5h: agy mcp_start must register session on 912ca97a daemon: {old_agy_list}"
         );
-        writeln!(agy_in, "bye").unwrap();
-        let _ = agy_child.wait();
     }
 
     // O3h: Claude rollback to 912ca97a and re-upgrade: old tag neither applied nor counted.
