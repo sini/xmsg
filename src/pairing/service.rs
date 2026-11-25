@@ -32,6 +32,25 @@ use super::store::{
 };
 use crate::fed::{CredentialReloader, FedState};
 
+static PEER_ADDRS: OnceLock<Mutex<HashMap<DeviceId, String>>> = OnceLock::new();
+
+pub(crate) fn record_peer_address(peer: DeviceId, addr: SocketAddr) {
+    PEER_ADDRS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .insert(peer, addr.to_string());
+}
+
+pub(crate) fn known_peer_address(peer: &DeviceId) -> Option<String> {
+    PEER_ADDRS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap()
+        .get(peer)
+        .cloned()
+}
+
 /// Process-wide registry mapping each `FedState` (by its DB `Arc`) to its `PairingRuntime`,
 /// avoiding structural churn across `FedState` literals in existing tests.
 pub struct PairingRuntime {
@@ -796,6 +815,7 @@ impl PairingService {
                     .map_err(Self::map_store_error)?;
 
                     self.remove_live_intent(fed, &intent.intent_id);
+                    record_peer_address(intent.peer_id, addr);
                     let installed_rev = fed.publish_pairing_update(committed_rev).await?;
                     return Ok(ActivationSummary {
                         grant_id: hex::encode(intent.grant_id),
