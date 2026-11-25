@@ -15,7 +15,13 @@ let
     mkOption
     types
     ;
-  inherit (import ./_lib.nix { inherit lib; }) peerType mkPeersFile;
+  inherit (import ./_lib.nix { inherit lib; })
+    peerType
+    mkPeersFile
+    peerAssertions
+    renderPeer
+    ;
+  fleetLib = import ./_fleet.nix { inherit lib; };
 
   fedCfg = config.programs.xmsg.federation;
   instances = lib.filterAttrs (_: icfg: icfg.enable) config.services.xmsg.instances;
@@ -150,7 +156,52 @@ let
             default = false;
             description = "Open `federation.port` in `networking.firewall.allowedTCPPorts`.";
           };
+          peersFile = mkOption {
+            type = types.path;
+            readOnly = true;
+            default = mkPeersFile pkgs icfg.federation.peers;
+            defaultText = lib.literalExpression "the store file rendered from federation.peers";
+            description = "Read-only: the rendered peers file `--peers-file` names.";
+          };
+          fleet = mkOption {
+            type = types.nullOr (
+              types.submodule {
+                options = {
+                  value = mkOption {
+                    type = fleetLib.type;
+                    description = "Fleet topology value (`lib.fleet.type`).";
+                  };
+                  self = mkOption {
+                    type = types.str;
+                    description = "This instance's node name in `value.nodes` (must have `kind == \"node\"`).";
+                  };
+                  hostOwned = mkOption {
+                    type = types.listOf types.str;
+                    default = [ ];
+                    description = "Peer names in `federation.peers` owned by the instance rather than derived from the fleet.";
+                  };
+                };
+              }
+            );
+            default = null;
+            description = "Derive `federation.peers` from a fleet topology value and validate the final map.";
+          };
         };
+      };
+
+      config = mkIf (icfg.federation.fleet != null) {
+        federation.peers =
+          if !icfg.federation.enable then
+            builtins.throw "federation.fleet needs federation.enable"
+          else
+            lib.mapAttrs (_: lib.filterAttrs (_: v: v != null)) (
+              lib.filterAttrs (n: _: !(builtins.elem n icfg.federation.fleet.hostOwned)) (
+                fleetLib.peersFor {
+                  fleet = icfg.federation.fleet.value;
+                  self = icfg.federation.fleet.self;
+                }
+              )
+            );
       };
     };
 
@@ -158,7 +209,7 @@ let
     name: icfg:
     let
       fed = icfg.federation;
-      peersFile = mkPeersFile pkgs fed.peers;
+      peersFile = fed.peersFile;
       svcExeArgs = lib.concatLists (
         lib.mapAttrsToList (svcName: path: [
           "--svc-exe"
@@ -300,6 +351,61 @@ in
               message = "services.xmsg.instances.${name}: TCP listen (--listen / XMSG_LISTEN / listen) is forbidden unless allowTcpListen = true.";
             }
           ]
+          ++ lib.concatLists (
+            lib.mapAttrsToList (
+              peerName: p: peerAssertions "services.xmsg.instances.${name}.federation.peers.${peerName}" p
+            ) icfg.federation.peers
+          )
+          ++ lib.optionals (icfg.federation.fleet != null) (
+            let
+              fed = icfg.federation;
+              fl = fed.fleet;
+            in
+            if !fed.enable then
+              builtins.throw "federation.fleet needs federation.enable"
+            else
+              let
+                selfNode = fl.value.nodes.${fl.self} or null;
+                isNode = selfNode != null && selfNode.kind == "node";
+              in
+              [
+                {
+                  assertion = isNode;
+                  message = "services.xmsg.instances.${name}.federation.fleet: self '${fl.self}' must have kind == \"node\".";
+                }
+              ]
+              ++ lib.concatLists (
+                map (
+                  h:
+                  lib.optional (builtins.hasAttr h fed.peers && fed.peers.${h}.pinFromCert != null) {
+                    assertion = false;
+                    message = "services.xmsg.instances.${name}.federation.peers.${h}: P1: hostOwned entry must not set pinFromCert in fleet mode.";
+                  }
+                ) fl.hostOwned
+              )
+              ++ fleetLib.checkFinal {
+                value = fl.value;
+                self = fl.self;
+                file = lib.mapAttrs renderPeer fed.peers;
+                hostOwned = fl.hostOwned;
+              }
+              ++ lib.optional isNode (
+                let
+                  m = builtins.match "^.*:([0-9]{1,5})$" (if selfNode.address == null then "" else selfNode.address);
+                  expectedPort =
+                    if selfNode.listenPort != null then
+                      toString selfNode.listenPort
+                    else if m != null then
+                      builtins.elemAt m 0
+                    else
+                      "7788";
+                in
+                {
+                  assertion = toString fed.port == expectedPort;
+                  message = "services.xmsg.instances.${name}.federation.port (${toString fed.port}) must equal fleet node '${fl.self}' listenPort (${expectedPort}).";
+                }
+              )
+          )
         ) instances
       );
 

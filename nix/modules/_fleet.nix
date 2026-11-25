@@ -868,11 +868,275 @@ let
     {
       inherit direct relayed;
     };
+  checkFinal =
+    {
+      value,
+      self,
+      file,
+      hostOwned ? [ ],
+    }:
+    let
+      f = assertFleet value;
+      derived = peersRenderedFor {
+        fleet = value;
+        inherit self;
+      };
+      derivedNames = builtins.attrNames derived;
+      fleetIdentities = map (n: identityOf f n) (builtins.attrNames f.nodes);
+
+      # S: file structure classification by `peers` key alone.
+      isFileAttrs = builtins.isAttrs file;
+      isWrapped = isFileAttrs && builtins.hasAttr "peers" file;
+      knownTopKeys = [
+        "peers"
+        "hub"
+        "deny"
+        "reverse_observe"
+        "discovery"
+      ];
+      sTopFailures =
+        if !isFileAttrs then
+          [ "checkFinal S: peers file must be an attrset." ]
+        else if isWrapped then
+          (lib.optional (builtins.hasAttr "hub" file) "checkFinal hub refusal: 'hub' section is not allowed in fleet peers files.")
+          ++ (map (k: "checkFinal S: unknown top-level key '${k}' in wrapped peers file.") (
+            lib.filter (k: !(builtins.elem k knownTopKeys)) (builtins.attrNames file)
+          ))
+          ++ (lib.optional (
+            !builtins.isAttrs file.peers
+          ) "checkFinal S: 'peers' in wrapped peers file must be an attrset.")
+        else
+          [ ];
+
+      rawEntries =
+        if !isFileAttrs then
+          { }
+        else if isWrapped then
+          (if builtins.isAttrs file.peers then file.peers else { })
+        else
+          file;
+
+      sMemberFailures = lib.concatLists (
+        lib.mapAttrsToList (
+          name: val:
+          lib.optional (!builtins.isAttrs val) "checkFinal S[${name}]: peer entry must be an attrset."
+        ) rawEntries
+      );
+
+      validMembers = lib.filterAttrs (_: builtins.isAttrs) rawEntries;
+
+      # K: canonical spelling of raw entries (CS3 only).
+      allowedEntryKeys = [
+        "name"
+        "address"
+        "pin"
+        "ca"
+        "identities"
+        "allow"
+        "from"
+        "leaf"
+        "principals"
+        "targets"
+        "dial"
+        "default_route"
+        "observe_labels"
+      ];
+      boolKeys = [
+        "leaf"
+        "observe_labels"
+        "default_route"
+      ];
+      strKeys = [
+        "name"
+        "address"
+        "pin"
+        "ca"
+      ];
+      listStrKeys = [
+        "identities"
+        "allow"
+        "from"
+        "principals"
+        "targets"
+      ];
+      isValidKeyType =
+        k: v:
+        if builtins.elem k boolKeys then
+          builtins.isBool v
+        else if builtins.elem k strKeys then
+          builtins.isString v
+        else if k == "dial" then
+          builtins.isString v && v == "outbound"
+        else if builtins.elem k listStrKeys then
+          builtins.isList v && lib.all builtins.isString v
+        else
+          true;
+
+      kFailures = lib.concatLists (
+        lib.mapAttrsToList (
+          name: raw:
+          let
+            keys = builtins.attrNames raw;
+            ka = map (k: "checkFinal K(a)[${name}]: unknown key '${k}'.") (
+              lib.filter (k: !(builtins.elem k allowedEntryKeys)) keys
+            );
+            kb = map (k: "checkFinal K(b)[${name}]: key '${k}' must not be null.") (
+              lib.filter (k: raw.${k} == null) keys
+            );
+            kc = map (k: "checkFinal K(c)[${name}]: key '${k}' has invalid type or value.") (
+              lib.filter (
+                k: builtins.elem k allowedEntryKeys && raw.${k} != null && !(isValidKeyType k raw.${k})
+              ) keys
+            );
+          in
+          ka ++ kb ++ kc
+        ) validMembers
+      );
+
+      strippedMembers = lib.mapAttrs (
+        _: raw: lib.filterAttrs (k: v: v != null && isValidKeyType k v) raw
+      ) validMembers;
+
+      viewFor = stripped: {
+        pin = stripped.pin or null;
+        pinFromCert = null;
+        ca = stripped.ca or null;
+        identities = stripped.identities or null;
+        from = stripped.from or null;
+        observeLabels = builtins.hasAttr "observe_labels" stripped;
+        allow = stripped.allow or [ ];
+        leaf = stripped.leaf or false;
+        dial = stripped.dial or null;
+      };
+
+      cs3Failures = lib.concatLists (
+        lib.mapAttrsToList (
+          name: stripped: xmsgLib.peerAssertions "checkFinal CS3[${name}]" (viewFor stripped)
+        ) strippedMembers
+      );
+
+      # V1: each derived entry equals its derived rendering (total, never unguarded lookup).
+      v1Failures = lib.concatLists (
+        map (
+          n:
+          if !(builtins.hasAttr n strippedMembers) then
+            [ "checkFinal V1: derived entry '${n}' is missing from peers file." ]
+          else if strippedMembers.${n} != derived.${n} then
+            [ "checkFinal V1: derived entry '${n}' differs from fleet-derived rendering." ]
+          else
+            [ ]
+        ) derivedNames
+      );
+
+      # V2: names lie in derived U hostOwned; every hostOwned present; no fleet name/identity collision; no pin.
+      v2ExtraFailures = lib.concatLists (
+        lib.mapAttrsToList (
+          n: _:
+          lib.optional (
+            !(builtins.hasAttr n derived) && !(builtins.elem n hostOwned)
+          ) "checkFinal V2: entry '${n}' is neither derived from fleet nor listed in hostOwned."
+        ) strippedMembers
+      );
+      v2HostOwnedFailures = lib.concatLists (
+        map (
+          h:
+          (lib.optional (
+            !(builtins.hasAttr h strippedMembers)
+          ) "checkFinal V2: hostOwned entry '${h}' is missing from peers file.")
+          ++ (lib.optional (builtins.hasAttr h f.nodes) "checkFinal V2: hostOwned name '${h}' collides with a fleet node.")
+          ++ lib.optionals (builtins.hasAttr h strippedMembers) (
+            let
+              e = strippedMembers.${h};
+            in
+            (lib.optional (builtins.any (id: builtins.elem id fleetIdentities) (
+              e.identities or [ ]
+            )) "checkFinal V2: hostOwned entry '${h}' carries a fleet node's identity.")
+            ++ (lib.optional (builtins.hasAttr "pin" e) "checkFinal V2: hostOwned entry '${h}' must not use pin in fleet mode.")
+          )
+        ) hostOwned
+      );
+
+      # V3: at most one default_route.
+      defaultRouteNames = lib.filter (n: (strippedMembers.${n}.default_route or false) == true) (
+        builtins.attrNames strippedMembers
+      );
+      v3Failures =
+        lib.optional (builtins.length defaultRouteNames > 1)
+          "checkFinal V3: at most one entry may set default_route (found: ${lib.concatStringsSep ", " defaultRouteNames}).";
+
+      # V4: CA-only clause (reads CS3 view).
+      v4Failures = lib.concatLists (
+        lib.mapAttrsToList (
+          n: stripped:
+          lib.optional (
+            (viewFor stripped).ca == null
+          ) "checkFinal V4: entry '${n}' must use ca (CA-only in fleet mode)."
+        ) strippedMembers
+      );
+
+      # V6: every leaf = true entry is derived from a mailbox grant or is hostOwned.
+      v6Failures = lib.concatLists (
+        lib.mapAttrsToList (
+          n: e:
+          let
+            isDerivedLeaf = builtins.hasAttr n derived && (derived.${n}.leaf or false) == true;
+          in
+          lib.optional ((e.leaf or false) == true && !isDerivedLeaf && !(builtins.elem n hostOwned))
+            "checkFinal V6: leaf = true on '${n}' is only valid for a fleet mailbox leaf or a hostOwned entry."
+        ) strippedMembers
+      );
+
+      # V7: forward/relayed/relay only on derived entries matching §6; no hostOwned carries them or default_route.
+      relayRights = [
+        "forward"
+        "relayed"
+        "relay"
+      ];
+      hasRelayRight = e: builtins.any (r: builtins.elem r (e.allow or [ ])) relayRights;
+      v7Failures = lib.concatLists (
+        lib.mapAttrsToList (
+          n: e:
+          if builtins.elem n hostOwned then
+            (lib.optional (hasRelayRight e) "checkFinal V7: hostOwned entry '${n}' must not grant forward, relayed, or relay.")
+            ++ (lib.optional (
+              (e.default_route or false) == true
+            ) "checkFinal V7: hostOwned entry '${n}' must not set default_route.")
+          else if builtins.hasAttr n derived then
+            let
+              dRelay = lib.filter (r: builtins.elem r (derived.${n}.allow or [ ])) relayRights;
+              eRelay = lib.filter (r: builtins.elem r (e.allow or [ ])) relayRights;
+            in
+            lib.optional (
+              dRelay != eRelay
+            ) "checkFinal V7: relay rights on '${n}' must match fleet-derived §6 rights."
+          else
+            lib.optional (hasRelayRight e) "checkFinal V7: non-derived entry '${n}' must not grant forward, relayed, or relay."
+        ) strippedMembers
+      );
+
+      allMessages =
+        sTopFailures
+        ++ sMemberFailures
+        ++ kFailures
+        ++ v1Failures
+        ++ v2ExtraFailures
+        ++ v2HostOwnedFailures
+        ++ v3Failures
+        ++ v4Failures
+        ++ v6Failures
+        ++ v7Failures;
+    in
+    (map (message: {
+      assertion = false;
+      inherit message;
+    }) allMessages)
+    ++ cs3Failures;
 in
 {
   type = fleetType;
   inherit
     check
+    checkFinal
     peersFor
     peersRenderedFor
     peersJsonFor

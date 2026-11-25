@@ -136,6 +136,51 @@ use rules that do not span those bundles.
 
 ## Setup
 
+### From a fleet file (`lib.fleet`)
+
+Instead of hand-maintaining each host's `peers.json`, declare the team's topology once with
+[`lib.fleet`](/operations/fleet-topology/):
+
+```nix title="fleet.nix"
+{
+  trustDomain = "example.org";
+  ca = "/etc/xmsg/team-ca.pem";
+  nodes = {
+    "team.hub" = {
+      address = "hub.example.org:7788";
+    };
+    "build.gpubox" = {
+      address = "gpubox.example.org:7788";
+      acceptRelayed = [ "team.hub" ];
+    };
+    "alice.laptop" = { kind = "leaf"; };
+    "bob.laptop"   = { kind = "leaf"; };
+    "carol.laptop" = { kind = "leaf"; };
+  };
+  grants = {
+    "team.hub"."build.gpubox".allow = [ "send" "reply" ];
+    "build.gpubox"."team.hub".allow = [ "send" "reply" "relayed" ];
+    "team.hub"."alice.laptop" = { mailbox = true; allow = [ "send" "reply" "list" ]; };
+    "team.hub"."bob.laptop"   = { mailbox = true; allow = [ "send" "reply" "list" ]; };
+    "team.hub"."carol.laptop" = { mailbox = true; allow = [ "send" "reply" "list" ]; };
+    "alice.laptop"."team.hub".allow = [ "send" "reply" "relayed" ];
+    "bob.laptop"."team.hub".allow   = [ "send" "reply" "relayed" ];
+    "carol.laptop"."team.hub".allow = [ "send" "reply" "relayed" ];
+  };
+  relays = {
+    "alice.laptop" = { via = "team.hub"; to = [ "bob.laptop" "carol.laptop" "build.gpubox" ]; };
+    "bob.laptop"   = { via = "team.hub"; to = [ "alice.laptop" "carol.laptop" "build.gpubox" ]; };
+    "carol.laptop" = { via = "team.hub"; to = [ "alice.laptop" "bob.laptop" "build.gpubox" ]; };
+  };
+}
+```
+
+On `team.hub` and `build.gpubox`, set `programs.xmsg.server.federation.fleet = { value = fleet; self = "<name>"; };`
+(or `services.xmsg.instances.<n>.federation.fleet`). On each outbound-only laptop, render its
+peers file with `lib.fleet.peersJsonFor { inherit fleet; self = "alice.laptop"; }` (and validate
+it with `lib.fleet.checkFinal`), which produces the JSON below (adding `"dial": "outbound"` on
+the laptop's own hub entry when running outbound-only).
+
 ### Each laptop
 
 Every laptop has one peer: the hub. This is `alice.laptop`'s peers file; bob's and carol's are the

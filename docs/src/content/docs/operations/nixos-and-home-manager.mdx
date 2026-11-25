@@ -212,7 +212,16 @@ emits `default_route = true` only when true. These limits apply:
 - **`address` is optional.** Leave it unset on a `leaf = true` entry, which the hub never dials;
   the rendered entry then has no `address` key. The bare-map form holds no `discovery` key, so
   any other entry without an address is refused when the daemon loads the file.
-- **No `default_route` option.** The module cannot mark a default route.
+- **Eval-time peer checks (`peerAssertions`).** Both Home Manager and NixOS instances now report,
+  at eval time, peers the loader would refuse at start (NixOS runs every clause; both reject
+  `leaf` together with `dial`).
+- **Fleet derivation (`federation.fleet`).** Both `programs.xmsg.server.federation.fleet` and
+  `services.xmsg.instances.<name>.federation.fleet` take `{ value; self; hostOwned ? [ ]; }`,
+  derive `federation.peers` from `lib.fleet.peersFor` for nodes not in `hostOwned`, and run
+  `lib.fleet.checkFinal` over the final rendered map. `self` must have `kind == "node"`, and
+  `federation.enable = true` is required. `checkFinal` passes the `deny`, `reverse_observe`, and
+  `discovery` wrapper sections through unvalidated, leaving their payload to the loader (and
+  refuses a `hub` section).
 - **No `hub` block.** The module writes the bare-map form of the peers file, which cannot hold
   [hub admission](/concepts/federation/#hub-admission-hub).
 
@@ -267,12 +276,16 @@ a usage example.
 | `federation.key` | `str` (runtime path) | *(required if enabled)* | `--fed-key` PEM private key path (never a store path). |
 | `federation.reloadInterval` | `nullOr uint` | `null` | `--fed-reload-interval-secs` (null uses xmsg default `30`). |
 | `federation.peers` | `attrsOf peer` | `{ }` | `--peers-file` entries (same schema as Home Manager `federation.peers`). |
+| `federation.peersFile` | `path` (read-only) | rendered `federation.peers` | Store path passed to `--peers-file`. |
+| `federation.fleet` | `nullOr submodule` | `null` | Derive `federation.peers` from `{ value; self; hostOwned ? [ ]; }` and run `checkFinal`. |
 | `federation.openFirewall` | `bool` | `false` | Open `federation.port` in `networking.firewall.allowedTCPPorts`. |
 
 ## Fleet observation collector
 
 To run `xmsg observe-collector` as a managed user service (`xmsg-observe-collector.service` on
-systemd, `xmsg-observe-collector` launchd agent on macOS), enable `programs.xmsg.observeCollector`:
+systemd, `xmsg-observe-collector` launchd agent on macOS), enable `programs.xmsg.observeCollector`.
+Set `programs.xmsg.observeCollector.fleet = { value; self; };` (where `self` is a `collector` in
+`value.nodes`) to derive `observeCollector.config.sources` from `lib.fleet.collectorSourcesFor`:
 
 ```nix
 programs.xmsg.observeCollector = {

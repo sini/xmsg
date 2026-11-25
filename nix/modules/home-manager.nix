@@ -18,7 +18,13 @@ let
     mkOption
     types
     ;
-  inherit (import ./_lib.nix { inherit lib; }) peerType mkPeersFile;
+  inherit (import ./_lib.nix { inherit lib; })
+    peerType
+    mkPeersFile
+    peerAssertions
+    renderPeer
+    ;
+  fleetLib = import ./_fleet.nix { inherit lib; };
   cfg = config.programs.xmsg;
   srv = cfg.server;
   fed = srv.federation;
@@ -727,6 +733,29 @@ in
           defaultText = lib.literalExpression "the store file rendered from federation.peers";
           description = "Read-only: the rendered peers file `--peers-file` names.";
         };
+        fleet = mkOption {
+          type = types.nullOr (
+            types.submodule {
+              options = {
+                value = mkOption {
+                  type = fleetLib.type;
+                  description = "Fleet topology value (`lib.fleet.type`).";
+                };
+                self = mkOption {
+                  type = types.str;
+                  description = "This host's node name in `value.nodes` (must have `kind == \"node\"`).";
+                };
+                hostOwned = mkOption {
+                  type = types.listOf types.str;
+                  default = [ ];
+                  description = "Peer names in `federation.peers` owned by the host rather than derived from the fleet.";
+                };
+              };
+            }
+          );
+          default = null;
+          description = "Derive `federation.peers` from a fleet topology value and validate the final map.";
+        };
       };
     };
 
@@ -742,6 +771,24 @@ in
         default = "${config.xdg.stateHome}/xmsg/observe-collector";
         defaultText = lib.literalExpression ''"''${config.xdg.stateHome}/xmsg/observe-collector"'';
         description = "`--state-dir`: directory holding the collector SQLite store (`collector.sqlite`).";
+      };
+      fleet = mkOption {
+        type = types.nullOr (
+          types.submodule {
+            options = {
+              value = mkOption {
+                type = fleetLib.type;
+                description = "Fleet topology value (`lib.fleet.type`).";
+              };
+              self = mkOption {
+                type = types.str;
+                description = "This collector's node name in `value.nodes` (must have `kind == \"collector\"`).";
+              };
+            };
+          }
+        );
+        default = null;
+        description = "Derive `observeCollector.config.sources` from a fleet topology value.";
       };
     };
 
@@ -862,35 +909,54 @@ in
         ]
         ++ lib.concatLists (
           lib.mapAttrsToList (
-            name: p:
-            let
-              peer = rule: message: {
-                assertion = rule;
-                message = "programs.xmsg.server.federation.peers.${name}: ${message}";
-              };
-            in
-            # The loader's rules (src/fed.rs, PeersMap parse), refused here rather than at `xmsg serve`.
-            [
-              (peer (
-                lib.count (x: x != null) [
-                  p.pin
-                  p.pinFromCert
-                  p.ca
-                ] == 1
-              ) "set exactly one of pin, pinFromCert and ca.")
-              (peer (p.ca == null || p.identities != null) "ca needs identities.")
-              (peer (
-                p.pin == null && p.pinFromCert == null || p.identities == null
-              ) "identities is only valid with ca, not with pin or pinFromCert.")
-              (peer (
-                p.identities == null || lib.length p.identities == 1
-              ) "identities holds exactly one identity.")
-              (peer (p.from != [ ]) "from must hold at least one CIDR, or be null.")
-              (peer (
-                !p.observeLabels || lib.elem "observe" p.allow
-              ) "observeLabels requires \"observe\" in allow.")
-            ]
+            name: p: peerAssertions "programs.xmsg.server.federation.peers.${name}" p
           ) fed.peers
+        )
+        ++ lib.optionals (fed.fleet != null) (
+          if !fed.enable then
+            builtins.throw "federation.fleet needs federation.enable"
+          else
+            let
+              selfNode = fed.fleet.value.nodes.${fed.fleet.self} or null;
+              isNode = selfNode != null && selfNode.kind == "node";
+            in
+            [
+              {
+                assertion = isNode;
+                message = "programs.xmsg.server.federation.fleet: self '${fed.fleet.self}' must have kind == \"node\".";
+              }
+            ]
+            ++ lib.concatLists (
+              map (
+                h:
+                lib.optional (builtins.hasAttr h fed.peers && fed.peers.${h}.pinFromCert != null) {
+                  assertion = false;
+                  message = "programs.xmsg.server.federation.peers.${h}: P1: hostOwned entry must not set pinFromCert in fleet mode.";
+                }
+              ) fed.fleet.hostOwned
+            )
+            ++ fleetLib.checkFinal {
+              value = fed.fleet.value;
+              self = fed.fleet.self;
+              file = lib.mapAttrs renderPeer fed.peers;
+              hostOwned = fed.fleet.hostOwned;
+            }
+            ++ lib.optional isNode (
+              let
+                m = builtins.match "^.*:([0-9]{1,5})$" (if selfNode.address == null then "" else selfNode.address);
+                expectedPort =
+                  if selfNode.listenPort != null then
+                    toString selfNode.listenPort
+                  else if m != null then
+                    builtins.elemAt m 0
+                  else
+                    "7788";
+              in
+              {
+                assertion = toString fed.port == expectedPort;
+                message = "programs.xmsg.server.federation.port (${toString fed.port}) must equal fleet node '${fed.fleet.self}' listenPort (${expectedPort}).";
+              }
+            )
         )
         ++ lib.optionals oc.enable (
           let
@@ -962,6 +1028,28 @@ in
     {
       programs.xmsg.server.svcExe = lib.mapAttrs (_: _: exe) execServices;
     }
+
+    (mkIf (fed.fleet != null) {
+      programs.xmsg.server.federation.peers =
+        if !fed.enable then
+          builtins.throw "federation.fleet needs federation.enable"
+        else
+          lib.mapAttrs (_: lib.filterAttrs (_: v: v != null)) (
+            lib.filterAttrs (n: _: !(builtins.elem n fed.fleet.hostOwned)) (
+              fleetLib.peersFor {
+                fleet = fed.fleet.value;
+                self = fed.fleet.self;
+              }
+            )
+          );
+    })
+
+    (mkIf (oc.fleet != null) {
+      programs.xmsg.observeCollector.config.sources = fleetLib.collectorSourcesFor {
+        fleet = oc.fleet.value;
+        self = oc.fleet.self;
+      };
+    })
 
     (mkIf pkgs.stdenv.hostPlatform.isLinux {
       systemd.user.services = lib.mapAttrs (name: s: {

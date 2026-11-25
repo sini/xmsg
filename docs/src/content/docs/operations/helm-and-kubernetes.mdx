@@ -348,5 +348,5 @@ decide what the leaf may do.
 
 A hub-mode Helm chart can take `values.peers` from
 [`lib.fleet.peersRenderedFor`](/operations/fleet-topology/#renderers). A fleet leaf is
-rendered outside the chart (in leaf mode the chart takes no fleet peers). The validated
-external path—combining `peersRenderedFor` with module `checkFinal`—is planned.
+rendered outside the chart (in leaf mode the chart takes no fleet peers); the external path
+can validate its rendered map with `lib.fleet.checkFinal` (on `main`, unreleased).

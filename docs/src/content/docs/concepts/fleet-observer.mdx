@@ -227,5 +227,5 @@ also stale. Items keep their IDs while the underlying condition persists.
 
 [`lib.fleet.collectorSourcesFor`](/operations/fleet-topology/#renderers) derives a
 collector's `{ node; address; identity; ca; }` source list directly from `observe`
-grants (`F5`) so `observedBy` and `collector.sources` cannot drift. Module integration
-(`observeCollector.fleet`) is planned.
+grants (`F5`) so `observedBy` and `collector.sources` cannot drift;
+`programs.xmsg.observeCollector.fleet` wires it into Home Manager (on `main`, unreleased).

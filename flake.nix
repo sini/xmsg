@@ -103,6 +103,8 @@
     in
     let
       fleetLib = import ./nix/modules/_fleet.nix { inherit (nixpkgs) lib; };
+      hmModule = import ./nix/modules/home-manager.nix { inherit packages; };
+      nxModule = import ./nix/modules/nixos.nix { inherit packages; };
     in
     {
       inherit packages;
@@ -110,12 +112,12 @@
       lib.fleet = fleetLib;
 
       homeManagerModules = rec {
-        xmsg = import ./nix/modules/home-manager.nix { inherit packages; };
+        xmsg = hmModule;
         default = xmsg;
       };
 
       nixosModules = rec {
-        xmsg = import ./nix/modules/nixos.nix { inherit packages; };
+        xmsg = nxModule;
         default = xmsg;
       };
 
@@ -126,6 +128,8 @@
             inherit pkgs;
             lib = nixpkgs.lib;
             fleet = fleetLib;
+            homeManagerModule = hmModule;
+            nixosModule = nxModule;
           };
         }
         // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

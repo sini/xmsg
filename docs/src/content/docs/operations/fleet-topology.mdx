@@ -6,7 +6,7 @@ description: Pure Nix fleet topology library (lib.fleet) for checking and render
 `lib.fleet` (`xmsg.lib.fleet`) is a pure Nix library that models a fleet's public federation topology once and derives each node's peer map, collector source list, and relay reachability from that single source of truth.
 
 :::note
-Module integration (`programs.xmsg.server.federation.fleet`, `services.xmsg.instances.<name>.federation.fleet`, and `checkFinal`) is planned for the next build unit. Today `lib.fleet` provides the standalone type, admission checks (`lib.fleet.check`), and renderers.
+`lib.fleet`, module integration (`programs.xmsg.server.federation.fleet`, `services.xmsg.instances.<name>.federation.fleet`, `programs.xmsg.observeCollector.fleet`), and `lib.fleet.checkFinal` are on `main` (unreleased).
 :::
 
 ## Fleet value (`lib.fleet.type`)

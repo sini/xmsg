@@ -2,6 +2,8 @@
   pkgs,
   lib,
   fleet,
+  homeManagerModule,
+  nixosModule,
 }:
 let
   baseFleet = {
@@ -1369,7 +1371,18 @@ let
     ))
   ];
 
-  allChecks = libChecks ++ goldenChecks ++ faults ++ noBypassChecks;
+  u2Checks = import ./u2.nix {
+    inherit
+      pkgs
+      lib
+      fleet
+      homeManagerModule
+      nixosModule
+      baseFleet
+      ;
+  };
+
+  allChecks = libChecks ++ goldenChecks ++ faults ++ noBypassChecks ++ u2Checks;
   failures = lib.filter (c: !c.ok) allChecks;
 in
 if failures == [ ] then

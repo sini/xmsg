@@ -132,7 +132,55 @@ let
           )}
           cp peers.json $out
         '';
+  peerAssertions =
+    prefix: p:
+    let
+      clauses = [
+        {
+          ok =
+            lib.count (x: x != null) [
+              p.pin
+              p.pinFromCert
+              p.ca
+            ] == 1;
+          msg = "set exactly one of pin, pinFromCert and ca.";
+        }
+        {
+          ok = p.ca == null || p.identities != null;
+          msg = "ca needs identities.";
+        }
+        {
+          ok = (p.pin == null && p.pinFromCert == null) || p.identities == null;
+          msg = "identities is only valid with ca, not with pin or pinFromCert.";
+        }
+        {
+          ok = p.identities == null || builtins.length p.identities == 1;
+          msg = "identities holds exactly one identity.";
+        }
+        {
+          ok = p.from != [ ];
+          msg = "from must hold at least one CIDR, or be null.";
+        }
+        {
+          ok = !p.observeLabels || builtins.elem "observe" p.allow;
+          msg = "observeLabels requires \"observe\" in allow.";
+        }
+        {
+          ok = !(p.leaf && p.dial != null);
+          msg = "leaf and dial cannot both be set.";
+        }
+      ];
+    in
+    map (c: {
+      assertion = false;
+      message = "${prefix}: ${c.msg}";
+    }) (builtins.filter (c: !c.ok) clauses);
 in
 {
-  inherit peerType renderPeer mkPeersFile;
+  inherit
+    peerType
+    renderPeer
+    mkPeersFile
+    peerAssertions
+    ;
 }
