@@ -176,6 +176,7 @@ impl Fixture {
                                 "GET /v1/diagnostics/federation HTTP/1.1" => {
                                     (200, json!({"available":false}))
                                 }
+                                "GET /v1/diagnostics/pairing HTTP/1.1" => (200, json!({})),
                                 other => panic!("unexpected doctor request: {other}"),
                             };
                             let body = value.to_string();

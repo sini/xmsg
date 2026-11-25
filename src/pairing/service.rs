@@ -312,6 +312,7 @@ impl PairingService {
     }
 
     /// Creates or reconfirms a responder (`accept`) or initiator (`start`) intent.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_intent(
         self: &Arc<Self>,
         fed: &Arc<FedState>,
@@ -708,8 +709,8 @@ impl PairingService {
                         id_r: artifacts.transcript.id_r,
                         spki_i: &own_spki,
                         spki_r: &peer_spki,
-                        offer_i: artifacts.transcript.offer_i.clone(),
-                        offer_r: artifacts.transcript.offer_r.clone(),
+                        offer_i: artifacts.transcript.offer_i,
+                        offer_r: artifacts.transcript.offer_r,
                         created_utc: artifacts.transcript.created_utc,
                         ceremony_expires_utc: artifacts.transcript.ceremony_expires_utc,
                         exporter,
@@ -872,8 +873,8 @@ impl PairingService {
                     id_r: artifacts.transcript.id_r,
                     spki_i: &peer_spki,
                     spki_r: &own_spki,
-                    offer_i: artifacts.transcript.offer_i.clone(),
-                    offer_r: artifacts.transcript.offer_r.clone(),
+                    offer_i: artifacts.transcript.offer_i,
+                    offer_r: artifacts.transcript.offer_r,
                     created_utc: artifacts.transcript.created_utc,
                     ceremony_expires_utc: artifacts.transcript.ceremony_expires_utc,
                     exporter,

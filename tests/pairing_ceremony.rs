@@ -44,7 +44,11 @@ fn test_fed_state(dir: &TempDir) -> Arc<FedState> {
         rate_limiter: Arc::new(RateLimiter::new(60, 20)),
         db: Arc::new(Mutex::new(conn)),
         sessions_dirs: vec![dir.path().join("sessions")],
-        agy_config: Default::default(),
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: dir.path().join("presence"),
+            brain_dir: dir.path().join("brain"),
+            ..Default::default()
+        },
         agy_store: xmsg::agy::new_agy_store(),
         pi_store: xmsg::pi::new_pi_store(),
         pi_notify_tx: tokio::sync::broadcast::channel(16).0,
@@ -67,7 +71,11 @@ fn test_app_state(dir: &TempDir, fed: Arc<FedState>) -> Arc<AppState> {
     std::fs::create_dir_all(&sessions_dir).unwrap();
     Arc::new(AppState {
         sessions_dirs: vec![sessions_dir],
-        agy_config: Default::default(),
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: dir.path().join("presence"),
+            brain_dir: dir.path().join("brain"),
+            ..Default::default()
+        },
         agy_store: fed.agy_store.clone(),
         pi_store: fed.pi_store.clone(),
         pi_notify_tx: fed.pi_notify_tx.clone(),
