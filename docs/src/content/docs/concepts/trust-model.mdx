@@ -244,8 +244,14 @@ addresses. These rules hold once the pairing ceremony and its local controls arr
   right and is not reported as mutual. Pairing a device that already has a pin adds a separate
   grant; replacing the pin is a separate, explicit action.
 
-Until the ceremony lands, no command creates, removes or blocks a pairing grant: pinned and CA
-entries in the peers file, and its `deny` list, remain the whole of federation admission.
+- **Ceremony & controls.** v1a manual pairing supports Ed25519 nodes only (CA-enrolled
+  P-256 nodes keep CA admission unchanged and cannot pair). `contact` grants require explicit
+  `--target` selectors (`pairing.targets_required` if omitted) and `owner-device` defaults to
+  `["*"]`, where `*` is reserved for any local target/principal. `block` cancels open intents and
+  denies across all grants without freeing capacity slots; `remove` frees a slot permanently;
+  `unblock` is permitted only when the interim no-restore proof holds. Revocation takes effect at
+  commit via in-memory marks (`M > installed_revision`) checked at permit issuance, and
+  initiator-only nodes have no inbound receive path (`pairing.receive_path` doctor warning).
 
 ### Authority generations
 

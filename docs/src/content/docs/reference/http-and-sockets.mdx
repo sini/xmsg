@@ -94,9 +94,8 @@ On `http.sock`, `GET /healthz` also includes the detector state and announce pos
 
 - `state` is one of `off`, `starting`, `active`, `unverified`, `permission_suspected` or `failed`.
 - `announce_state` reports the announcement posture separately: `"at_rest"`,
-  `{"window_open": <remaining_secs>}` during a `120`-second pairing window (no production
-  entry point opens a timed window until the pairing release lands, so `"timed"` nodes stay
-  `"at_rest"` until then), or `"always"`.
+  `{"window_open": <remaining_secs>}` during a `120`-second pairing window (opened only by
+  `xmsg pair accept` and closed on `cancel` or expiry), or `"always"`.
 - `announce_mode` reports the effective configured mode (`"timed"`, `"browse_only"` or
   `"always"`).
 - `detail` explains the current state and, for `permission_suspected` and `failed`, names
@@ -122,6 +121,21 @@ the generation federation checks run against. A committed revision ahead of the 
 means a change is not yet in effect. When the store cannot be read, `committed_revision` is
 `null` and `error` names the failure; the installed generation stays in effect. `pairing` is
 `null` on a node without federation and is omitted from the optional TCP health response.
+
+### Pairing control & diagnostics routes
+
+<Status id="xmsg.pairing" />
+
+All pairing endpoints are mounted **only** on the Unix HTTP router (`http.sock`); TCP `--listen`
+and leaf routers return `404`.
+
+- `GET /v1/pairing/id`, `GET /v1/pairing/list`, `GET /v1/diagnostics/pairing`: require
+  `require_local_non_plugin_owner`.
+- `POST /v1/pairing/accept`, `POST /v1/pairing/start`, `POST /v1/pairing/cancel`,
+  `POST /v1/pairing/remove`, `POST /v1/pairing/block`, `POST /v1/pairing/unblock`: require the
+  strict positive local caller check (`cred.pid`, `process::starttime`, and
+  `is_plugin_process == Ok(false)`), declining indeterminate or plugin callers with
+  `pairing.caller_indeterminate`.
 
 ### Read-only local recipient snapshot
 

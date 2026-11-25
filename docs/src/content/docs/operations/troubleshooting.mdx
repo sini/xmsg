@@ -339,3 +339,27 @@ socket, deadline expiry or unknown context must refuse. Repeating the request
 as another principal or sending control-looking bus text is not a recovery
 path. Check the [bridge boundary](/reference/executor-contracts/#daemon-caller-attribution-bridge)
 before treating unavailable as a transport failure.
+
+## Pairing refusals and `pairing.reload_failed`
+
+<Status id="xmsg.pairing" />
+
+| Code | Meaning and recovery |
+|---|---|
+| `pairing.key_algorithm` | Node or pinned peer uses a non-Ed25519 key (e.g. CA-enrolled P-256); pairing is unavailable for that key. |
+| `pairing.peer_unsupported` | Remote `--fed-listen` did not negotiate `xmsg-pair/1` ALPN. |
+| `pairing.intent_exists` | Live intent already exists for that peer with different parameters or role; `xmsg pair cancel` first or repeat identical flags to reconfirm. |
+| `pairing.intents_full` | `32` open intents active; wait for 120s expiry or `cancel` one. |
+| `pairing.grants_full` | `1024` manual grant slots used (expired/blocked grants hold slots until `xmsg pair remove`). |
+| `pairing.attempt_budget` | Outbound dial budget (`16`/60s, `4` concurrent) exhausted; failed dials do not refund. |
+| `pairing.ceremony_busy` | Another authenticated ceremony is already active for that intent. |
+| `pairing.frame_too_large` | Wire frame exceeded `8192` bytes. |
+| `pairing.clock` | Ceremony UTC window skew exceeded; check host clock (`xmsg doctor`). |
+| `pairing.peer_refused` | Remote refused before `ReceiptR`; initiator releases its intent slot automatically. |
+| `pairing.expired` | 120s monotonic intent timer elapsed. |
+| `pairing.startup_cancel_failed` | Startup intent cleanup failed; ceremonies stay refused (revocation still works) until the reload watcher tick retries and succeeds. |
+| `pairing.caller_indeterminate` | Mutation caller lacks same-UID PID/start-time/non-plugin proof (e.g. different PID namespace or registered plugin). |
+| `pairing.targets_required` | `--profile contact` requires at least one `--target`. |
+| `pairing.legacy_config_owned` | `xmsg pair remove` cannot remove a `legacy_unilateral` entry; edit `--peers-file`. |
+| `pairing.unblock_would_restore` | Interim no-restore rule refuses `unblock` while an unremoved manual grant, `pin`, or `ca` entry remains. |
+| `pairing.reload_failed` | Store commit succeeded (`committed: true`) but policy publication is behind or timed out (`10s`). Revocations are already enforced by marks; fix the peers/TLS error or wait for the watcher tick. |

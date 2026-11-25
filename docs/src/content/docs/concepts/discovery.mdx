@@ -58,11 +58,11 @@ Bounds keep LAN floods and probing contained:
 
 By default (`discovery.announce = "timed"`), enabling `discovery.mdns` starts **browse-only at
 rest** (`announce_state: "at_rest"`). The daemon never announces itself at startup. Timed mode
-announces only during pairing, which arrives with the pairing release; **until the pairing
-workflow and local controls land, no production command opens a timed window, so default nodes
-remain browse-only at rest**. When a local activation opens a window, it runs for at most
-**`120` seconds** (`announce_state: {"window_open": <remaining_secs>}`), then withdraws its record
-and returns to `at_rest`.
+announces only during a responder pairing intent (`xmsg pair accept`; `pair start`
+initiators browse only). When `pair accept` opens a window, it runs for at most
+**`120` seconds** (`announce_state: {"window_open": <remaining_secs>}`), and withdraws its record
+immediately on `pair cancel` or expiry back to `at_rest`. Pairing dials to an exact paired SPKI
+omit address announcements and resolve via candidate probes.
 
 While announcing (`window_open` or `always`), the advertisement is `_xmsg._tcp.local.` on the
 `--fed-listen` port, carrying only dialable interface addresses:
@@ -207,7 +207,7 @@ The local [health response](/reference/http-and-sockets/#lan-discovery-health) r
 | `announce_state` | Meaning |
 | --- | --- |
 | `"at_rest"` | Not announcing (idle `timed`, `browse_only`, `off`, or no dialable `--fed-listen`). |
-| `{"window_open": N}` | Bounded `120`-second pairing window open with `N` seconds remaining (no production entry point opens a window until the pairing release). |
+| `{"window_open": N}` | Bounded `120`-second pairing window open with `N` seconds remaining (opened by `xmsg pair accept`). |
 | `"always"` | Continuous announcement (`discovery.announce = "always"`). |
 
 LAN discovery reaches one network segment only: not a tailnet and not across k8s pods.

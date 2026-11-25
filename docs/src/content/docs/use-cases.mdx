@@ -8,6 +8,20 @@ import Status from '../../components/Status.astro';
 Each case below links to the pages that explain how it works. For one real example with every
 case at once, read [how this site was built](/how-this-site-was-built/).
 
+## Pair two laptops without a CA
+
+<Status id="xmsg.pairing" />
+
+Two developers with Ed25519 nodes on the same LAN (or reachable `--fed-listen` addresses) can pair
+directly without running a CA or hub:
+
+1. Each side prints its device ID with `xmsg pair id` and exchanges it out of band.
+2. Node A opens a `120`-second responder window scoped to one service:
+   `xmsg pair accept <node-b-id> --profile contact --target svc-a`.
+3. Node B initiates:
+   `xmsg pair start <node-a-id> --profile owner-device` (with `--address` if off-LAN).
+4. Both verify `xmsg-pair/1` TLS 1.3 exporter bindings and activate immediately.
+
 ## Spread work across machines
 
 Your laptop does not have to do everything. Send a build to a fast build server, a test matrix to

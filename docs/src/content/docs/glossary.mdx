@@ -399,6 +399,17 @@ See [federated view resolution](/concepts/addressing/#how-a-bare-reference-resol
 A signed `xmsg.message.received.v1` hint that the gateway's [Events](#events) profile sends. It
 tells a hosted client to read its mailbox.
 
+## Pairing
+
+<Status id="xmsg.pairing" />
+
+- **Device ID:** Canonical `xmsg-spki1:<52-char base32>` SHA-256 of an Ed25519 DER SubjectPublicKeyInfo.
+- **Intent (responder / initiator):** A 120-second monotonic pairing authorization created by `xmsg pair accept` (responder, admits one pinned peer inbound) or `xmsg pair start` (initiator, dials outbound).
+- **Grant:** A durable directional authorization (`contact` or `owner-device`, or `legacy_unilateral`) bound to one issuer, subject, exposure policy, and provenance.
+- **Block:** A durable device-level tombstone that cancels open intents and denies all grants for that device without freeing capacity slots.
+- **Authority revision:** Monotonic store counter incremented on every authority-changing transaction and recorded as `installed_revision` in each published policy generation.
+- **Capacity reservation:** A slot held (`cap_reserved`) by an open intent after `reserve_capacity` succeeds and released only by activation, terminal cancel/refusal, or startup cancellation.
+
 ## Candidate and verified presence
 
 <Status id="xmsg.discovery" />

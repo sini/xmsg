@@ -447,6 +447,27 @@ receives JSON-RPC `-32601` (`Method not found`) after bearer verification and li
 authorization. The following section documents the local harness-associated stdio
 adapter's tools.
 
+## Manual pairing (`xmsg pair`)
+
+<Status id="xmsg.pairing" />
+
+`xmsg pair` manages v1a Ed25519 peer-to-peer pairing over the daemon's Unix HTTP socket
+(`--http-sock` or `XMSG_HTTP_SOCK`; optional `--json` on read verbs). Authority mutations
+(`accept`, `start`, `cancel`, `remove`, `block`, `unblock`) require a positive local caller check
+(same UID, known PID and process start time, and confirmed non-plugin process; otherwise refused
+with `pairing.caller_indeterminate`). **No MCP tool** exposes pairing reads or mutations.
+
+| Command | Effect |
+|---|---|
+| `xmsg pair id` | Print this node's canonical `xmsg-spki1:` device ID for OOB sharing, or refuse `pairing.key_algorithm` on a P-256 node. |
+| `xmsg pair accept <peer-id> [--profile contact\|owner-device] [--target SEL]... [--principal SEL]... [--expires DURATION] [--no-wait]` | Persist a responder intent (TLS 1.3 `xmsg-pair/1` server), open the timed mDNS announce window, and wait up to `120`s. `contact` without `--target` refuses `pairing.targets_required`. |
+| `xmsg pair start <peer-id> [same flags] [--address HOST:PORT]...` | Persist an initiator intent and dial `--address` (or discovery candidates) with mutual SPKI pinning. |
+| `xmsg pair cancel <intent-id\|peer-id>` | Cancel a pending intent and close its live ceremony and timed mDNS window. |
+| `xmsg pair list [--json]` | List grants, pending intents, blocks, and committed/installed authority revisions. |
+| `xmsg pair remove <grant-id>` | Remove one manual grant (`legacy_unilateral` refuses `pairing.legacy_config_owned`). |
+| `xmsg pair block <peer-id> [--note TEXT]` | Durably block a device across all grants and cancel its open intents (does not free grant slots). |
+| `xmsg pair unblock <peer-id>` | Lift a device block only when the interim no-restore proof holds (otherwise refuses `pairing.unblock_would_restore`). |
+
 ## MCP server tools (`xmsg mcp`)
 
 `xmsg mcp` gives six tools over stdio JSON-RPC (`read_attachment`, `list`, `send`, `reply`,
