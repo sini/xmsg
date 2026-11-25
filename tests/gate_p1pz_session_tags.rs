@@ -1067,20 +1067,28 @@ fn o3_lifecycle_claude_pi_plugin_and_o5c_o5d() {
     });
 }
 
+fn copy_sh_fixture(dst: &Path) {
+    let st = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "cp \"$1\" \"$2\" && chmod 0755 \"$2\"",
+            "_",
+            "/bin/sh",
+            dst.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(st.success(), "copy_sh_fixture failed: {st}");
+}
+
 #[test]
 fn o3_claude_codex_agy_holders_and_lifecycle() {
     let dir = NodeDir::new("p1ccal");
-    // Create a distinct codex-fixture executable (copy of /bin/sh) so --codex-exe matches only it.
+    // Create distinct codex-fixture and agy-fixture executables via external cp+chmod (avoiding ETXTBSY).
     let codex_bin = dir.run.join("codex-fixture");
-    fs::copy("/bin/sh", &codex_bin).unwrap();
+    copy_sh_fixture(&codex_bin);
     let agy_bin = dir.run.join("agy-fixture");
-    fs::copy("/bin/sh", &agy_bin).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&codex_bin, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::set_permissions(&agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    copy_sh_fixture(&agy_bin);
 
     let codex_home = dir.run.join("codex-home");
     let sessions_dir = codex_home.join("sessions/2026/11/24");
@@ -1214,7 +1222,7 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
     fs::write(
         &tag_script_path,
         format!(
-            "#!/bin/sh\nprintf '%s\\n%s\\n' '{init_line}' '{call_line}' | {BIN} mcp --db-path {} --agent-sock {} --http-sock {}\n",
+            "printf '%s\\n%s\\n' '{init_line}' '{call_line}' | {BIN} mcp --db-path {} --agent-sock {} --http-sock {}\n",
             d.dir.db.display(),
             d.dir.agent_sock.display(),
             d.dir.http_sock.display(),
@@ -1341,12 +1349,7 @@ fn compat_912ca97a_oracles() {
     let self_exe = std::env::current_exe().unwrap();
     let dir_old = NodeDir::new("p1old");
     let agy_old_bin = dir_old.run.join("agy-fixture");
-    fs::copy("/bin/sh", &agy_old_bin).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&agy_old_bin, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    copy_sh_fixture(&agy_old_bin);
     let d_old = Daemon::start(
         dir_old,
         &prev,
