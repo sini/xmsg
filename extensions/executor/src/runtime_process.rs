@@ -976,6 +976,13 @@ impl Session {
 
 fn native_descriptors_cloexec(command: &mut ProcessCommand) -> Result<(), ErrorCode> {
     use std::os::unix::process::CommandExt;
+    #[cfg(test)]
+    if let Some((limit, available, inventory)) =
+        DESCRIPTOR_FIXTURE.with(|value| value.borrow_mut().take())
+    {
+        descriptor_envelope(limit?, available, || inventory)?;
+        return Ok(());
+    }
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -994,38 +1001,55 @@ fn native_descriptors_cloexec(command: &mut ProcessCommand) -> Result<(), ErrorC
     } == 0;
     #[cfg(not(target_os = "linux"))]
     let use_close_range = false;
-    if !use_close_range {
-        if limit.rlim_cur == libc::RLIM_INFINITY || limit.rlim_cur > (1 << 20) {
-            return Err(ErrorCode::NativeDescriptorLimitUnsupported);
-        }
+    let maximum = descriptor_envelope(limit.rlim_cur, use_close_range, || {
         #[cfg(target_os = "linux")]
         let directory = "/proc/self/fd";
         #[cfg(not(target_os = "linux"))]
         let directory = "/dev/fd";
-        let entries = std::fs::read_dir(directory)
-            .map_err(|_| ErrorCode::NativeDescriptorInventoryUnavailable)?;
-        for entry in entries {
-            let entry = entry.map_err(|_| ErrorCode::NativeDescriptorInventoryUnavailable)?;
-            let fd = entry
-                .file_name()
-                .to_str()
-                .and_then(|s| s.parse::<u64>().ok())
-                .ok_or(ErrorCode::NativeDescriptorInventoryUnavailable)?;
-            if fd >= limit.rlim_cur {
-                return Err(ErrorCode::NativeDescriptorOutsideLimit);
-            }
-        }
-    }
-    let maximum = if use_close_range {
-        0
-    } else {
-        limit.rlim_cur as libc::c_int
-    };
+        std::fs::read_dir(directory)
+            .map_err(|_| ErrorCode::NativeDescriptorInventoryUnavailable)?
+            .map(|entry| {
+                entry
+                    .map_err(|_| ErrorCode::NativeDescriptorInventoryUnavailable)?
+                    .file_name()
+                    .to_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .ok_or(ErrorCode::NativeDescriptorInventoryUnavailable)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })?;
     // Marking rather than closing preserves std's exec-error pipe.
     unsafe {
         command.pre_exec(move || native_descriptor_flags(use_close_range, maximum));
     }
     Ok(())
+}
+
+fn descriptor_envelope(
+    limit: libc::rlim_t,
+    close_range: bool,
+    inventory: impl FnOnce() -> Result<Vec<u64>, ErrorCode>,
+) -> Result<libc::c_int, ErrorCode> {
+    if close_range {
+        return Ok(0);
+    }
+    if limit == libc::RLIM_INFINITY || limit > (1 << 20) {
+        return Err(ErrorCode::NativeDescriptorLimitUnsupported);
+    }
+    if inventory()?.iter().any(|fd| *fd >= limit) {
+        return Err(ErrorCode::NativeDescriptorOutsideLimit);
+    }
+    Ok(limit as libc::c_int)
+}
+#[cfg(test)]
+type DescriptorFixture = (
+    Result<libc::rlim_t, ErrorCode>,
+    bool,
+    Result<Vec<u64>, ErrorCode>,
+);
+#[cfg(test)]
+thread_local! {
+    static DESCRIPTOR_FIXTURE: std::cell::RefCell<Option<DescriptorFixture>> = const { std::cell::RefCell::new(None) };
 }
 
 fn native_descriptor_flags(use_close_range: bool, maximum: libc::c_int) -> std::io::Result<()> {
@@ -1126,6 +1150,48 @@ mod descriptor_tests {
     use std::io::Write;
     use std::os::unix::process::CommandExt;
 
+    fn refuse_descriptor_fixture(inputs: DescriptorFixture, expected: ErrorCode) {
+        DESCRIPTOR_FIXTURE.with(|value| *value.borrow_mut() = Some(inputs));
+        let mut command = ProcessCommand::new("/must-not-spawn");
+        assert_eq!(native_descriptors_cloexec(&mut command), Err(expected));
+        assert!(DESCRIPTOR_FIXTURE.with(|value| value.borrow().is_none()));
+    }
+    #[test]
+    fn native_descriptor_outside_limit_is_a_named_refusal() {
+        refuse_descriptor_fixture(
+            (Ok(256), false, Ok(vec![3, 256])),
+            ErrorCode::NativeDescriptorOutsideLimit,
+        );
+    }
+    #[test]
+    fn native_descriptor_unsupported_limit_is_a_named_refusal() {
+        for limit in [libc::RLIM_INFINITY, (1 << 20) + 1] {
+            refuse_descriptor_fixture(
+                (Ok(limit), false, Ok(vec![])),
+                ErrorCode::NativeDescriptorLimitUnsupported,
+            );
+        }
+    }
+    #[test]
+    fn native_descriptor_unavailable_inventory_is_a_named_refusal() {
+        refuse_descriptor_fixture(
+            (
+                Err(ErrorCode::NativeDescriptorInventoryUnavailable),
+                false,
+                Ok(vec![]),
+            ),
+            ErrorCode::NativeDescriptorInventoryUnavailable,
+        );
+        refuse_descriptor_fixture(
+            (
+                Ok(256),
+                false,
+                Err(ErrorCode::NativeDescriptorInventoryUnavailable),
+            ),
+            ErrorCode::NativeDescriptorInventoryUnavailable,
+        );
+    }
+
     #[test]
     fn native_exec_excludes_a_high_inheritable_unowned_socket() {
         let (socket, _peer) = UnixStream::pair().unwrap();
@@ -1138,8 +1204,24 @@ mod descriptor_tests {
             unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
             0
         );
-        let high = limit.rlim_cur.saturating_sub(1).min(1000) as libc::c_int;
-        assert!(high > fd);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            unsafe {
+                libc::syscall(
+                    libc::SYS_close_range,
+                    u32::MAX,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                )
+            },
+            0,
+            "high descriptor fixture requires the actual close_range path"
+        );
+        let high = limit.rlim_cur.saturating_sub(1).min(4096) as libc::c_int;
+        assert!(
+            high > fd && high > 1024,
+            "descriptor test requires an admitted limit above 1025"
+        );
         let metadata = File::from(std::os::fd::OwnedFd::from(socket.try_clone().unwrap()))
             .metadata()
             .unwrap();

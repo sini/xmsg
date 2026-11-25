@@ -338,5 +338,105 @@
     "test_module": "lifecycle::tests",
     "test_file": "extensions/executor/src/lifecycle_tests.rs",
     "assertion": "emergency disable submitted queued native content"
+  },
+  {
+    "id": "runtime-adapter-key-scope",
+    "file": "extensions/executor/src/eligibility.rs",
+    "needle": "&& r.key == *facts.key",
+    "replacement": "&& true",
+    "test": "eligibility_requires_exact_live_record_for_every_effect",
+    "test_module": "eligibility::tests",
+    "test_file": "extensions/executor/src/eligibility.rs",
+    "assertion": "adapter qualification key drift accepted"
+  },
+  {
+    "id": "runtime-caller-peer-uid",
+    "file": "extensions/executor/src/caller_policy.rs",
+    "needle": "if !runtime.valid() || runtime.uid != context.peer_uid || policy_revision == 0 || now <= 0 {",
+    "replacement": "if !runtime.valid() || policy_revision == 0 || now <= 0 {",
+    "test": "caller_runtime_uid_must_equal_attested_peer_even_for_matching_record",
+    "test_module": "caller_policy::tests",
+    "test_file": "extensions/executor/src/caller_policy_tests.rs",
+    "assertion": "caller runtime UID differed from attested peer"
+  },
+  {
+    "id": "runtime-caller-record-zero-revision",
+    "file": "extensions/executor/src/caller_policy.rs",
+    "needle": "&& self.revision > 0",
+    "replacement": "&& true",
+    "test": "zero_caller_record_revision_cannot_qualify",
+    "test_module": "caller_policy::tests",
+    "test_file": "extensions/executor/src/caller_policy_tests.rs",
+    "assertion": "zero caller record revision qualified"
+  },
+  {
+    "id": "runtime-native-descriptor-high-range",
+    "file": "extensions/executor/src/runtime_process.rs",
+    "needle": "libc::SYS_close_range,\n                3u32,\n                u32::MAX,",
+    "replacement": "libc::SYS_close_range,\n                3u32,\n                1023u32,",
+    "test": "native_exec_excludes_a_high_inheritable_unowned_socket",
+    "test_module": "runtime_process::descriptor_tests",
+    "test_file": "extensions/executor/src/runtime_process.rs",
+    "assertion": "native exec inherited the deliberately unowned socket"
+  },
+  {
+    "id": "runtime-codex-native-path-override",
+    "file": "extensions/executor/src/runtime_process.rs",
+    "needle": "command.env(\"CODEX_PATH\", &program.native.path);",
+    "replacement": "command.env(\"CODEX_PATH\", std::env::var_os(\"CODEX_PATH\").map(std::path::PathBuf::from).unwrap_or_else(|| program.native.path.clone()));",
+    "test": "codex_native_exec_uses_pinned_path_despite_inherited_override",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs",
+    "assertion": "native Codex executable did not use the exact pin"
+  },
+  {
+    "id": "runtime-claude-native-path-absent",
+    "file": "extensions/executor/src/runtime_process.rs",
+    "needle": "command.env(\"CLAUDE_CODE_EXECUTABLE\", &program.native.path);",
+    "replacement": "let _ = &program.native.path;",
+    "test": "real_acp_bootstrap_uses_inherited_lease_and_observed_model_before_brief",
+    "test_module": "supervisor::tests",
+    "test_file": "extensions/executor/src/supervisor_tests.rs",
+    "assertion": "native Claude executable pin was absent or inherited"
+  },
+  {
+    "id": "runtime-reconnect-nonrunning-lease",
+    "file": "extensions/executor/src/resume.rs",
+    "needle": "if !current {",
+    "replacement": "if false && !current {",
+    "test": "reconnect_nonrunning_lease_refuses_before_operation_or_unknown_report",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "nonrunning reconnect created a native operation"
+  },
+  {
+    "id": "runtime-original-dispatch-caller",
+    "file": "extensions/executor/src/lifecycle.rs",
+    "needle": "if original != admission_id {",
+    "replacement": "if false && original != admission_id {",
+    "test": "revoking_only_dispatcher_refuses_a_second_current_callers_queued_send",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "revoked dispatcher allowed second caller native content"
+  },
+  {
+    "id": "runtime-strict-steer-capability",
+    "file": "extensions/executor/src/lifecycle.rs",
+    "needle": "Action::Steer(_) => Some(Capability::StrictSteer),",
+    "replacement": "Action::Steer(_) => None,",
+    "test": "strict_steer_requires_its_own_capability_outside_reconnect",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "strict steer without its capability was admitted"
+  },
+  {
+    "id": "runtime-queued-capacity",
+    "file": "extensions/executor/src/lifecycle.rs",
+    "needle": "const MAX_QUEUED: i64 = 32;",
+    "replacement": "const MAX_QUEUED: i64 = 1 << 40;",
+    "test": "native_queue_accepts_thirty_two_and_refuses_thirty_third",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "thirty-third queued native operation accepted"
   }
 ]

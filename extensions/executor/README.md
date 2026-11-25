@@ -70,6 +70,13 @@ The test-only fake peers stay in `tests/support/`: deterministic in-memory and s
 - Codex ACP 2.7.0 / Codex 0.169.1;
 - native agy ACP / agy 1.5.10.
 
+The Claude adapter's immutable `a6ba98ff3cf065d681abfe21042a8ce7ee292a09`
+`package.json` and `package-lock.json` pin `@anthropic-ai/claude-agent-sdk`
+**0.3.326** and `@agentclientprotocol/sdk` **2.7.0**. Those transitive SDK pins
+remain at that package revision; `fixtures/pins.json` records executable and
+protocol identities rather than duplicating an independently selectable SDK API.
+They confer no qualification.
+
 Per-call parent attribution, native ask-mode verification and effective reviewer isolation are explicitly first in the qualification backlog. A source version or a passing fake test is not runtime qualification.
 
 ## Staged supervisor, workspaces and content membership
@@ -94,8 +101,8 @@ The check script builds the candidate scratch daemon outside cargo-test and reco
 
 Pinned ACP schema basis: [RequestId and v1 schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/fa50fde1ac75ccd22fafff69c3e0ec3562a4f30f/schema/v1/schema.json), [stdio transport](https://agentclientprotocol.com/protocol/v1/transports). This package makes no v2 or real-runtime support claim.
 
-The Executor contracts workflow registers all **34 runtime source faults** in
-`fixtures/runtime-mutants.json`: **68 RED/restored-GREEN arms** across six Ubuntu
+The Executor contracts workflow registers all **44 runtime source faults** in
+`fixtures/runtime-mutants.json`: **88 RED/restored-GREEN arms** across six Ubuntu
 shards, derived from the registry rather than duplicated case lists. The unchanged
 `control_faults.py` controller checks fresh compiled nonces, source/artifact
 integrity and 11 refusal/cleanup controls. A completion job requires every arm,

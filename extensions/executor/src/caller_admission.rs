@@ -152,6 +152,18 @@ impl CallerAuthority {
         }
     }
     #[cfg(test)]
+    pub(crate) fn fixture_add_principal(&self, principal: &str) -> Result<(), ErrorCode> {
+        let mut state = self.state.lock().map_err(storage)?;
+        let facts = state
+            .facts
+            .clone()
+            .ok_or(ErrorCode::CallerArtifactUnproven)?;
+        state
+            .provider
+            .fixture_add_principal(principal, facts)
+            .map_err(error)
+    }
+    #[cfg(test)]
     pub(crate) fn fixture_policy_revision(
         &self,
         db: &rusqlite::Connection,

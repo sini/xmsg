@@ -151,6 +151,24 @@ mod tests {
         );
         let eligibility = Eligibility::fixture(vec![record.clone()]);
         assert_eq!(eligibility.require(&facts), Ok(()));
+        for axis in 0..4 {
+            let mut changed = key.clone();
+            match axis {
+                0 => changed.pin_id.push_str("-other"),
+                1 => changed.adapter_version.push_str("-other"),
+                2 => changed.native_mode.push_str("-other"),
+                _ => changed.model.name.push_str("-other"),
+            }
+            let changed_facts = EffectFacts {
+                key: &changed,
+                ..facts
+            };
+            assert_eq!(
+                eligibility.require(&changed_facts),
+                Err(ErrorCode::NotSupported),
+                "adapter qualification key drift accepted: {axis}"
+            );
+        }
         let required = [Capability::StrictSteer];
         facts.required_capabilities = &required;
         assert!(eligibility.require(&facts).is_err());

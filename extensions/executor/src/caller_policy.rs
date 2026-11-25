@@ -381,6 +381,18 @@ impl CallerEligibility {
         Ok((provider, context, reference))
     }
     #[cfg(test)]
+    pub(crate) fn fixture_add_principal(
+        &mut self,
+        principal: &str,
+        runtime: CallerRuntimeFacts,
+    ) -> Result<(), MissingTrustProperty> {
+        let (mut other, _, _) = Self::fixture_integration(principal, runtime)?;
+        let mut record = other.records.remove(0);
+        record.id = format!("fixture-{principal}");
+        self.records.push(record);
+        Ok(())
+    }
+    #[cfg(test)]
     pub(crate) fn fixture_policy_revision(
         &mut self,
         reference: &mut CallerRecordReference,

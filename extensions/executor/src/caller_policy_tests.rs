@@ -607,3 +607,27 @@ fn initial_lookup_requires_the_exact_caller_tuple() {
         );
     }
 }
+
+#[test]
+fn caller_runtime_uid_must_equal_attested_peer_even_for_matching_record() {
+    let mut changed = runtime();
+    changed.uid += 1;
+    let mut matching = record();
+    matching.runtime = changed.clone();
+    let provider = CallerEligibility::fixture(vec![matching]);
+    assert!(
+        provider.qualify(&context(), &changed, 1, 100).is_err(),
+        "caller runtime UID differed from attested peer"
+    );
+}
+
+#[test]
+fn zero_caller_record_revision_cannot_qualify() {
+    let mut matching = record();
+    matching.revision = 0;
+    let provider = CallerEligibility::fixture(vec![matching]);
+    assert!(
+        provider.qualify(&context(), &runtime(), 1, 100).is_err(),
+        "zero caller record revision qualified"
+    );
+}

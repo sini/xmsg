@@ -10,6 +10,8 @@ trace = sys.argv[1]
 base = os.path.splitext(trace)[0]
 with open(base + ".fd-expected", encoding="utf-8") as source:
     expected = json.load(source)
+with open(base + ".native-env", "w", encoding="utf-8") as output:
+    json.dump({key: os.environ.get(key) for key in ("CODEX_PATH", "CLAUDE_CODE_EXECUTABLE")}, output)
 inherited = []
 matching = []
 limit = min(resource.getrlimit(resource.RLIMIT_NOFILE)[0], 65536)

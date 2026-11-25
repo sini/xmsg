@@ -216,6 +216,11 @@ network wait, and stale authorization is not cached.
 | Codex | codex-acp 2.7.0 | Codex 0.169.1 |
 | Antigravity | native agy ACP | agy 1.5.10 |
 
+Claude ACP's pinned revision `a6ba98ff3cf065d681abfe21042a8ce7ee292a09`
+also fixes Claude Agent SDK **0.3.326** and ACP SDK **2.7.0** in its
+`package.json` and `package-lock.json`. These are package dependencies, not
+separately configurable or qualified executor runtimes.
+
 These are a candidate ACP-v1 test matrix. **No real tuple is qualified.** Fake
 fixtures do not prove steering, interrupt quiescence, native resume, human-only
 provenance or reviewer isolation. Codex `humanCommand` provenance may be recorded

@@ -405,6 +405,11 @@ fn real_acp_bootstrap_uses_inherited_lease_and_observed_model_before_brief() {
 }
 
 #[test]
+fn codex_native_exec_uses_pinned_path_despite_inherited_override() {
+    real_acp_fixture(AcpScenario::CodexEnvironment);
+}
+
+#[test]
 fn continuous_native_frames_service_attach_and_strict_steer_before_batch_end() {
     real_acp_fixture(AcpScenario::Fairness);
 }
@@ -420,6 +425,7 @@ fn qualified_reconnect_attaches_same_live_owned_lease_without_native_session_or_
 }
 enum AcpScenario {
     Bootstrap,
+    CodexEnvironment,
     Fairness,
     PrelaunchFailure,
     Reconnect,
@@ -494,6 +500,7 @@ fn acp_failure_snapshot(
         "bindings":rows("SELECT session_id||':'||generation||':'||json_extract(binding,'$.expires_at') FROM native_bindings ORDER BY session_id")})
 }
 fn real_acp_fixture(scenario: AcpScenario) {
+    let codex_environment = matches!(scenario, AcpScenario::CodexEnvironment);
     let fairness = matches!(scenario, AcpScenario::Fairness);
     let prelaunch_failure = matches!(scenario, AcpScenario::PrelaunchFailure);
     let reconnect = matches!(
@@ -524,7 +531,7 @@ fn real_acp_fixture(scenario: AcpScenario) {
     let pin = crate::capability::builtin_pins()
         .unwrap()
         .pins
-        .remove(0)
+        .remove(usize::from(codex_environment))
         .pin;
     let trace = f.dir.path().join("native-wire.jsonl");
     let barrier_path = f.dir.path().join("prompt-barrier");
@@ -555,11 +562,20 @@ fn real_acp_fixture(scenario: AcpScenario) {
             },
         });
     }
+    let native_mode = if codex_environment {
+        "read-only"
+    } else {
+        "default"
+    };
+    if codex_environment {
+        config.profiles[0].harness = Harness::Codex;
+    }
     let resolved = &mut config.defaults[0].resolved;
+    resolved.harness = pin.harness.clone();
     resolved.qualification.pin_id = pin.id.clone();
     resolved.qualification.adapter_version = pin.adapter_version;
     resolved.qualification.runtime_version = pin.runtime_version;
-    resolved.qualification.native_mode = "default".into();
+    resolved.qualification.native_mode = native_mode.into();
     let model = resolved.model.clone();
     let workspace = resolved.workspace.clone();
     let root = f.dir.path();
@@ -586,7 +602,7 @@ fn real_acp_fixture(scenario: AcpScenario) {
                 trace.to_string_lossy().into_owned(),
                 barrier_path.to_string_lossy().into_owned(),
             ],
-            native_mode: "default".into(),
+            native_mode: native_mode.into(),
             model,
             native_model_id: "fake-model".into(),
         }],
@@ -879,6 +895,24 @@ fn real_acp_fixture(scenario: AcpScenario) {
         serde_json::json!([]),
         "native child inherited an unowned socket"
     );
+    let expected_pin = &configuration.programs[0].native.path;
+    let pin_env: serde_json::Value =
+        serde_json::from_slice(&fs::read(trace.with_extension("native-env")).unwrap()).unwrap();
+    if codex_environment {
+        assert_eq!(
+            pin_env["CODEX_PATH"],
+            expected_pin.to_string_lossy().as_ref(),
+            "native Codex executable did not use the exact pin"
+        );
+        assert!(pin_env["CLAUDE_CODE_EXECUTABLE"].is_null());
+    } else {
+        assert_eq!(
+            pin_env["CLAUDE_CODE_EXECUTABLE"],
+            expected_pin.to_string_lossy().as_ref(),
+            "native Claude executable pin was absent or inherited"
+        );
+        assert!(pin_env["CODEX_PATH"].is_null());
+    }
     let started = started.unwrap();
     if prelaunch_failure {
         let mut journal = service.journal.lock().unwrap();
@@ -1503,6 +1537,9 @@ fn fixture_process_entrypoint() {
                 .unwrap();
             let metadata = File::from(held).metadata().unwrap();
             fs::write(trace.with_extension("fd-expected"), serde_json::to_vec(&serde_json::json!({"dev":metadata.dev(), "ino":metadata.ino(), "kind":metadata.mode() & 0o170000, "fd":manifest.startup_fd})).unwrap()).unwrap();
+            // Only this isolated test child receives the hostile ambient overrides.
+            std::env::set_var("CODEX_PATH", "/nonexistent/ambient-codex");
+            std::env::set_var("CLAUDE_CODE_EXECUTABLE", "/nonexistent/ambient-claude");
             run_inherited(manifest.startup_fd, manifest.max_wall_ms).unwrap();
         } else {
             run_supervisor_process(manifest).unwrap();

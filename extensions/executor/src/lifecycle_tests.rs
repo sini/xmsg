@@ -2127,3 +2127,227 @@ fn wedged_native_writer_releases_journal_for_owner_disable_and_status() {
         assert!(result.is_err());
     });
 }
+
+#[test]
+fn reconnect_nonrunning_lease_refuses_before_operation_or_unknown_report() {
+    for execution_state in ["ended", "exited", "starting"] {
+        let mut f = fixture();
+        f.record.capabilities.push(Capability::Reconnect);
+        let policy = replace_adapter_policy(&f);
+        f.service.journal.lock().unwrap().runtime_policy = Some(policy);
+        let reply = admit_reconnect(
+            &f,
+            "nonrunning-reconnect",
+            crate::protocol::ResumeKind::Reconnect,
+        );
+        assert!(matches!(
+            reply.receipt.authorization,
+            crate::protocol::Authorization::Allowed { .. }
+        ));
+        let mut journal = f.service.journal.lock().unwrap();
+        journal
+            .db
+            .execute("UPDATE executions SET state=?1", [execution_state])
+            .unwrap();
+        let result = journal.reserve_reconnect(2, &|| Ok(105));
+        let operations: i64 = journal
+            .db
+            .query_row("SELECT COUNT(*) FROM native_operations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            operations, 0,
+            "nonrunning reconnect created a native operation"
+        );
+        assert!(
+            matches!(result, Err(ErrorCode::UnknownTarget)),
+            "nonrunning reconnect did not refuse UnknownTarget: {result:?}"
+        );
+        let unknown: i64 = journal
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM audit WHERE event='reconnect_unknown'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unknown, 0);
+    }
+}
+
+#[test]
+fn strict_steer_requires_its_own_capability_outside_reconnect() {
+    let mut f = fixture();
+    let id = queue(&f);
+    assert!(submit(&mut f, id, EPOCH).0.unwrap());
+    let turn_id = f.driver.active_turn_id().unwrap().to_owned();
+    f.record
+        .capabilities
+        .retain(|c| *c != Capability::StrictSteer);
+    let policy = replace_adapter_policy(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(policy);
+    let request = ControlRequest {
+        version: 1,
+        request_id: "unqualified-steer".into(),
+        target: Some(Target::Turn {
+            session_id: "session-1".into(),
+            generation: 1,
+            turn_id,
+        }),
+        action: Action::Steer(crate::protocol::SteerArgs {
+            text: "steer".into(),
+        }),
+        deadline: None,
+    };
+    let reply = f.service.lifecycle(peer(), request, 101).unwrap();
+    assert!(
+        matches!(
+            reply.receipt.authorization,
+            crate::protocol::Authorization::Denied { .. }
+        ),
+        "strict steer without its capability was admitted"
+    );
+    let count: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row("SELECT COUNT(*) FROM admissions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn native_queue_accepts_thirty_two_and_refuses_thirty_third() {
+    let f = fixture();
+    for n in 0..33 {
+        let reply = f
+            .service
+            .lifecycle(
+                peer(),
+                ControlRequest {
+                    version: 1,
+                    request_id: format!("queue-{n}"),
+                    target: Some(Target::Execution {
+                        session_id: "session-1".into(),
+                        generation: 1,
+                    }),
+                    action: Action::Send(SendArgs {
+                        text: "small".into(),
+                        prefer_live: None,
+                    }),
+                    deadline: Some(170),
+                },
+                101,
+            )
+            .unwrap();
+        assert!(matches!(
+            reply.receipt.authorization,
+            crate::protocol::Authorization::Allowed { .. }
+        ));
+        let result = f
+            .service
+            .journal
+            .lock()
+            .unwrap()
+            .queue_native(n + 2, &|| Ok(102));
+        if n < 32 {
+            assert_eq!(result, Ok(()), "queue rejected an entry within capacity");
+        } else {
+            assert_eq!(
+                result,
+                Err(ErrorCode::ResourceLimit),
+                "thirty-third queued native operation accepted"
+            );
+        }
+    }
+    let count: i64 = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM native_operations WHERE state='queued'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 32);
+}
+
+#[test]
+fn revoking_only_dispatcher_refuses_a_second_current_callers_queued_send() {
+    let mut f = fixture();
+    let policy = f
+        .service
+        .journal
+        .lock()
+        .unwrap()
+        .runtime_policy
+        .clone()
+        .unwrap();
+    policy
+        .callers
+        .fixture_add_principal("second-worker")
+        .unwrap();
+    f.configuration.control.grants.push(Grant {
+        principal: "second-worker".into(),
+        verb: Verb::Send,
+        target: GrantTarget::Session {
+            session_id: "session-1".into(),
+            generation: 1,
+        },
+    });
+    {
+        let journal = f.service.journal.lock().unwrap();
+        journal
+            .db
+            .execute(
+                "UPDATE configuration SET body=?1",
+                [serde_json::to_string(&f.configuration.control).unwrap()],
+            )
+            .unwrap();
+    }
+    let policy = replace_adapter_policy(&f);
+    f.service.journal.lock().unwrap().runtime_policy = Some(policy.clone());
+    f.service = f.service.fixture_attributed("second-worker");
+    let id = queue(&f);
+    f.service
+        .admin(
+            peer(),
+            OWNER,
+            AdminCommand::RevokeCallerQualification {
+                request_id: "revoke-dispatcher-only".into(),
+                expected_revision: 1,
+                record_id: "fixture-caller".into(),
+                record_revision: 1,
+            },
+            102,
+        )
+        .unwrap();
+    {
+        let journal = f.service.journal.lock().unwrap();
+        assert!(
+            policy.callers.require(&journal.db, id, 1, 103).is_ok(),
+            "second caller was not current"
+        );
+        assert!(
+            policy.callers.require(&journal.db, 1, 1, 103).is_err(),
+            "dispatcher caller was not revoked"
+        );
+        assert!(policy
+            .require(&f.configuration.control.defaults[0].resolved, 1, 103, false)
+            .is_ok());
+    }
+    let (result, wire) = submit(&mut f, id, EPOCH);
+    assert!(
+        wire.is_empty(),
+        "revoked dispatcher allowed second caller native content"
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        ErrorCode::CallerQualificationUnavailable
+    );
+    assert_eq!(state(&f, id), "queued");
+}
