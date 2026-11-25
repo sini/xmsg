@@ -352,8 +352,10 @@ assert "not allowed" not in body_send_ok.lower() and "op_denied" not in body_sen
 st_send_other, body_send_other = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"other@{{id_a}}", "text": "deny-q2-9"}})
 assert st_send_other >= 400 and ("not allowed" in body_send_other.lower() or "denied" in body_send_other.lower()), f"Q2-9 send to unlisted target 'other' unexpectedly succeeded: {{st_send_other}} {{body_send_other}}"
 
-# Revocation + nothing revives BY EFFECT: block B on A -> B->A send refused; remove + unblock -> still refused.
-subprocess.run([xmsg, "pair", "--http-sock", sock_a, "block", id_b], check=True, capture_output=True)
+# Revocation + nothing revives BY EFFECT: block B on A -> installed_revision == committed_revision and B->A send refused; remove + unblock -> still refused.
+blk_proc = subprocess.run([xmsg, "pair", "--http-sock", sock_a, "block", id_b], check=True, capture_output=True, text=True)
+blk_json = json.loads(blk_proc.stdout)
+assert blk_json.get("committed") is True and blk_json.get("installed_revision") == blk_json.get("committed_revision"), f"pair block did not publish committed revision: {{blk_json}}"
 st_after_blk, body_after_blk = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "blocked"}})
 assert st_after_blk >= 400, f"revoked send after block unexpectedly succeeded: {{st_after_blk}} {{body_after_blk}}"
 

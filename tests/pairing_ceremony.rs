@@ -1167,3 +1167,121 @@ async fn q2_6_monotonic_120s_deadline_expires_intent() {
     let err = rt.service.wait_for_responder(&intent).await.unwrap_err();
     assert_eq!(err.code(), "pairing.expired");
 }
+
+#[tokio::test]
+async fn m10_block_device_publishes_update_and_refuses_at_admission_and_permit_fence() {
+    let dir = TempDir::new().unwrap();
+    let kp = KeyPair::generate_for(&PKCS_ED25519).unwrap();
+    let params = CertificateParams::new(vec!["test.local".to_string()]).unwrap();
+    let cert = params.self_signed(&kp).unwrap();
+    let cert_path = dir.path().join("fed.crt");
+    let key_path = dir.path().join("fed.key");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, kp.serialize_pem()).unwrap();
+
+    let conn = rusqlite::Connection::open(dir.path().join("xmsg.db")).unwrap();
+    xmsg::storage::init_db(&conn).unwrap();
+    let fed = Arc::new(FedState {
+        discovery: Default::default(),
+        node_name: "test.local".into(),
+        peers: Arc::new(PeersMap::empty()).into(),
+        cert_der: cert.der().to_vec(),
+        cert_chain_der: Vec::new(),
+        key_der: kp.serialize_der(),
+        rate_limiter: Arc::new(RateLimiter::new(60, 20)),
+        db: Arc::new(Mutex::new(conn)),
+        sessions_dirs: vec![dir.path().join("sessions")],
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: dir.path().join("presence"),
+            brain_dir: dir.path().join("brain"),
+            ..Default::default()
+        },
+        agy_store: xmsg::agy::new_agy_store(),
+        pi_store: xmsg::pi::new_pi_store(),
+        pi_notify_tx: tokio::sync::broadcast::channel(16).0,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+        notify_tx: tokio::sync::broadcast::channel(16).0,
+        max_body: 65536,
+        max_attachment_bytes: 8 * 1024 * 1024,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Default::default(),
+        dynamic_tls: Default::default(),
+        reply_ttl: Duration::from_secs(3600),
+        list_queries: Default::default(),
+    });
+    let reloader = Arc::new(
+        xmsg::fed::CredentialReloader::new_full(
+            cert_path,
+            key_path,
+            None,
+            None,
+            fed.current_peers(),
+            Some(fed.clone()),
+            Arc::new(Mutex::new(Default::default())),
+        )
+        .unwrap(),
+    );
+    xmsg::fed::attach_pairing_reloader(&fed, &reloader);
+
+    let rt = pairing_runtime(&fed);
+    rt.service.attempt_startup_cancel(&fed).unwrap();
+    let (cert_b, _, peer_b) = gen_ed25519_identity();
+    let peer_b_id = SpkiDeviceId::parse_device_id_string(&peer_b).unwrap().0;
+    seed_manual_grant(
+        &fed,
+        peer_b_id,
+        PairingProfile::Contact,
+        vec!["svc-a".into()],
+        None,
+    );
+    {
+        let db = fed.db.lock().unwrap();
+        db.execute("UPDATE pairing_meta SET authority_revision = 1 WHERE singleton = 1", [])
+            .unwrap();
+    }
+    fed.publish_pairing_update(1).await.unwrap();
+
+    let before_peers = fed.current_peers();
+    let cert_der_b = rustls::pki_types::CertificateDer::from(cert_b.clone());
+    before_peers
+        .resolve_incoming_peer(&cert_der_b, &[])
+        .expect("pre-block manual SPKI must be admitted");
+    let auth_b = manual_auth_peer(&cert_b, peer_b_id, &peer_b);
+    let res = xmsg::pairing::auth::Resource {
+        target: Some("svc-a"),
+        principal: Some("anon"),
+        body_bytes: 10,
+        attachment_bytes: 0,
+    };
+    fed.authorize_peer_op(&before_peers, &auth_b, xmsg::pairing::auth::Operation::Send, &res)
+        .expect("pre-block send must be permitted");
+
+    let _open_conn_token = Arc::new(xmsg::pairing::store::GenerationToken::new(
+        before_peers.authority_revision,
+    ));
+    xmsg::pairing::store::revocations_for_db(&fed.db).register_token(&_open_conn_token);
+    let outcome = rt.service.block_device(&fed, &peer_b).await.unwrap();
+    assert!(outcome.committed);
+    assert_eq!(
+        outcome.installed_revision, outcome.committed_revision,
+        "pair block must publish and install the committed revision"
+    );
+    let after_peers = fed.current_peers();
+    assert_eq!(after_peers.authority_revision, outcome.committed_revision);
+    assert!(
+        after_peers.resolve_incoming_peer(&cert_der_b, &[]).is_err(),
+        "blocked SPKI must be refused at TLS admission"
+    );
+    assert!(
+        fed.authorize_peer_op(&before_peers, &auth_b, xmsg::pairing::auth::Operation::Send, &res)
+            .is_err(),
+        "blocked device must be refused at the permit fence even against pre-block snapshot"
+    );
+    assert!(
+        fed.authorize_peer_op(&after_peers, &auth_b, xmsg::pairing::auth::Operation::Send, &res)
+            .is_err(),
+        "blocked device must be refused at the permit fence on published snapshot"
+    );
+}

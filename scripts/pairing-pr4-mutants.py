@@ -423,6 +423,15 @@ CASES = [
         lib_test("pairing::ceremony::tests::p256_peer_matching_pinned_hash_is_refused_with_key_algorithm"),
         False,
     ),
+    # 45. M10 (Q2-7a): block_device skips publish_pairing_update after commit
+    (
+        "q2-7a-block-skip-publication-after-commit",
+        "src/pairing/service.rs",
+        '        for id in matching_ids {\n            self.finish_cancelled_live_intent(fed, &id, "device blocked");\n        }\n\n        let installed_rev = fed.publish_pairing_update(committed_rev).await?;',
+        '        for id in matching_ids {\n            self.finish_cancelled_live_intent(fed, &id, "device blocked");\n        }\n\n        let installed_rev = committed_rev;',
+        int_test("m10_block_device_publishes_update_and_refuses_at_admission_and_permit_fence"),
+        False,
+    ),
 ]
 
 
