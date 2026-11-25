@@ -619,6 +619,11 @@ path = "tests/pairing_vectors.rs"
 required-features = ["daemon"]
 
 [[test]]
+name = "pairing_ceremony"
+path = "tests/pairing_ceremony.rs"
+required-features = ["daemon", "test-hooks"]
+
+[[test]]
 name = "test_write_exe_guard"
 path = "tests/test_write_exe_guard.rs"
 required-features = ["daemon"]

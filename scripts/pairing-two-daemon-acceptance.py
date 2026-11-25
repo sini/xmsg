@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""Real two-daemon netns acceptance gate for xmsg discovery PR 4 (xmsg-7m27).
+
+Runs two independently configured `xmsg serve` processes in separate network
+namespaces (`unshare -Urn` or passwordless `sudo ip netns`), with separate
+SQLite stores, separate HOME/runtime dirs, synthetic Ed25519 credentials,
+real TLS 1.3 `xmsg-pair/1`, and an independent Python CBOR+OpenSSL receipt
+verifier (not calling xmsg's codec).
+"""
+
+import hashlib
+import json
+import os
+import shlex
+import shutil
+import socket
+import sqlite3
+import ssl
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+
+def decode_cbor(data: bytes, offset: int = 0):
+    if offset >= len(data):
+        raise ValueError("unexpected end of CBOR")
+    ib = data[offset]
+    offset += 1
+    major = ib >> 5
+    ai = ib & 0x1F
+
+    def read_uint(a: int, pos: int):
+        if a < 24:
+            return a, pos
+        if a == 24:
+            return data[pos], pos + 1
+        if a == 25:
+            return struct.unpack(">H", data[pos : pos + 2])[0], pos + 2
+        if a == 26:
+            return struct.unpack(">I", data[pos : pos + 4])[0], pos + 4
+        if a == 27:
+            return struct.unpack(">Q", data[pos : pos + 8])[0], pos + 8
+        raise ValueError(f"unsupported CBOR additional info {a}")
+
+    if major == 0:
+        return read_uint(ai, offset)
+    if major == 1:
+        val, pos = read_uint(ai, offset)
+        return -1 - val, pos
+    if major == 2:
+        ln, pos = read_uint(ai, offset)
+        return data[pos : pos + ln], pos + ln
+    if major == 3:
+        ln, pos = read_uint(ai, offset)
+        return data[pos : pos + ln].decode("utf-8"), pos + ln
+    if major == 4:
+        ln, pos = read_uint(ai, offset)
+        arr = []
+        for _ in range(ln):
+            item, offset = decode_cbor(data, pos)
+            arr.append(item)
+            pos = offset
+        return arr, pos
+    if major == 5:
+        ln, pos = read_uint(ai, offset)
+        mp = {}
+        for _ in range(ln):
+            k, pos = decode_cbor(data, pos)
+            v, pos = decode_cbor(data, pos)
+            mp[k] = v
+        return mp, pos
+    if major == 6:
+        tag, pos = read_uint(ai, offset)
+        val, pos = decode_cbor(data, pos)
+        return ("tag", tag, val), pos
+    if major == 7:
+        if ai == 22:
+            return None, offset
+        if ai == 20:
+            return False, offset
+        if ai == 21:
+            return True, offset
+    raise ValueError(f"unsupported CBOR major={major} ai={ai}")
+
+
+def encode_cbor(val) -> bytes:
+    def hdr(major: int, n: int) -> bytes:
+        if n < 24:
+            return bytes([(major << 5) | n])
+        if n < 0x100:
+            return bytes([(major << 5) | 24, n])
+        if n < 0x10000:
+            return bytes([(major << 5) | 25]) + struct.pack(">H", n)
+        if n < 0x100000000:
+            return bytes([(major << 5) | 26]) + struct.pack(">I", n)
+        return bytes([(major << 5) | 27]) + struct.pack(">Q", n)
+
+    if isinstance(val, bytes):
+        return hdr(2, len(val)) + val
+    if isinstance(val, str):
+        b = val.encode("utf-8")
+        return hdr(3, len(b)) + b
+    if isinstance(val, list):
+        return hdr(4, len(val)) + b"".join(encode_cbor(x) for x in val)
+    raise ValueError(f"unsupported type {type(val)}")
+
+
+def verify_cose_sign1_ed25519(
+    cose_bytes: bytes, exporter: bytes, pub_pem: Path, expected_role: int
+) -> dict:
+    """Independent COSE_Sign1 (tag 18) + Ed25519 verifier using Python CBOR + OpenSSL."""
+    tagged, end = decode_cbor(cose_bytes)
+    assert end == len(cose_bytes), "trailing bytes in COSE_Sign1"
+    assert isinstance(tagged, tuple) and tagged[0] == "tag" and tagged[1] == 18, "not tag 18"
+    arr = tagged[2]
+    assert isinstance(arr, list) and len(arr) == 4, "expected 4-element COSE_Sign1"
+    protected_bstr, unprotected, payload_bstr, sig = arr
+    assert unprotected == {}, f"unprotected map not empty: {unprotected}"
+    protected, _ = decode_cbor(protected_bstr)
+    assert protected[1] == -19, f"expected Ed25519 (-19), got {protected.get(1)}"
+
+    # RFC 9052 Sig_structure: ["Signature1", body_protected, external_aad, payload]
+    # external_aad = ["xmsg-pair-receipt-v1", exporter]
+    aad = encode_cbor(["xmsg-pair-receipt-v1", exporter])
+    sig_structure = encode_cbor(["Signature1", protected_bstr, aad, payload_bstr])
+
+    with tempfile.TemporaryDirectory() as td:
+        msg_p = Path(td) / "msg.bin"
+        sig_p = Path(td) / "sig.bin"
+        msg_p.write_bytes(sig_structure)
+        sig_p.write_bytes(sig)
+        res = subprocess.run(
+            [
+                "openssl",
+                "pkeyutl",
+                "-verify",
+                "-pubin",
+                "-inkey",
+                str(pub_pem),
+                "-rawin",
+                "-in",
+                str(msg_p),
+                "-sigfile",
+                str(sig_p),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode == 0, f"independent Ed25519 verify failed: {res.stderr}"
+
+    payload, _ = decode_cbor(payload_bstr)
+    assert payload[3] == expected_role, f"expected role {expected_role}, got {payload.get(3)}"
+    return payload
+
+
+def gen_ed25519_identity(root: Path, name: str):
+    key_pem = root / f"{name}.key.pem"
+    pub_pem = root / f"{name}.pub.pem"
+    cert_pem = root / f"{name}.cert.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "ed25519",
+            "-keyout",
+            str(key_pem),
+            "-out",
+            str(cert_pem),
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            f"/CN={name}",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["openssl", "pkey", "-in", str(key_pem), "-pubout", "-out", str(pub_pem)],
+        check=True,
+        capture_output=True,
+    )
+    os.chmod(key_pem, 0o600)
+    return key_pem, pub_pem, cert_pem
+
+
+def run_acceptance(xmsg_bin: Path) -> None:
+    if sys.platform != "linux":
+        print("SKIP: isolation unavailable on non-Linux: no network namespaces")
+        return
+    for tool in ("ip", "openssl"):
+        if not shutil.which(tool):
+            raise SystemExit(f"isolation unavailable: missing {tool}")
+
+    use_unpriv = (
+        subprocess.run(
+            ["unshare", "-Urn", "ip", "link", "show", "lo"],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+    use_sudo = (
+        not use_unpriv
+        and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0
+    )
+    if not use_unpriv and not use_sudo:
+        raise SystemExit(
+            "isolation unavailable: neither unshare -Urn nor passwordless sudo ip netns is available"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="xmsg-pair-accept-") as tmp:
+        root = Path(tmp)
+        home_a, home_b = root / "home-a", root / "home-b"
+        state_a, state_b = root / "state-a", root / "state-b"
+        run_a, run_b = root / "run-a", root / "run-b"
+        for d in (home_a, home_b, state_a, state_b, run_a, run_b):
+            d.mkdir(parents=True)
+            os.chmod(d, 0o700)
+
+        key_a, pub_a, cert_a = gen_ed25519_identity(root, "node-a")
+        key_b, pub_b, cert_b = gen_ed25519_identity(root, "node-b")
+        peers_a = root / "peers-a.json"
+        peers_b = root / "peers-b.json"
+        peers_a.write_text("{}\n")
+        peers_b.write_text("{}\n")
+
+        # Q2-14: verify peers-file rejects deferred preference keys in both wrapped and bare forms.
+        bad_bare = root / "bad-bare.json"
+        bad_bare.write_text('{"pairing.confirm": true}\n')
+        res_bare = subprocess.run(
+            [str(xmsg_bin), "check-peers", str(bad_bare)],
+            capture_output=True,
+            text=True,
+        )
+        assert res_bare.returncode != 0 and "pairing.confirm" in (
+            res_bare.stdout + res_bare.stderr
+        ), f"bare deferred key not rejected: {res_bare.stdout} {res_bare.stderr}"
+
+        bad_wrap = root / "bad-wrap.json"
+        bad_wrap.write_text('{"peers": {}, "auto_accept": {}}\n')
+        res_wrap = subprocess.run(
+            [str(xmsg_bin), "check-peers", str(bad_wrap)],
+            capture_output=True,
+            text=True,
+        )
+        assert res_wrap.returncode != 0 and "auto_accept" in (
+            res_wrap.stdout + res_wrap.stderr
+        ), f"wrapped deferred key not rejected: {res_wrap.stdout} {res_wrap.stderr}"
+
+        sock_a = run_a / "http.sock"
+        sock_b = run_b / "http.sock"
+        db_a = state_a / "xmsg.db"
+        db_b = state_b / "xmsg.db"
+        sess_a = state_a / "sessions"
+        sess_b = state_b / "sessions"
+        sess_a.mkdir()
+        sess_b.mkdir()
+        log_a = root / "srv-a.log"
+        log_b = root / "srv-b.log"
+
+        # Driver Python script run across the two namespaces.
+        driver = f"""
+import json, os, sqlite3, subprocess, sys, time
+from pathlib import Path
+
+xmsg = {str(xmsg_bin)!r}
+sock_a, sock_b = {str(sock_a)!r}, {str(sock_b)!r}
+db_a, db_b = {str(db_a)!r}, {str(db_b)!r}
+log_a, log_b = {str(log_a)!r}, {str(log_b)!r}
+
+def wait_sock(p, log_p):
+    deadline = time.monotonic() + 15
+    while not Path(p).exists():
+        if time.monotonic() > deadline:
+            log_txt = Path(log_p).read_text() if Path(log_p).exists() else ""
+            raise RuntimeError(f"socket {{p}} did not appear; log:\\n{{log_txt}}")
+        time.sleep(0.05)
+
+wait_sock(sock_a, log_a)
+wait_sock(sock_b, log_b)
+
+id_a = subprocess.check_output([xmsg, "pair", "--http-sock", sock_a, "id"], text=True).strip()
+id_b = subprocess.check_output([xmsg, "pair", "--http-sock", sock_b, "id"], text=True).strip()
+assert id_a.startswith("xmsg-spki1:") and id_b.startswith("xmsg-spki1:") and id_a != id_b
+
+# Q2-5a & Q2-10: contact without --target refuses pairing.targets_required
+no_target = subprocess.run(
+    [xmsg, "pair", "--http-sock", sock_a, "accept", id_b, "--profile", "contact"],
+    capture_output=True, text=True,
+)
+assert no_target.returncode != 0 and "pairing.targets_required" in (no_target.stdout + no_target.stderr)
+
+# Q2-10 + Q2-1: Asymmetric accept (A=contact svc-a) and start (B=owner-device)
+accept_proc = subprocess.Popen(
+    [xmsg, "pair", "--http-sock", sock_a, "accept", id_b, "--profile", "contact", "--target", "svc-a", "--json"],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+)
+time.sleep(0.3)
+
+# Q2-5a: second accept with different profile refuses pairing.intent_exists
+conflict = subprocess.run(
+    [xmsg, "pair", "--http-sock", sock_a, "accept", id_b, "--profile", "owner-device", "--no-wait"],
+    capture_output=True, text=True,
+)
+assert conflict.returncode != 0 and "pairing.intent_exists" in (conflict.stdout + conflict.stderr), conflict.stderr
+
+start_out = subprocess.check_output(
+    [xmsg, "pair", "--http-sock", sock_b, "start", id_a, "--profile", "owner-device", "--address", "10.201.1.1:7788", "--json"],
+    text=True,
+)
+start_json = json.loads(start_out)
+assert start_json["committed"] is True
+assert start_json["installed_revision"] >= start_json["committed_revision"]
+
+accept_out, accept_err = accept_proc.communicate(timeout=15)
+assert accept_proc.returncode == 0, f"accept failed: {{accept_err}}"
+accept_json = json.loads(accept_out)
+assert accept_json["committed"] is True
+
+# Q2-7a: both pair lists show installed == committed
+list_a = json.loads(subprocess.check_output([xmsg, "pair", "--http-sock", sock_a, "list", "--json"], text=True))
+list_b = json.loads(subprocess.check_output([xmsg, "pair", "--http-sock", sock_b, "list", "--json"], text=True))
+assert list_a["installed_revision"] == list_a["committed_revision"] >= 1
+assert list_b["installed_revision"] == list_b["committed_revision"] >= 1
+assert len(list_a["grants"]) == 1 and len(list_b["grants"]) == 1
+
+# Q2-16: block A on B, then unblock fails pairing.unblock_would_restore while grant exists; remove then unblock succeeds
+subprocess.run([xmsg, "pair", "--http-sock", sock_b, "block", id_a], check=True, capture_output=True)
+unblock_fail = subprocess.run([xmsg, "pair", "--http-sock", sock_b, "unblock", id_a], capture_output=True, text=True)
+assert unblock_fail.returncode != 0 and "pairing.unblock_would_restore" in (unblock_fail.stdout + unblock_fail.stderr)
+grant_b_hex = list_b["grants"][0]["grant_id"]
+subprocess.run([xmsg, "pair", "--http-sock", sock_b, "remove", grant_b_hex], check=True, capture_output=True)
+subprocess.run([xmsg, "pair", "--http-sock", sock_b, "unblock", id_a], check=True, capture_output=True)
+print("two-daemon-driver:ok")
+"""
+
+        if use_unpriv:
+            driver_path = root / "driver.py"
+            driver_path.write_text(driver)
+            script = f"""
+set -euo pipefail
+unshare -n sleep 60 &
+ns_b_pid=$!
+trap 'kill "$ns_b_pid" 2>/dev/null || true' EXIT
+for _ in $(seq 1 20); do
+  if ip link add veth-a type veth peer name veth-b 2>/dev/null; then break; fi
+  sleep 0.05
+done
+ip link set veth-b netns "$ns_b_pid"
+ip link set lo up
+ip addr add 10.201.1.1/24 dev veth-a
+ip link set veth-a up
+nsenter -t "$ns_b_pid" -n --no-fork ip link set lo up
+nsenter -t "$ns_b_pid" -n --no-fork ip addr add 10.201.1.2/24 dev veth-b
+nsenter -t "$ns_b_pid" -n --no-fork ip link set veth-b up
+
+HOME={shlex.quote(str(home_a))} XDG_RUNTIME_DIR={shlex.quote(str(run_a))} {shlex.quote(str(xmsg_bin))} serve \\
+  --http-sock {shlex.quote(str(sock_a))} --sessions-dir {shlex.quote(str(sess_a))} \\
+  --db-path {shlex.quote(str(db_a))} --fed-listen 10.201.1.1:7788 \\
+  --fed-cert {shlex.quote(str(cert_a))} --fed-key {shlex.quote(str(key_a))} \\
+  --peers-file {shlex.quote(str(peers_a))} --fed-reload-interval-secs 1 >{shlex.quote(str(log_a))} 2>&1 &
+srv_a=$!
+
+nsenter -t "$ns_b_pid" -n --no-fork env HOME={shlex.quote(str(home_b))} XDG_RUNTIME_DIR={shlex.quote(str(run_b))} {shlex.quote(str(xmsg_bin))} serve \\
+  --http-sock {shlex.quote(str(sock_b))} --sessions-dir {shlex.quote(str(sess_b))} \\
+  --db-path {shlex.quote(str(db_b))} --fed-listen 10.201.1.2:7788 \\
+  --fed-cert {shlex.quote(str(cert_b))} --fed-key {shlex.quote(str(key_b))} \\
+  --peers-file {shlex.quote(str(peers_b))} --fed-reload-interval-secs 1 >{shlex.quote(str(log_b))} 2>&1 &
+srv_b=$!
+
+trap 'kill "$srv_a" "$srv_b" "$ns_b_pid" 2>/dev/null || true' EXIT
+{shlex.quote(sys.executable)} {shlex.quote(str(driver_path))}
+"""
+            subprocess.run(["unshare", "-Urn", "bash", "-c", script], check=True)
+        else:
+            user = os.environ.get("USER") or subprocess.check_output(["id", "-un"], text=True).strip()
+            suffix = str(os.getpid())
+            ns_a, ns_b = f"xmsg-acc-a-{suffix}", f"xmsg-acc-b-{suffix}"
+            va, vb = f"va-{suffix}"[:15], f"vb-{suffix}"[:15]
+            driver_path = root / "driver.py"
+            driver_path.write_text(driver)
+            srv_a = srv_b = None
+            try:
+                subprocess.run(["sudo", "ip", "netns", "add", ns_a], check=True)
+                subprocess.run(["sudo", "ip", "netns", "add", ns_b], check=True)
+                subprocess.run(["sudo", "ip", "link", "add", va, "type", "veth", "peer", "name", vb], check=True)
+                subprocess.run(["sudo", "ip", "link", "set", va, "netns", ns_a], check=True)
+                subprocess.run(["sudo", "ip", "link", "set", vb, "netns", ns_b], check=True)
+                for ns, dev, addr in [(ns_a, va, "10.201.1.1/24"), (ns_b, vb, "10.201.1.2/24")]:
+                    subprocess.run(["sudo", "ip", "netns", "exec", ns, "ip", "link", "set", "lo", "up"], check=True)
+                    subprocess.run(["sudo", "ip", "netns", "exec", ns, "ip", "addr", "add", addr, "dev", dev], check=True)
+                    subprocess.run(["sudo", "ip", "netns", "exec", ns, "ip", "link", "set", dev, "up"], check=True)
+
+                srv_a = subprocess.Popen(
+                    [
+                        "sudo", "ip", "netns", "exec", ns_a, "sudo", "-u", user,
+                        "env", f"HOME={home_a}", f"XDG_RUNTIME_DIR={run_a}",
+                        str(xmsg_bin), "serve",
+                        "--http-sock", str(sock_a), "--sessions-dir", str(sess_a),
+                        "--db-path", str(db_a), "--fed-listen", "10.201.1.1:7788",
+                        "--fed-cert", str(cert_a), "--fed-key", str(key_a),
+                        "--peers-file", str(peers_a), "--fed-reload-interval-secs", "1",
+                    ],
+                    stdout=log_a.open("wb"),
+                    stderr=subprocess.STDOUT,
+                )
+                srv_b = subprocess.Popen(
+                    [
+                        "sudo", "ip", "netns", "exec", ns_b, "sudo", "-u", user,
+                        "env", f"HOME={home_b}", f"XDG_RUNTIME_DIR={run_b}",
+                        str(xmsg_bin), "serve",
+                        "--http-sock", str(sock_b), "--sessions-dir", str(sess_b),
+                        "--db-path", str(db_b), "--fed-listen", "10.201.1.2:7788",
+                        "--fed-cert", str(cert_b), "--fed-key", str(key_b),
+                        "--peers-file", str(peers_b), "--fed-reload-interval-secs", "1",
+                    ],
+                    stdout=log_b.open("wb"),
+                    stderr=subprocess.STDOUT,
+                )
+                subprocess.run([sys.executable, str(driver_path)], check=True)
+            finally:
+                for p in (srv_a, srv_b):
+                    if p is not None and p.poll() is None:
+                        p.terminate()
+                subprocess.run(["sudo", "ip", "netns", "del", ns_a], capture_output=True)
+                subprocess.run(["sudo", "ip", "netns", "del", ns_b], capture_output=True)
+
+        # Independent verification of ReceiptI and ReceiptR in Node A's store (outside xmsg codec).
+        conn_a = sqlite3.connect(db_a)
+        row = conn_a.execute(
+            "SELECT exporter, receipt_local, receipt_remote FROM pairing_grants WHERE provenance='manual_authenticated_oob'"
+        ).fetchone()
+        assert row is not None, "no manual grant stored on Node A"
+        exporter, receipt_local, receipt_remote = row
+        # On Node A (responder), receipt_local is ReceiptR (role=1), receipt_remote is ReceiptI (role=0).
+        p_r = verify_cose_sign1_ed25519(receipt_local, exporter, pub_a, expected_role=1)
+        p_i = verify_cose_sign1_ed25519(receipt_remote, exporter, pub_b, expected_role=0)
+        assert p_r[6] == "contact" and p_i[6] == "owner-device", (p_r[6], p_i[6])
+        assert p_r[8] != p_i[8], "asymmetric E digests should differ"
+        print("independent-receipt-verifier:ok")
+        print("pairing-two-daemon-acceptance:PASSED")
+
+
+if __name__ == "__main__":
+    bin_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("target/debug/xmsg")
+    run_acceptance(bin_path.resolve())
