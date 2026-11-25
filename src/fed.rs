@@ -3515,6 +3515,10 @@ impl FedState {
         Ok(())
     }
 
+    pub fn set_fed_listen(&self, enabled: bool) {
+        crate::pairing::service::set_fed_listen(self, enabled);
+    }
+
     pub(crate) fn with_discovery_policy<T>(
         &self,
         expected: &Arc<PeersMap>,
@@ -7642,8 +7646,12 @@ pub async fn run_fed_listener_with_acceptor(
                 .before_handshake
                 .pause()
                 .await;
-            let start_handshake = match tokio::time::timeout(
-                Duration::from_secs(3),
+            let accept_at = tokio::time::Instant::now();
+            let fed_deadline = accept_at + Duration::from_secs(3);
+            let pair_deadline =
+                accept_at + crate::pairing::budgets::INBOUND_HANDSHAKE_TIMEOUT;
+            let start_handshake = match tokio::time::timeout_at(
+                fed_deadline,
                 tokio_rustls::LazyConfigAcceptor::new(
                     rustls::server::Acceptor::default(),
                     tcp_stream,
@@ -7705,8 +7713,8 @@ pub async fn run_fed_listener_with_acceptor(
                 else {
                     return;
                 };
-                let tls_stream = match tokio::time::timeout(
-                    crate::pairing::budgets::INBOUND_HANDSHAKE_TIMEOUT,
+                let tls_stream = match tokio::time::timeout_at(
+                    pair_deadline,
                     start_handshake.into_stream(pairing_cfg),
                 )
                 .await
@@ -7735,8 +7743,8 @@ pub async fn run_fed_listener_with_acceptor(
             }
 
             let fed_server_cfg = current_acceptor.config().clone();
-            let tls_stream = match tokio::time::timeout(
-                Duration::from_secs(3),
+            let tls_stream = match tokio::time::timeout_at(
+                fed_deadline,
                 start_handshake.into_stream(fed_server_cfg),
             )
             .await

@@ -95,6 +95,10 @@ pub fn pairing_runtime(fs: &FedState) -> Arc<PairingRuntime> {
     rt
 }
 
+pub fn set_fed_listen(fs: &FedState, enabled: bool) {
+    pairing_runtime(fs).service.set_fed_listen(enabled);
+}
+
 pub fn attach_reloader(fs: &FedState, reloader: &Arc<CredentialReloader>) {
     let rt = pairing_runtime(fs);
     *rt.reloader.lock().unwrap() = Some(Arc::downgrade(reloader));
@@ -160,20 +164,28 @@ impl FedState {
         .await;
         match res {
             Ok(Ok((Ok(_), installed))) if installed >= committed_rev => Ok(installed),
-            Ok(Ok((Ok(_), installed))) => Err(PairingError::ReloadFailed(format!(
-                "committed={committed_rev} installed={installed} committed:true"
-            ))),
-            Ok(Ok((Err(e), installed))) => Err(PairingError::ReloadFailed(format!(
-                "committed={committed_rev} installed={installed} committed:true error={e}"
-            ))),
-            Ok(Err(e)) => Err(PairingError::ReloadFailed(format!(
-                "committed={committed_rev} committed:true error={e}"
-            ))),
+            Ok(Ok((Ok(_), installed))) => Err(PairingError::ReloadFailed {
+                committed_revision: committed_rev,
+                installed_revision: installed,
+                error: "installed revision remained behind committed revision".to_string(),
+            }),
+            Ok(Ok((Err(e), installed))) => Err(PairingError::ReloadFailed {
+                committed_revision: committed_rev,
+                installed_revision: installed,
+                error: e.to_string(),
+            }),
+            Ok(Err(e)) => Err(PairingError::ReloadFailed {
+                committed_revision: committed_rev,
+                installed_revision: self.current_peers().authority_revision,
+                error: e.to_string(),
+            }),
             Err(_) => {
                 let installed = self.current_peers().authority_revision;
-                Err(PairingError::ReloadFailed(format!(
-                    "committed={committed_rev} installed={installed} committed:true timeout=10s"
-                )))
+                Err(PairingError::ReloadFailed {
+                    committed_revision: committed_rev,
+                    installed_revision: installed,
+                    error: "publication wait timed out after 10s".to_string(),
+                })
             }
         }
     }
@@ -223,6 +235,7 @@ pub struct PairingService {
     pub budgets: PairingBudgets,
     pub ceremony_slots: LiveCeremonySlots,
     startup_cancel_done: AtomicBool,
+    fed_listen_enabled: AtomicBool,
     startup_cancel_error: Mutex<Option<String>>,
     live_intents: Mutex<HashMap<[u8; 16], LiveIntent>>,
     mono_epoch: Instant,
@@ -242,12 +255,21 @@ impl PairingService {
             budgets: PairingBudgets::default(),
             ceremony_slots: LiveCeremonySlots::default(),
             startup_cancel_done: AtomicBool::new(false),
+            fed_listen_enabled: AtomicBool::new(false),
             startup_cancel_error: Mutex::new(None),
             live_intents: Mutex::new(HashMap::new()),
             mono_epoch: Instant::now(),
             #[cfg(any(test, feature = "test-hooks"))]
             test_inject_startup_cancel_fail: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_fed_listen(&self, enabled: bool) {
+        self.fed_listen_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn has_fed_listen(&self) -> bool {
+        self.fed_listen_enabled.load(Ordering::SeqCst)
     }
 
     pub fn mono_secs(&self) -> u64 {
@@ -1111,9 +1133,11 @@ impl PairingService {
             })?;
         let installed_rev = fed.current_peers().authority_revision;
         if installed_rev < committed_rev {
-            return Err(PairingError::ReloadFailed(format!(
-                "committed={committed_rev} installed={installed_rev} committed:true"
-            )));
+            return Err(PairingError::ReloadFailed {
+                committed_revision: committed_rev,
+                installed_revision: installed_rev,
+                error: "installed revision remained behind committed revision".to_string(),
+            });
         }
         Ok(MutationOutcome {
             committed: true,
@@ -1310,6 +1334,21 @@ impl PairingService {
             (r, i)
         };
 
+        let expired_grants: Vec<serde_json::Value> = grants
+            .iter()
+            .filter(|g| {
+                g.provenance == "manual_authenticated_oob"
+                    && g.not_after.is_some_and(|e| e <= now)
+            })
+            .map(|g| {
+                serde_json::json!({
+                    "grant_id": hex::encode(g.grant_id),
+                    "peer_id": SpkiDeviceId(g.peer_id).to_device_id_string(),
+                    "not_after": g.not_after,
+                })
+            })
+            .collect();
+
         Ok(serde_json::json!({
             "pairing.device_id": device_id,
             "pairing.listener": listener,
@@ -1322,6 +1361,7 @@ impl PairingService {
                 "slots_cap": MAX_MANUAL_GRANTS,
                 "manual_grants": manual_count,
                 "expired_grants_holding_slots": expired_holding_slots,
+                "expired_grants": expired_grants,
             },
             "pairing.legacy": {
                 "status": if coexistence_warnings.is_empty() && literal_wildcard_entries.is_empty() { "notice" } else { "warn" },

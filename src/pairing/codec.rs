@@ -88,7 +88,7 @@ impl SpkiDeviceId {
     }
 
     /// Formats as `xmsg-spki1:<52 lowercase unpadded base32 chars>`.
-    pub fn to_device_id_string(&self) -> String {
+    pub fn to_device_id_string(self) -> String {
         let encoded = base32_lower_nopad().encode(&self.0);
         format!("{SPKI_ID_PREFIX}{encoded}")
     }

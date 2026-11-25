@@ -2107,6 +2107,7 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
         bg_tasks.push(xmsg::discovery::dial::spawn_sweep(&fs));
 
         if let Some((listener, listen_addr)) = fed_listener {
+            fs.set_fed_listen(true);
             let acceptor = match fs.get_tls_acceptor() {
                 Some(a) => a,
                 None => xmsg::fed::make_tls_acceptor(&fs.cert_chain(), &key_der, peers_arc.clone())

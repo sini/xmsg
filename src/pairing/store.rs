@@ -1003,8 +1003,8 @@ impl RevocationRegistry {
 
 /// Returns the process-wide `RevocationRegistry` bound to `db` (keyed by `Weak<Mutex<Connection>>`).
 pub fn revocations_for_db(db: &Arc<Mutex<Connection>>) -> Arc<RevocationRegistry> {
-    static REGISTRY: std::sync::OnceLock<Mutex<Vec<(Weak<Mutex<Connection>>, Arc<RevocationRegistry>)>>> =
-        std::sync::OnceLock::new();
+    type RevocationEntry = (Weak<Mutex<Connection>>, Arc<RevocationRegistry>);
+    static REGISTRY: std::sync::OnceLock<Mutex<Vec<RevocationEntry>>> = std::sync::OnceLock::new();
     let map = REGISTRY.get_or_init(|| Mutex::new(Vec::new()));
     let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
     guard.retain(|(w, _)| w.strong_count() > 0);

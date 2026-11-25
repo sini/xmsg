@@ -279,10 +279,33 @@ fn map_pairing_error(err: crate::pairing::budgets::PairingError) -> AppError {
         | PairingError::KeyAlgorithm(_)
         | PairingError::LegacyConfigOwned(_)
         | PairingError::UnblockWouldRestore(_) => AppError::BadRequest(err.to_string()),
-        PairingError::ReloadFailed(_) | PairingError::Internal(_) => {
+        PairingError::ReloadFailed { .. } | PairingError::Internal(_) => {
             AppError::Internal(err.to_string())
         }
         _ => AppError::OpDenied(err.to_string()),
+    }
+}
+
+fn pairing_error_response(err: crate::pairing::budgets::PairingError) -> axum::response::Response {
+    use crate::pairing::budgets::PairingError;
+    match &err {
+        PairingError::ReloadFailed {
+            committed_revision,
+            installed_revision,
+            error,
+        } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "error": err.to_string(),
+                "code": "pairing.reload_failed",
+                "committed": true,
+                "committed_revision": committed_revision,
+                "installed_revision": installed_revision,
+                "detail": error,
+            })),
+        )
+            .into_response(),
+        _ => map_pairing_error(err).into_response(),
     }
 }
 
@@ -343,7 +366,7 @@ async fn pairing_diagnostics_handler(
     let (fed, rt) = pairing_fed_and_runtime(&state)?;
     let body = rt
         .service
-        .diagnostics(&fed, !fed.is_leaf)
+        .diagnostics(&fed, rt.service.has_fed_listen())
         .await
         .map_err(map_pairing_error)?;
     Ok(Json(body))
@@ -353,12 +376,19 @@ async fn pairing_accept_handler(
     State(state): State<Arc<AppState>>,
     peer: PeerInfo,
     Json(body): Json<PairingIntentBody>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    require_local_positive_non_plugin_owner(&state, &peer, "pair accept")?;
-    let (fed, rt) = pairing_fed_and_runtime(&state)?;
-    let profile = crate::pairing::codec::PairingProfile::parse(&body.profile)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let (intent, reconfirmed) = rt
+) -> axum::response::Response {
+    if let Err(e) = require_local_positive_non_plugin_owner(&state, &peer, "pair accept") {
+        return e.into_response();
+    }
+    let (fed, rt) = match pairing_fed_and_runtime(&state) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let profile = match crate::pairing::codec::PairingProfile::parse(&body.profile) {
+        Ok(p) => p,
+        Err(e) => return AppError::BadRequest(e.to_string()).into_response(),
+    };
+    let (intent, _reconfirmed) = match rt
         .service
         .create_intent(
             &fed,
@@ -370,32 +400,39 @@ async fn pairing_accept_handler(
             body.grant_not_after,
         )
         .await
-        .map_err(map_pairing_error)?;
-    if body.wait && !reconfirmed {
-        let summary = rt
-            .service
-            .wait_for_responder(&intent)
-            .await
-            .map_err(map_pairing_error)?;
-        return Ok(Json(serde_json::to_value(summary).unwrap()));
+    {
+        Ok(v) => v,
+        Err(e) => return pairing_error_response(e),
+    };
+    if !body.wait {
+        return AppError::OpDenied(
+            "pairing.pending: responder intent opened without waiting for activation".into(),
+        )
+        .into_response();
     }
-    Ok(Json(json!({
-        "intent_id": hex::encode(intent.intent_id),
-        "reconfirmed": reconfirmed,
-        "role": "responder",
-    })))
+    match rt.service.wait_for_responder(&intent).await {
+        Ok(summary) => Json(serde_json::to_value(summary).unwrap()).into_response(),
+        Err(e) => pairing_error_response(e),
+    }
 }
 
 async fn pairing_start_handler(
     State(state): State<Arc<AppState>>,
     peer: PeerInfo,
     Json(body): Json<PairingIntentBody>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    require_local_positive_non_plugin_owner(&state, &peer, "pair start")?;
-    let (fed, rt) = pairing_fed_and_runtime(&state)?;
-    let profile = crate::pairing::codec::PairingProfile::parse(&body.profile)
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let (intent, reconfirmed) = rt
+) -> axum::response::Response {
+    if let Err(e) = require_local_positive_non_plugin_owner(&state, &peer, "pair start") {
+        return e.into_response();
+    }
+    let (fed, rt) = match pairing_fed_and_runtime(&state) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let profile = match crate::pairing::codec::PairingProfile::parse(&body.profile) {
+        Ok(p) => p,
+        Err(e) => return AppError::BadRequest(e.to_string()).into_response(),
+    };
+    let (intent, _reconfirmed) = match rt
         .service
         .create_intent(
             &fed,
@@ -407,25 +444,19 @@ async fn pairing_start_handler(
             body.grant_not_after,
         )
         .await
-        .map_err(map_pairing_error)?;
-    if reconfirmed && body.addresses.is_empty() {
-        return Ok(Json(json!({
-            "intent_id": hex::encode(intent.intent_id),
-            "reconfirmed": true,
-            "role": "initiator",
-        })));
-    }
+    {
+        Ok(v) => v,
+        Err(e) => return pairing_error_response(e),
+    };
     let addrs = if body.addresses.is_empty() {
         fed.discovery.candidates.read().unwrap().addresses()
     } else {
         body.addresses
     };
-    let summary = rt
-        .service
-        .run_initiator_and_wait(&fed, intent, addrs)
-        .await
-        .map_err(map_pairing_error)?;
-    Ok(Json(serde_json::to_value(summary).unwrap()))
+    match rt.service.run_initiator_and_wait(&fed, intent, addrs).await {
+        Ok(summary) => Json(serde_json::to_value(summary).unwrap()).into_response(),
+        Err(e) => pairing_error_response(e),
+    }
 }
 
 async fn pairing_cancel_handler(
@@ -447,45 +478,54 @@ async fn pairing_remove_handler(
     State(state): State<Arc<AppState>>,
     peer: PeerInfo,
     Json(body): Json<PairingTargetBody>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    require_local_positive_non_plugin_owner(&state, &peer, "pair remove")?;
-    let (fed, rt) = pairing_fed_and_runtime(&state)?;
-    let out = rt
-        .service
-        .remove_grant(&fed, &body.target)
-        .await
-        .map_err(map_pairing_error)?;
-    Ok(Json(out))
+) -> axum::response::Response {
+    if let Err(e) = require_local_positive_non_plugin_owner(&state, &peer, "pair remove") {
+        return e.into_response();
+    }
+    let (fed, rt) = match pairing_fed_and_runtime(&state) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    match rt.service.remove_grant(&fed, &body.target).await {
+        Ok(out) => Json(out).into_response(),
+        Err(e) => pairing_error_response(e),
+    }
 }
 
 async fn pairing_block_handler(
     State(state): State<Arc<AppState>>,
     peer: PeerInfo,
     Json(body): Json<PairingTargetBody>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    require_local_positive_non_plugin_owner(&state, &peer, "pair block")?;
-    let (fed, rt) = pairing_fed_and_runtime(&state)?;
-    let out = rt
-        .service
-        .block_device(&fed, &body.target)
-        .await
-        .map_err(map_pairing_error)?;
-    Ok(Json(serde_json::to_value(out).unwrap()))
+) -> axum::response::Response {
+    if let Err(e) = require_local_positive_non_plugin_owner(&state, &peer, "pair block") {
+        return e.into_response();
+    }
+    let (fed, rt) = match pairing_fed_and_runtime(&state) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    match rt.service.block_device(&fed, &body.target).await {
+        Ok(out) => Json(serde_json::to_value(out).unwrap()).into_response(),
+        Err(e) => pairing_error_response(e),
+    }
 }
 
 async fn pairing_unblock_handler(
     State(state): State<Arc<AppState>>,
     peer: PeerInfo,
     Json(body): Json<PairingTargetBody>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    require_local_positive_non_plugin_owner(&state, &peer, "pair unblock")?;
-    let (fed, rt) = pairing_fed_and_runtime(&state)?;
-    let out = rt
-        .service
-        .unblock_device(&fed, &body.target)
-        .await
-        .map_err(map_pairing_error)?;
-    Ok(Json(serde_json::to_value(out).unwrap()))
+) -> axum::response::Response {
+    if let Err(e) = require_local_positive_non_plugin_owner(&state, &peer, "pair unblock") {
+        return e.into_response();
+    }
+    let (fed, rt) = match pairing_fed_and_runtime(&state) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    match rt.service.unblock_device(&fed, &body.target).await {
+        Ok(out) => Json(serde_json::to_value(out).unwrap()).into_response(),
+        Err(e) => pairing_error_response(e),
+    }
 }
 
 async fn harnesses_reload_handler(

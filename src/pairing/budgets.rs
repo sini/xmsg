@@ -57,8 +57,12 @@ pub enum PairingError {
     LegacyConfigOwned(String),
     #[error("pairing.unblock_would_restore: {0}")]
     UnblockWouldRestore(String),
-    #[error("pairing.reload_failed: {0}")]
-    ReloadFailed(String),
+    #[error("pairing.reload_failed: committed={committed_revision} installed={installed_revision} error={error}")]
+    ReloadFailed {
+        committed_revision: u64,
+        installed_revision: u64,
+        error: String,
+    },
     #[error("pairing.targets_required: {0}")]
     TargetsRequired(String),
     #[error("pairing.invalid_device_id: {0}")]
@@ -88,7 +92,7 @@ impl PairingError {
             Self::CallerIndeterminate(_) => "pairing.caller_indeterminate",
             Self::LegacyConfigOwned(_) => "pairing.legacy_config_owned",
             Self::UnblockWouldRestore(_) => "pairing.unblock_would_restore",
-            Self::ReloadFailed(_) => "pairing.reload_failed",
+            Self::ReloadFailed { .. } => "pairing.reload_failed",
             Self::TargetsRequired(_) => "pairing.targets_required",
             Self::InvalidDeviceId(_) => "pairing.invalid_device_id",
             Self::NotFound(_) => "pairing.not_found",
