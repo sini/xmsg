@@ -3688,9 +3688,14 @@ async fn fed_send_message_handler(
             "principal not authorized for peer".to_string(),
         ));
     }
+    let is_manual = init_peers.is_manual_peer(&peer.name);
     let send_res = crate::pairing::auth::Resource {
-        target: Some(target_ref_early),
-        principal: if init_peers.is_manual_peer(&peer.name) {
+        target: if is_manual {
+            Some(target_ref_early)
+        } else {
+            None
+        },
+        principal: if is_manual {
             envelope.origin.key().or(Some("anon"))
         } else {
             peer_cfg.principals.first().map(String::as_str)
