@@ -862,6 +862,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn q2_1_mismatched_exporter_in_transcript_is_refused_by_initiator() {
+        let (cert_i, key_i, ring_i, id_i, spki_i) = gen_ed25519_cert();
+        let (cert_r, key_r, ring_r, id_r, spki_r) = gen_ed25519_cert();
+
+        let (client_cfg, _) = build_pairing_client_config(cert_i, key_i, id_r, None).unwrap();
+        let (server_cfg, _) = build_pairing_server_config(
+            cert_r,
+            key_r,
+            Arc::new(move |id| *id == id_i),
+            None,
+        )
+        .unwrap();
+
+        let (client_io, server_io) = tokio::io::duplex(32768);
+        let connector = TlsConnector::from(client_cfg);
+        let acceptor = TlsAcceptor::from(server_cfg);
+        let dns = ServerName::try_from("xmsg-pair.local").unwrap();
+
+        let now_utc = unix_now_u32();
+        let exp = ExposurePolicy {
+            profile: PairingProfile::OwnerDevice,
+            target_selectors: vec!["*".to_owned()],
+            principal_selectors: vec!["*".to_owned()],
+            max_body_bytes: 65536,
+            max_attachment_bytes: 65536,
+            rate_burst: 10,
+            rate_per_minute: 60,
+        };
+        let offer = Offer {
+            profile: PairingProfile::OwnerDevice,
+            grant_not_after: None,
+            exposure_policy_sha256: exp.sha256().unwrap(),
+        };
+
+        let srv_fut = async {
+            let mut tls = acceptor.accept(server_io).await.unwrap();
+            let wrong_exporter = [0x99u8; 32];
+            let inputs = ResponderInputs {
+                own_id: id_r,
+                peer_id: id_i,
+                own_spki: &spki_r,
+                peer_spki: &spki_i,
+                offer_r: offer.clone(),
+                policy_r: 1,
+                intent_id: [1u8; 16],
+                grant_id: [2u8; 16],
+                signing_key: &ring_r,
+                exporter: wrong_exporter,
+                deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+                start_mono_secs: 100,
+                now_utc,
+            };
+            let _ = execute_responder_exchange(&mut tls, inputs, |_, _| Ok(()), |_| Ok(())).await;
+        };
+
+        let cli_fut = async {
+            let mut tls = connector.connect(dns, client_io).await.unwrap();
+            let exporter = export_pairing_keying_material(tls.get_ref().1).unwrap();
+            let inputs = InitiatorInputs {
+                own_id: id_i,
+                peer_id: id_r,
+                own_spki: &spki_i,
+                peer_spki: &spki_r,
+                offer_i: offer,
+                policy_i: 1,
+                intent_id: [3u8; 16],
+                grant_id: [4u8; 16],
+                signing_key: &ring_i,
+                exporter,
+                deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+                start_mono_secs: 100,
+                now_utc,
+            };
+            let mut reserved_called = false;
+            let res = execute_initiator_exchange(&mut tls, inputs, |_, _| {
+                reserved_called = true;
+                Ok(())
+            })
+            .await;
+            (res, reserved_called)
+        };
+
+        let (_, (cli_res, reserved_called)) = tokio::join!(srv_fut, cli_fut);
+        assert!(cli_res.is_err(), "initiator must refuse mismatched exporter in T");
+        assert!(!reserved_called, "initiator must refuse before reserve_capacity on T exporter mismatch");
+    }
+
+    #[tokio::test]
     async fn p256_peer_matching_pinned_hash_is_refused_with_key_algorithm() {
         let kp_p256 = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
         let params = CertificateParams::new(vec!["xmsg-pair.local".to_string()]).unwrap();

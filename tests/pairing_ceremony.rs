@@ -279,6 +279,14 @@ fn q2_14_peers_file_rejects_deferred_preference_keys_in_both_forms() {
         r#"{"pairing.confirm": true}"#,
         r#"{"auto_accept": {}}"#,
         r#"{"attestation.offline_grace": 60}"#,
+    ] {
+        let err = PeersMap::load_from_json_for(raw, None).unwrap_err();
+        assert!(
+            err.contains("unsupported"),
+            "bare deferred key must fail as unsupported, got: {err}"
+        );
+    }
+    for raw in [
         r#"{"peers": {}, "pairing": {}}"#,
         r#"{"peers": {}, "discovery": {"announce_identity": true}}"#,
     ] {
