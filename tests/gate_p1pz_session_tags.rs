@@ -1092,6 +1092,7 @@ fn p1pz_child_mode_if_requested() -> bool {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)
             .unwrap();
         let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -1758,6 +1759,7 @@ fn compat_912ca97a_oracles() {
                 .create(true)
                 .read(true)
                 .write(true)
+                .truncate(false)
                 .open(&agy_old_lock)
                 .unwrap();
             let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
