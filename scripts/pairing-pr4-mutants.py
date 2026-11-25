@@ -432,6 +432,123 @@ CASES = [
         int_test("m10_block_device_publishes_update_and_refuses_at_admission_and_permit_fence"),
         False,
     ),
+    # 46. R1: install() registers a fresh token instead of dyn_tls.peers.generation_token
+    (
+        "r1-install-clones-new-token",
+        "src/fed.rs",
+        "        let token = dyn_tls.peers.generation_token.clone();",
+        "        let token = Arc::new(crate::pairing::store::GenerationToken::new(dyn_tls.peers.authority_revision));",
+        int_test("m10_block_device_publishes_update_and_refuses_at_admission_and_permit_fence"),
+        False,
+    ),
+    # 47. R2: policy-only rebuild omits own_device_id from credential
+    (
+        "r2-policy-rebuild-omits-own-device-id",
+        "src/fed.rs",
+        "        merged.own_device_id = crate::pairing::ceremony::ed25519_device_id_from_cert(&inputs.certs[0])\n            .ok()\n            .map(|d| d.0);",
+        "        merged.own_device_id = None;",
+        int_test("r2_foreign_issuer_grant_refused_after_file_and_policy_only_rebuild"),
+        False,
+    ),
+    # 48. R4: drop mark on read-back error in block_device_with_marks
+    (
+        "r4-block-drop-mark-on-read-error",
+        "src/pairing/store.rs",
+        '        Err(err) => {\n            if let Some(reg) = revocations {\n                #[cfg(any(test, feature = "test-hooks"))]\n                let read_res = if reg\n                    .inject_rev_read_error\n                    .swap(false, std::sync::atomic::Ordering::SeqCst)\n                {\n                    Err(StoreError::Invalid("injected revision read-back error"))\n                } else {\n                    authority_revision(conn)\n                };\n                #[cfg(not(any(test, feature = "test-hooks")))]\n                let read_res = authority_revision(conn);\n                match read_res {\n                    Ok(r) if r >= revision => return Ok(revision),\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// Lifts a block',
+        '        Err(err) => {\n            if let Some(reg) = revocations {\n                #[cfg(any(test, feature = "test-hooks"))]\n                let read_res = if reg\n                    .inject_rev_read_error\n                    .swap(false, std::sync::atomic::Ordering::SeqCst)\n                {\n                    Err(StoreError::Invalid("injected revision read-back error"))\n                } else {\n                    authority_revision(conn)\n                };\n                #[cfg(not(any(test, feature = "test-hooks")))]\n                let read_res = authority_revision(conn);\n                match read_res {\n                    Ok(r) if r >= revision => return Ok(revision),\n                    Ok(_) | Err(_) => reg.drop_mark(&mark_scope, revision),\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// Lifts a block',
+        int_test("safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission"),
+        False,
+    ),
+    # 50. R5: reply-attachment fetch passes wildcard principal for legacy peer
+    (
+        "r5-legacy-attachment-passes-wildcard-principal",
+        "src/fed.rs",
+        '        principal: if peers.is_manual_peer(peer) {\n            Some("*")\n        } else {\n            config.principals.first().map(String::as_str)\n        },',
+        '        principal: Some("*"),',
+        int_test("r5_legacy_reply_attachment_with_non_empty_principals_allowed"),
+        False,
+    ),
+    # 51. N11: observe_fed ignores authorize_peer_op error
+    (
+        "n11-observe-fed-ignores-authorize-err",
+        "src/observe_fed.rs",
+        "            crate::pairing::auth::Operation::Observe,\n            &crate::pairing::auth::Resource::default(),\n        )\n        .map_err(|_| denied())?;",
+        "            crate::pairing::auth::Operation::Observe,\n            &crate::pairing::auth::Resource::default(),\n        )\n        .ok();",
+        int_test("n30_and_n11_pending_block_mark_denies_legacy_peer_send_and_observe"),
+        False,
+    ),
+    # 52. N12: handoff ignores authorize_peer_op error
+    (
+        "n12-handoff-ignores-authorize-err",
+        "src/handoff.rs",
+        "    fs.authorize_peer_op(\n        &peers_perm,\n        &peer,\n        crate::pairing::auth::Operation::Handoff,\n        &crate::pairing::auth::Resource::default(),\n    )?;",
+        "    let _ = fs.authorize_peer_op(\n        &peers_perm,\n        &peer,\n        crate::pairing::auth::Operation::Handoff,\n        &crate::pairing::auth::Resource::default(),\n    );",
+        int_test("n12_handoff_refuses_observe_only_and_manual_contact_via_shared_decision"),
+        False,
+    ),
+    # 53. N16: expired manual grant stays admitted
+    (
+        "n16-expired-grant-admitted",
+        "src/fed.rs",
+        "                && g.active\n                && !self.manual_removed.contains(&g.grant_id)\n                && g.not_after.is_none_or(|end| now < end)",
+        "                && g.active\n                && !self.manual_removed.contains(&g.grant_id)",
+        int_test("n16_n18_n28_expired_collision_and_outbound_pin_exclusion"),
+        False,
+    ),
+    # 54. N18: colliding manual grant gets a second dialable name
+    (
+        "n18-manual-grant-second-dial-name",
+        "src/fed.rs",
+        "        if self.peers_by_name.contains_key(name) || self.name_by_pin.contains_key(&hex_pin) {",
+        "        if self.peers_by_name.contains_key(name) {",
+        int_test("n16_n18_n28_expired_collision_and_outbound_pin_exclusion"),
+        False,
+    ),
+    # 55. N19: insert revocation mark after COMMIT instead of before
+    (
+        "n19-insert-mark-after-commit",
+        "src/pairing/store.rs",
+        '    let mark_scope = MarkScope::Device(*device);\n    if let Some(reg) = revocations {\n        reg.insert_mark(mark_scope.clone(), revision);\n        #[cfg(any(test, feature = "test-hooks"))]\n        if let Some(cb) = reg\n            .before_commit_hook\n            .lock()\n            .unwrap_or_else(|e| e.into_inner())\n            .as_ref()\n            .cloned()\n        {\n            cb();\n        }\n    }',
+        '    let mark_scope = MarkScope::Device(*device);\n    if let Some(reg) = revocations {\n        #[cfg(any(test, feature = "test-hooks"))]\n        if let Some(cb) = reg\n            .before_commit_hook\n            .lock()\n            .unwrap_or_else(|e| e.into_inner())\n            .as_ref()\n            .cloned()\n        {\n            cb();\n        }\n        reg.insert_mark(mark_scope.clone(), revision);\n    }',
+        int_test("safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission"),
+        False,
+    ),
+    # 56. N20: ambiguous COMMIT never treats committed revision as Ok(revision)
+    (
+        "n20-ambiguous-commit-never-returns-ok",
+        "src/pairing/store.rs",
+        "                    Ok(r) if r >= revision => return Ok(revision),\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// Lifts a block",
+        "                    Ok(r) if false && r >= revision => return Ok(revision),\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// Lifts a block",
+        int_test("safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission"),
+        False,
+    ),
+    # 57. N24: install() skips revocations.register_token(&token)
+    (
+        "n24-install-skips-register-token",
+        "src/fed.rs",
+        "            revocations.register_token(&token);",
+        "            let _ = &token;",
+        int_test("m10_block_device_publishes_update_and_refuses_at_admission_and_permit_fence"),
+        False,
+    ),
+    # 58. N28: pinned_entries() skips active manual grants
+    (
+        "n28-pinned-entries-skips-manual",
+        "src/fed.rs",
+        "            if self.has_active_manual_grant(&g.subject, now) {",
+        "            if false && self.has_active_manual_grant(&g.subject, now) {",
+        int_test("n16_n18_n28_expired_collision_and_outbound_pin_exclusion"),
+        False,
+    ),
+    # 59. N30: pending block mark checked only for manual peers
+    (
+        "n30-pending-block-manual-only",
+        "src/fed.rs",
+        "        if let Some(dev) = peer_dev {",
+        "        if let Some(dev) = peer_dev.filter(|_| peers.is_manual_peer(peer_name)) {",
+        int_test("n30_and_n11_pending_block_mark_denies_legacy_peer_send_and_observe"),
+        False,
+    ),
 ]
 
 

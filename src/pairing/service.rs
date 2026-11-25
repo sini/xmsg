@@ -181,7 +181,7 @@ impl FedState {
             }),
         )
         .await;
-        match res {
+        let out = match res {
             Ok(Ok((Ok(_), installed))) if installed >= committed_rev => Ok(installed),
             Ok(Ok((Ok(_), installed))) => Err(PairingError::ReloadFailed {
                 committed_revision: committed_rev,
@@ -206,7 +206,15 @@ impl FedState {
                     error: "publication wait timed out after 10s".to_string(),
                 })
             }
-        }
+        };
+        let rt = pairing_runtime(self);
+        let mut last_err = rt
+            .service
+            .last_publish_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *last_err = out.as_ref().err().map(ToString::to_string);
+        out
     }
 }
 
@@ -256,6 +264,7 @@ pub struct PairingService {
     startup_cancel_done: AtomicBool,
     fed_listen_enabled: AtomicBool,
     startup_cancel_error: Mutex<Option<String>>,
+    last_publish_error: Mutex<Option<String>>,
     live_intents: Mutex<HashMap<[u8; 16], LiveIntent>>,
     mono_epoch: Instant,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -276,6 +285,7 @@ impl PairingService {
             startup_cancel_done: AtomicBool::new(false),
             fed_listen_enabled: AtomicBool::new(false),
             startup_cancel_error: Mutex::new(None),
+            last_publish_error: Mutex::new(None),
             live_intents: Mutex::new(HashMap::new()),
             mono_epoch: Instant::now(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -1302,6 +1312,11 @@ impl PairingService {
                 "error": self.startup_cancel_error(),
             })
         };
+        let last_publish_error = self
+            .last_publish_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let authority = if installed_rev == committed_rev {
             serde_json::json!({
                 "status": "pass",
@@ -1314,6 +1329,7 @@ impl PairingService {
                 "code": "pairing.reload_failed",
                 "committed_revision": committed_rev,
                 "installed_revision": installed_rev,
+                "error": last_publish_error,
             })
         };
 

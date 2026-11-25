@@ -2099,6 +2099,16 @@ pub fn split_peer_ref(r: &str) -> Option<(&str, &str)> {
 /// applies the store to the first policy generation. A failed cancel is logged and never
 /// blocks serving or revocation; an unreadable store still refuses to start.
 pub fn attach_pairing_reloader(fs: &FedState, reloader: &Arc<CredentialReloader>) {
+    if fs
+        .dynamic_tls
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_none()
+    {
+        let initial = fs.current_peers();
+        crate::pairing::store::revocations_for_db(&fs.db)
+            .register_token(&initial.generation_token);
+    }
     crate::pairing::service::attach_reloader(fs, reloader);
 }
 
@@ -8368,17 +8378,15 @@ impl CredentialReloader {
             );
             return false;
         }
-        let mut merged = merged.clone();
-        merged.generation_token = Arc::new(crate::pairing::store::GenerationToken::new(
-            merged.authority_revision,
-        ));
-        *self.peers.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(merged.clone());
+        *self.peers.lock().unwrap_or_else(|e| e.into_inner()) = dyn_tls.peers.clone();
+        let token = dyn_tls.peers.generation_token.clone();
+        let rev = dyn_tls.peers.authority_revision;
         *self.dynamic_tls.write().unwrap_or_else(|e| e.into_inner()) = Some(dyn_tls);
         if let Some(ref fs) = self.fed_state {
             fs.clear_initial_peers();
             let revocations = crate::pairing::store::revocations_for_db(&fs.db);
-            revocations.register_token(&merged.generation_token);
-            revocations.gc(merged.authority_revision);
+            revocations.register_token(&token);
+            revocations.gc(rev);
         }
         if let Some(hashes) = hashes {
             *self.file_hashes.lock().unwrap_or_else(|e| e.into_inner()) = hashes;
@@ -8403,6 +8411,9 @@ impl CredentialReloader {
             return Ok(None);
         };
         let mut merged = inputs.peers.clone();
+        merged.own_device_id = crate::pairing::ceremony::ed25519_device_id_from_cert(&inputs.certs[0])
+            .ok()
+            .map(|d| d.0);
         merged.admitted_clients = self.peers.lock().unwrap().admitted_clients.clone();
         {
             let conn = fs.db.lock().unwrap_or_else(|e| e.into_inner());
@@ -8584,6 +8595,9 @@ impl CredentialReloader {
             }
         }
 
+        new_peers.generation_token = Arc::new(crate::pairing::store::GenerationToken::new(
+            new_peers.authority_revision,
+        ));
         let new_peers_arc = Arc::new(new_peers);
 
         // Validate key matches cert and build acceptor
@@ -8728,7 +8742,11 @@ fn attachment_peer_row(
     };
     let res = crate::pairing::auth::Resource {
         target: None,
-        principal: Some("*"),
+        principal: if peers.is_manual_peer(peer) {
+            Some("*")
+        } else {
+            config.principals.first().map(String::as_str)
+        },
         body_bytes: 0,
         attachment_bytes: 0,
     };

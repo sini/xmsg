@@ -604,8 +604,30 @@ pub fn remove_with_marks(
     };
     if let Some(reg) = revocations {
         reg.insert_mark(mark_scope.clone(), revision);
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(cb) = reg
+            .before_commit_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+        {
+            cb();
+        }
     }
-    let commit_res = tx.commit().map_err(StoreError::from);
+    #[cfg(any(test, feature = "test-hooks"))]
+    let abort_precommit = revocations.is_some_and(|r| {
+        r.inject_precommit_abort
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    });
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    let abort_precommit = false;
+    let commit_res = if abort_precommit {
+        drop(tx);
+        Err(StoreError::Invalid("injected pre-commit abort"))
+    } else {
+        tx.commit().map_err(StoreError::from)
+    };
     #[cfg(any(test, feature = "test-hooks"))]
     let commit_res = if commit_res.is_ok()
         && revocations.is_some_and(|r| {
@@ -620,11 +642,24 @@ pub fn remove_with_marks(
         Ok(()) => Ok(revision),
         Err(err) => {
             if let Some(reg) = revocations {
-                let committed = authority_revision(conn).ok().is_some_and(|r| r >= revision);
-                if committed {
-                    return Ok(revision);
+                #[cfg(any(test, feature = "test-hooks"))]
+                let read_res = if reg
+                    .inject_rev_read_error
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    Err(StoreError::Invalid("injected revision read-back error"))
+                } else {
+                    authority_revision(conn)
+                };
+                #[cfg(not(any(test, feature = "test-hooks")))]
+                let read_res = authority_revision(conn);
+                match read_res {
+                    Ok(r) if r >= revision => return Ok(revision),
+                    Ok(_) => reg.drop_mark(&mark_scope, revision),
+                    Err(_) => {
+                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.
+                    }
                 }
-                reg.drop_mark(&mark_scope, revision);
             }
             Err(err)
         }
@@ -657,8 +692,30 @@ pub fn block_device_with_marks(
     let mark_scope = MarkScope::Device(*device);
     if let Some(reg) = revocations {
         reg.insert_mark(mark_scope.clone(), revision);
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(cb) = reg
+            .before_commit_hook
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+        {
+            cb();
+        }
     }
-    let commit_res = tx.commit().map_err(StoreError::from);
+    #[cfg(any(test, feature = "test-hooks"))]
+    let abort_precommit = revocations.is_some_and(|r| {
+        r.inject_precommit_abort
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    });
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    let abort_precommit = false;
+    let commit_res = if abort_precommit {
+        drop(tx);
+        Err(StoreError::Invalid("injected pre-commit abort"))
+    } else {
+        tx.commit().map_err(StoreError::from)
+    };
     #[cfg(any(test, feature = "test-hooks"))]
     let commit_res = if commit_res.is_ok()
         && revocations.is_some_and(|r| {
@@ -673,11 +730,24 @@ pub fn block_device_with_marks(
         Ok(()) => Ok(revision),
         Err(err) => {
             if let Some(reg) = revocations {
-                let committed = authority_revision(conn).ok().is_some_and(|r| r >= revision);
-                if committed {
-                    return Ok(revision);
+                #[cfg(any(test, feature = "test-hooks"))]
+                let read_res = if reg
+                    .inject_rev_read_error
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    Err(StoreError::Invalid("injected revision read-back error"))
+                } else {
+                    authority_revision(conn)
+                };
+                #[cfg(not(any(test, feature = "test-hooks")))]
+                let read_res = authority_revision(conn);
+                match read_res {
+                    Ok(r) if r >= revision => return Ok(revision),
+                    Ok(_) => reg.drop_mark(&mark_scope, revision),
+                    Err(_) => {
+                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.
+                    }
                 }
-                reg.drop_mark(&mark_scope, revision);
             }
             Err(err)
         }
@@ -945,6 +1015,12 @@ pub struct RevocationRegistry {
     inner: Mutex<RevocationInner>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub inject_commit_io_error: std::sync::atomic::AtomicBool,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub inject_precommit_abort: std::sync::atomic::AtomicBool,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub inject_rev_read_error: std::sync::atomic::AtomicBool,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub before_commit_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl RevocationRegistry {
@@ -1066,9 +1142,6 @@ pub fn merge_snapshot(conn: &Connection, peers: &mut PeersMap) -> Result<u64, St
         if !peers.deny.spkis.contains(&pin) {
             peers.deny.spkis.push(pin);
         }
-    }
-    if peers.own_device_id.is_none() {
-        peers.own_device_id = manual_grants.first().map(|g| g.issuer);
     }
     peers.manual_blocked = blocked_set;
     peers.manual_removed = removed_set;

@@ -270,6 +270,7 @@ from pathlib import Path
 
 xmsg = {str(xmsg_bin)!r}
 sock_a, sock_b = {str(sock_a)!r}, {str(sock_b)!r}
+agent_sock_a = {str(run_a / "register.sock")!r}
 db_a, db_b = {str(db_a)!r}, {str(db_b)!r}
 log_a, log_b = {str(log_a)!r}, {str(log_b)!r}
 
@@ -346,24 +347,60 @@ def unix_post(sock_path, path, payload):
     body = resp.read().decode("utf-8", "replace")
     return resp.status, body
 
+# Start a real svc-a recipient on node A over agent.sock so the pre-block send succeeds with a real reply.
+import socket as _sock, threading as _thr
+svc_ready = _thr.Event()
+svc_errs = []
+def run_svc_a():
+    try:
+        s = _sock.socket(_sock.AF_UNIX, _sock.SOCK_STREAM)
+        s.connect(agent_sock_a)
+        f = s.makefile("rw", encoding="utf-8")
+        f.write(json.dumps({{"harness": "svc", "name": "svc-a"}}) + "\\n")
+        f.flush()
+        reg_line = json.loads(f.readline())
+        assert reg_line.get("status") == "ok", f"svc-a register failed: {{reg_line}}"
+        svc_ready.set()
+        f.write(json.dumps({{"action": "poll", "waitSecs": 15}}) + "\\n")
+        f.flush()
+        msg_line = json.loads(f.readline())
+        msg_id = msg_line.get("messageId") or msg_line.get("id")
+        assert msg_id and msg_line.get("text") == "hello-q2-7a", f"unexpected svc-a delivery: {{msg_line}}"
+        f.write(json.dumps({{"action": "reply", "messageId": msg_id, "text": "pong-from-svc-a"}}) + "\\n")
+        f.flush()
+        _ = f.readline()
+        s.close()
+    except Exception as exc:
+        svc_errs.append(repr(exc))
+        svc_ready.set()
+
+wait_sock(agent_sock_a, log_a)
+svc_thread = _thr.Thread(target=run_svc_a, daemon=True)
+svc_thread.start()
+assert svc_ready.wait(timeout=10) and not svc_errs, f"svc-a failed to register: {{svc_errs}}"
+
 st_send_ok, body_send_ok = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "hello-q2-7a"}})
-assert "not allowed" not in body_send_ok.lower() and "op_denied" not in body_send_ok.lower() and "no address" not in body_send_ok.lower() and "unknown peer" not in body_send_ok.lower() and "unknown node" not in body_send_ok.lower() and "bad_request" not in body_send_ok.lower(), f"Q2-7a first send B->A failed: {{st_send_ok}} {{body_send_ok}}"
+svc_thread.join(timeout=10)
+assert not svc_errs, f"svc-a recipient error: {{svc_errs}}"
+assert st_send_ok in (200, 202), f"Q2-7a first send B->A failed: {{st_send_ok}} {{body_send_ok}}"
+send_ok_json = json.loads(body_send_ok)
+assert send_ok_json.get("outcome") in ("queued", "delivered") and send_ok_json.get("message_id"), f"Q2-7a first send unexpected response: {{send_ok_json}}"
 
 st_send_other, body_send_other = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"other@{{id_a}}", "text": "deny-q2-9"}})
-assert st_send_other >= 400 and ("not allowed" in body_send_other.lower() or "denied" in body_send_other.lower()), f"Q2-9 send to unlisted target 'other' unexpectedly succeeded: {{st_send_other}} {{body_send_other}}"
+assert st_send_other == 403 and json.loads(body_send_other).get("error") == "denied", f"Q2-9 send to unlisted target 'other' unexpectedly succeeded: {{st_send_other}} {{body_send_other}}"
 
 # Revocation + nothing revives BY EFFECT: block B on A -> installed_revision == committed_revision and B->A send refused; remove + unblock -> still refused.
 blk_proc = subprocess.run([xmsg, "pair", "--http-sock", sock_a, "block", id_b], check=True, capture_output=True, text=True)
 blk_json = json.loads(blk_proc.stdout)
 assert blk_json.get("committed") is True and blk_json.get("installed_revision") == blk_json.get("committed_revision"), f"pair block did not publish committed revision: {{blk_json}}"
 st_after_blk, body_after_blk = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "blocked"}})
-assert st_after_blk >= 400, f"revoked send after block unexpectedly succeeded: {{st_after_blk}} {{body_after_blk}}"
+assert st_after_blk in (403, 503) and json.loads(body_after_blk).get("error") in ("denied", "peer_unreachable"), f"revoked send after block unexpected result: {{st_after_blk}} {{body_after_blk}}"
 
 grant_a_hex = list_a["grants"][0]["grant_id"]
 subprocess.run([xmsg, "pair", "--http-sock", sock_a, "remove", grant_a_hex], check=True, capture_output=True)
 subprocess.run([xmsg, "pair", "--http-sock", sock_a, "unblock", id_b], check=True, capture_output=True)
 st_after_unblk, body_after_unblk = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "nothing-revives"}})
-assert st_after_unblk >= 400, f"nothing-revives send after remove+unblock unexpectedly succeeded: {{st_after_unblk}} {{body_after_unblk}}"
+assert st_after_unblk in (403, 503) and json.loads(body_after_unblk).get("error") in ("denied", "peer_unreachable"), f"nothing-revives send after remove+unblock unexpected result: {{st_after_unblk}} {{body_after_unblk}}"
 
 # Q2-16: block A on B, then unblock fails pairing.unblock_would_restore while grant exists; remove then unblock succeeds
 subprocess.run([xmsg, "pair", "--http-sock", sock_b, "block", id_a], check=True, capture_output=True)
@@ -397,9 +434,10 @@ nsenter -t "$ns_b_pid" -n --no-fork ip addr add 10.201.1.2/24 dev veth-b
 nsenter -t "$ns_b_pid" -n --no-fork ip link set veth-b up
 
 HOME={shlex.quote(str(home_a))} XDG_RUNTIME_DIR={shlex.quote(str(run_a))} {shlex.quote(str(xmsg_bin))} serve \\
-  --http-sock {shlex.quote(str(sock_a))} --sessions-dir {shlex.quote(str(sess_a))} \\
+  --http-sock {shlex.quote(str(sock_a))} --register-sock {shlex.quote(str(run_a / "register.sock"))} --sessions-dir {shlex.quote(str(sess_a))} \\
   --db-path {shlex.quote(str(db_a))} --fed-listen 10.201.1.1:7788 \\
   --fed-cert {shlex.quote(str(cert_a))} --fed-key {shlex.quote(str(key_a))} \\
+  --svc-exe svc-a={shlex.quote(sys.executable)} \\
   --peers-file {shlex.quote(str(peers_a))} --fed-reload-interval-secs 1 >{shlex.quote(str(log_a))} 2>&1 &
 srv_a=$!
 

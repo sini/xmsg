@@ -29,14 +29,14 @@ fn gen_ed25519_identity() -> (Vec<u8>, Vec<u8>, String) {
     (cert_der, key_der, id)
 }
 
-fn test_fed_state(dir: &TempDir) -> Arc<FedState> {
+fn test_fed_state_with_peers(dir: &TempDir, peers: PeersMap) -> Arc<FedState> {
     let (cert_der, key_der, _) = gen_ed25519_identity();
     let conn = rusqlite::Connection::open(dir.path().join("xmsg.db")).unwrap();
     xmsg::storage::init_db(&conn).unwrap();
     Arc::new(FedState {
         discovery: Default::default(),
         node_name: "test.local".into(),
-        peers: Arc::new(PeersMap::empty()).into(),
+        peers: Arc::new(peers).into(),
         cert_der,
         cert_chain_der: Vec::new(),
         key_der,
@@ -63,6 +63,10 @@ fn test_fed_state(dir: &TempDir) -> Arc<FedState> {
         reply_ttl: Duration::from_secs(3600),
         list_queries: Default::default(),
     })
+}
+
+fn test_fed_state(dir: &TempDir) -> Arc<FedState> {
+    test_fed_state_with_peers(dir, PeersMap::empty())
 }
 
 fn test_app_state(dir: &TempDir, fed: Arc<FedState>) -> Arc<AppState> {
@@ -597,7 +601,13 @@ fn safety_1_and_q2_9_authorize_peer_op_is_single_decision_point_default_deny() {
     let mut merged = (*fed.current_peers()).clone();
     {
         let db = fed.db.lock().unwrap();
-        xmsg::pairing::store::merge_snapshot(&db, &mut merged).unwrap();
+        xmsg::pairing::store::apply_to_policy(
+            &db,
+            &fed.cert_der,
+            &mut merged,
+            xmsg::storage::now_epoch_secs(),
+        )
+        .unwrap();
     }
 
     let auth_b = manual_auth_peer(&cert_b, peer_b_id, &peer_b);
@@ -681,7 +691,13 @@ fn safety_2_manual_admission_is_exact_and_refuses_collisions() {
     let mut merged = (*fed.current_peers()).clone();
     {
         let db = fed.db.lock().unwrap();
-        xmsg::pairing::store::merge_snapshot(&db, &mut merged).unwrap();
+        xmsg::pairing::store::apply_to_policy(
+            &db,
+            &fed.cert_der,
+            &mut merged,
+            xmsg::storage::now_epoch_secs(),
+        )
+        .unwrap();
     }
 
     // Exact granted Ed25519 SPKI is admitted.
@@ -736,7 +752,13 @@ fn safety_3_and_4_peers_file_unaffected_and_dial_entries_disappear_on_revoke() {
     .unwrap();
     {
         let db = fed.db.lock().unwrap();
-        xmsg::pairing::store::merge_snapshot(&db, &mut merged).unwrap();
+        xmsg::pairing::store::apply_to_policy(
+            &db,
+            &fed.cert_der,
+            &mut merged,
+            xmsg::storage::now_epoch_secs(),
+        )
+        .unwrap();
     }
 
     // Safety 3: peers-file peer 'alice' keeps exact send-only rights unaffected by manual grant.
@@ -776,7 +798,13 @@ fn safety_3_and_4_peers_file_unaffected_and_dial_entries_disappear_on_revoke() {
     {
         let db = fed.db.lock().unwrap();
         xmsg::pairing::store::remove(&db, &grant_b, xmsg::storage::now_epoch_secs()).unwrap();
-        xmsg::pairing::store::merge_snapshot(&db, &mut merged).unwrap();
+        xmsg::pairing::store::apply_to_policy(
+            &db,
+            &fed.cert_der,
+            &mut merged,
+            xmsg::storage::now_epoch_secs(),
+        )
+        .unwrap();
     }
     assert!(merged.get_peer_config(&peer_b).is_none());
 }
@@ -799,7 +827,13 @@ fn safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission() {
     let mut merged = (*fed.current_peers()).clone();
     {
         let db = fed.db.lock().unwrap();
-        xmsg::pairing::store::merge_snapshot(&db, &mut merged).unwrap();
+        xmsg::pairing::store::apply_to_policy(
+            &db,
+            &fed.cert_der,
+            &mut merged,
+            xmsg::storage::now_epoch_secs(),
+        )
+        .unwrap();
     }
     let auth_b = manual_auth_peer(&cert_b, peer_b_id, &peer_b);
     let res = xmsg::pairing::auth::Resource {
@@ -844,17 +878,90 @@ fn safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission() {
     assert!(reg.has_blocking_mark(&peer_b_id, Some(&grant_b), merged.authority_revision));
     assert!(!reg.has_blocking_mark(&peer_b_id, Some(&g2), merged.authority_revision));
 
-    // Q2-7f: GC keeps mark while an older GenerationToken (rev < M) is still alive, and retires once dropped.
-    let old_tok = Arc::new(xmsg::pairing::store::GenerationToken::new(0));
-    reg.register_token(&old_tok);
-    reg.gc(merged.authority_revision + 10);
+    // Q2-7f / N19 / R4 / Q2-7g:
+    // 1. N19: mark must be inserted BEFORE tx.commit() (checked via before_commit_hook).
+    let reg_hook = reg.clone();
+    let seen_before_commit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen_clone = seen_before_commit.clone();
+    let rev_before_blk = {
+        let db = fed.db.lock().unwrap();
+        xmsg::pairing::store::authority_revision(&db).unwrap()
+    };
+    *reg.before_commit_hook.lock().unwrap() = Some(Arc::new(move || {
+        if reg_hook.has_blocking_mark(&peer_b_id, None, rev_before_blk) {
+            seen_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }));
+
+    // 2. R4 branch A: pre-commit abort (read-back shows revision did not advance) drops mark and returns Err.
+    reg.inject_precommit_abort
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    {
+        let db = fed.db.lock().unwrap();
+        assert!(xmsg::pairing::store::block_device_with_marks(
+            &db,
+            &peer_b_id,
+            xmsg::storage::now_epoch_secs(),
+            Some(&reg),
+        )
+        .is_err());
+    }
+    *reg.before_commit_hook.lock().unwrap() = None;
     assert!(
-        reg.mark_count() >= 1,
-        "Q2-7f: mark must stay live while older GenerationToken is alive"
+        seen_before_commit.load(std::sync::atomic::Ordering::SeqCst),
+        "N19: revocation mark must be inserted before COMMIT"
     );
-    drop(old_tok);
-    reg.gc(merged.authority_revision + 10);
-    assert_eq!(reg.mark_count(), 0, "Q2-7f: mark must retire after older tokens drop");
+    assert!(
+        !reg.has_blocking_mark(&peer_b_id, None, rev_before_blk),
+        "R4: mark must be dropped when read-back confirms revision did not advance"
+    );
+
+    // 3. R4 branch B: ambiguous COMMIT whose read-back fails keeps the mark fail-closed.
+    reg.inject_precommit_abort
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    reg.inject_rev_read_error
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    {
+        let db = fed.db.lock().unwrap();
+        assert!(xmsg::pairing::store::block_device_with_marks(
+            &db,
+            &peer_b_id,
+            xmsg::storage::now_epoch_secs(),
+            Some(&reg),
+        )
+        .is_err());
+    }
+    assert!(
+        reg.has_blocking_mark(&peer_b_id, None, rev_before_blk),
+        "R4: ambiguous COMMIT with failed read-back must keep mark on block"
+    );
+
+    // Same R4 read-back-failure check on remove_with_marks.
+    let g_r4 = seed_manual_grant(
+        &fed,
+        peer_b_id,
+        PairingProfile::Contact,
+        vec!["svc-a".into()],
+        None,
+    );
+    reg.inject_precommit_abort
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    reg.inject_rev_read_error
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    {
+        let db = fed.db.lock().unwrap();
+        assert!(xmsg::pairing::store::remove_with_marks(
+            &db,
+            &g_r4,
+            xmsg::storage::now_epoch_secs(),
+            Some(&reg),
+        )
+        .is_err());
+    }
+    assert!(
+        reg.has_blocking_mark(&peer_b_id, Some(&g_r4), rev_before_blk),
+        "R4: ambiguous COMMIT with failed read-back must keep mark on remove"
+    );
 
     // Q2-7g: ambiguous I/O error at COMMIT after durable write keeps mark and returns Ok(rev).
     reg.inject_commit_io_error
@@ -1258,15 +1365,18 @@ async fn m10_block_device_publishes_update_and_refuses_at_admission_and_permit_f
     fed.authorize_peer_op(&before_peers, &auth_b, xmsg::pairing::auth::Operation::Send, &res)
         .expect("pre-block send must be permitted");
 
-    let _open_conn_token = Arc::new(xmsg::pairing::store::GenerationToken::new(
-        before_peers.authority_revision,
-    ));
-    xmsg::pairing::store::revocations_for_db(&fed.db).register_token(&_open_conn_token);
+    // Production `install()` registered `before_peers.generation_token`; holding `before_peers`
+    // must keep the block mark alive across `block_device`'s install() + gc() (R1 / N24).
     let outcome = rt.service.block_device(&fed, &peer_b).await.unwrap();
     assert!(outcome.committed);
     assert_eq!(
         outcome.installed_revision, outcome.committed_revision,
         "pair block must publish and install the committed revision"
+    );
+    let reg = xmsg::pairing::store::revocations_for_db(&fed.db);
+    assert!(
+        reg.mark_count() >= 1,
+        "Q2-7f/R1: mark must stay live while production before_peers generation is held"
     );
     let after_peers = fed.current_peers();
     assert_eq!(after_peers.authority_revision, outcome.committed_revision);
@@ -1283,5 +1393,541 @@ async fn m10_block_device_publishes_update_and_refuses_at_admission_and_permit_f
         fed.authorize_peer_op(&after_peers, &auth_b, xmsg::pairing::auth::Operation::Send, &res)
             .is_err(),
         "blocked device must be refused at the permit fence on published snapshot"
+    );
+    drop(before_peers);
+    reg.gc(outcome.committed_revision);
+    assert_eq!(
+        reg.mark_count(),
+        0,
+        "Q2-7f: mark must retire after production before_peers generation drops"
+    );
+}
+
+#[tokio::test]
+async fn r2_foreign_issuer_grant_refused_after_file_and_policy_only_rebuild() {
+    let dir = TempDir::new().unwrap();
+    let kp = KeyPair::generate_for(&PKCS_ED25519).unwrap();
+    let params = CertificateParams::new(vec!["test.local".to_string()]).unwrap();
+    let cert = params.self_signed(&kp).unwrap();
+    let cert_path = dir.path().join("fed.crt");
+    let key_path = dir.path().join("fed.key");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, kp.serialize_pem()).unwrap();
+
+    let conn = rusqlite::Connection::open(dir.path().join("xmsg.db")).unwrap();
+    xmsg::storage::init_db(&conn).unwrap();
+    let fed = Arc::new(FedState {
+        discovery: Default::default(),
+        node_name: "test.local".into(),
+        peers: Arc::new(PeersMap::empty()).into(),
+        cert_der: cert.der().to_vec(),
+        cert_chain_der: Vec::new(),
+        key_der: kp.serialize_der(),
+        rate_limiter: Arc::new(RateLimiter::new(60, 20)),
+        db: Arc::new(Mutex::new(conn)),
+        sessions_dirs: vec![dir.path().join("sessions")],
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: dir.path().join("presence"),
+            brain_dir: dir.path().join("brain"),
+            ..Default::default()
+        },
+        agy_store: xmsg::agy::new_agy_store(),
+        pi_store: xmsg::pi::new_pi_store(),
+        pi_notify_tx: tokio::sync::broadcast::channel(16).0,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+        notify_tx: tokio::sync::broadcast::channel(16).0,
+        max_body: 65536,
+        max_attachment_bytes: 8 * 1024 * 1024,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Default::default(),
+        dynamic_tls: Default::default(),
+        reply_ttl: Duration::from_secs(3600),
+        list_queries: Default::default(),
+    });
+    let reloader = Arc::new(
+        xmsg::fed::CredentialReloader::new_full(
+            cert_path,
+            key_path,
+            None,
+            None,
+            fed.current_peers(),
+            Some(fed.clone()),
+            Arc::new(Mutex::new(Default::default())),
+        )
+        .unwrap(),
+    );
+    xmsg::fed::attach_pairing_reloader(&fed, &reloader);
+
+    let (cert_b, _, peer_b) = gen_ed25519_identity();
+    let peer_b_id = SpkiDeviceId::parse_device_id_string(&peer_b).unwrap().0;
+    let foreign_issuer = [0x77u8; 32];
+    let own_id = xmsg::pairing::ceremony::ed25519_device_id_from_cert(&fed.cert_der)
+        .unwrap()
+        .0;
+    {
+        let db = fed.db.lock().unwrap();
+        let exp = xmsg::pairing::codec::ExposurePolicy {
+            profile: PairingProfile::OwnerDevice,
+            target_selectors: vec!["*".into()],
+            principal_selectors: vec!["*".into()],
+            max_body_bytes: 65536,
+            max_attachment_bytes: 65536,
+            rate_burst: 10,
+            rate_per_minute: 60,
+        };
+        let now = xmsg::storage::now_epoch_secs();
+        db.execute(
+            "INSERT INTO pairing_grants (grant_id, issuer, subject, provenance, profile, exposure,
+                 not_after, origin_intent_id, transaction_id, exporter, receipt_local, receipt_remote,
+                 ceremony_created, ceremony_expires, activated_at, active)
+             VALUES (?1, ?2, ?3, 'manual_authenticated_oob', 'owner-device', ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1)",
+            rusqlite::params![
+                &[0x42u8; 16][..], &foreign_issuer[..], &peer_b_id[..], exp.encode_cbor().unwrap(),
+                &[0x43u8; 16][..], &[0x11u8; 32][..], &[0x22u8; 32][..], &[0xA5u8; 16][..], &[0x5Au8; 16][..],
+                now - 1, now + 119, now
+            ],
+        )
+        .unwrap();
+    }
+    let cert_b_der = rustls::pki_types::CertificateDer::from(cert_b);
+    // File rebuild arm: own_device_id must be own_id, foreign grant refused.
+    reloader.force_reload().unwrap();
+    let after_file = fed.current_peers();
+    assert_eq!(after_file.own_device_id, Some(own_id));
+    assert!(after_file.resolve_incoming_peer(&cert_b_der, &[]).is_err());
+
+    // Policy-only rebuild arm: bump revision via another device block and call publish_store().
+    {
+        let db = fed.db.lock().unwrap();
+        xmsg::pairing::store::block_device(&db, &[0x88u8; 32], xmsg::storage::now_epoch_secs())
+            .unwrap();
+    }
+    reloader.publish_store().unwrap();
+    let after_policy = fed.current_peers();
+    assert_eq!(after_policy.own_device_id, Some(own_id));
+    assert!(after_policy.resolve_incoming_peer(&cert_b_der, &[]).is_err());
+}
+
+#[tokio::test]
+async fn r5_legacy_reply_attachment_with_non_empty_principals_allowed() {
+    let dir = TempDir::new().unwrap();
+    let (_, _, peer_id_str) = gen_ed25519_identity();
+    let peer_id = SpkiDeviceId::parse_device_id_string(&peer_id_str).unwrap().0;
+    let pin_hex = hex::encode(peer_id);
+    let peers = PeersMap::load_from_json(&format!(
+        r#"{{"legacy-a": {{"address": "127.0.0.1:9999", "pin": "{pin_hex}", "allow": ["send"], "principals": ["specific"]}}}}"#
+    ))
+    .unwrap();
+    let fed = test_fed_state_with_peers(&dir, peers);
+
+    let now = xmsg::storage::now_epoch_secs();
+    {
+        let db = fed.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO messages (id, created_at, session_id, from_name, bytes, outcome)
+             VALUES ('msg-1', ?1, 'sess-1', 'legacy-a', 2, 'delivered')",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO replies (message_id, created_at, replier_session_id, text, pushed_message_id)
+             VALUES ('msg-1', ?1, 'sess-1', 'ok', 'item-r5')",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO attachments (item_id, idx, sha256, name, size, media_type, expires_at, upstream, downstream)
+             VALUES ('item-r5', 0, '0000', 'a.txt', 3, 'text/plain', ?1, 'self', 'legacy-a')",
+            rusqlite::params![now + 600],
+        )
+        .unwrap();
+    }
+    // File bytes are missing on disk -> after authorization passes, we get NotFound/Internal (NOT OpDenied).
+    let err = xmsg::fed::serve_attachment_bytes(&fed, "legacy-a", "item-r5", 0, 0, 10)
+        .await
+        .unwrap_err();
+    assert!(
+        !matches!(err, xmsg::error::AppError::OpDenied(_)),
+        "R5: legacy reply-attachment fetch with non-empty principals must not be OpDenied, got: {err:?}"
+    );
+}
+
+#[test]
+fn n16_n18_n28_expired_collision_and_outbound_pin_exclusion() {
+    let dir = TempDir::new().unwrap();
+    let fed = test_fed_state(&dir);
+    let now = xmsg::storage::now_epoch_secs();
+
+    // N16: expired manual grant is refused at TLS admission AND has no dial entry.
+    let (cert_exp, _, peer_exp) = gen_ed25519_identity();
+    let peer_exp_id = SpkiDeviceId::parse_device_id_string(&peer_exp).unwrap().0;
+    seed_manual_grant(
+        &fed,
+        peer_exp_id,
+        PairingProfile::Contact,
+        vec!["svc-a".into()],
+        Some(now + 60),
+    );
+    {
+        let db = fed.db.lock().unwrap();
+        db.execute(
+            "UPDATE pairing_grants SET not_after = ?1 WHERE subject = ?2",
+            rusqlite::params![now - 5, &peer_exp_id[..]],
+        )
+        .unwrap();
+    }
+
+    // N18: active manual grant colliding with an existing peers-file pin gets no second dialable name.
+    let (_, _, peer_col) = gen_ed25519_identity();
+    let peer_col_id = SpkiDeviceId::parse_device_id_string(&peer_col).unwrap().0;
+    let col_hex = hex::encode(peer_col_id);
+    seed_manual_grant(
+        &fed,
+        peer_col_id,
+        PairingProfile::Contact,
+        vec!["svc-a".into()],
+        None,
+    );
+
+    // N28: active non-colliding manual grant appears in pinned_entries() for CA outbound exclusion.
+    let (_, _, peer_man) = gen_ed25519_identity();
+    let peer_man_id = SpkiDeviceId::parse_device_id_string(&peer_man).unwrap().0;
+    let man_hex = hex::encode(peer_man_id);
+    seed_manual_grant(
+        &fed,
+        peer_man_id,
+        PairingProfile::Contact,
+        vec!["svc-a".into()],
+        None,
+    );
+
+    let mut merged = PeersMap::load_from_json(&format!(
+        r#"{{"laptop-file": {{"address": "127.0.0.1:7777", "pin": "{col_hex}", "allow": ["send"]}}}}"#
+    ))
+    .unwrap();
+    {
+        let db = fed.db.lock().unwrap();
+        xmsg::pairing::store::apply_to_policy(
+            &db,
+            &fed.cert_der,
+            &mut merged,
+            xmsg::storage::now_epoch_secs(),
+        )
+        .unwrap();
+    }
+    merged.own_device_id = Some(
+        xmsg::pairing::ceremony::ed25519_device_id_from_cert(&fed.cert_der)
+            .unwrap()
+            .0,
+    );
+
+    // N16 assertions:
+    assert!(
+        merged
+            .resolve_incoming_peer(&rustls::pki_types::CertificateDer::from(cert_exp), &[])
+            .is_err(),
+        "N16: expired manual grant must be refused at TLS admission"
+    );
+    assert!(
+        merged.manual_peer_config(&peer_exp).is_none(),
+        "N16: expired manual grant must not produce a dial entry"
+    );
+
+    // N18 assertion:
+    assert!(
+        merged.manual_peer_config(&peer_col).is_none(),
+        "N18: manual grant colliding with peers-file pin must not get a second dialable name"
+    );
+
+    // N28 assertion:
+    let pinned = merged.pinned_entries();
+    assert_eq!(
+        pinned.get(&man_hex).map(String::as_str),
+        Some(peer_man.as_str()),
+        "N28: active manual grant pin must be in pinned_entries() so CA outbound connections exclude it"
+    );
+}
+
+#[tokio::test]
+async fn n30_and_n11_pending_block_mark_denies_legacy_peer_send_and_observe() {
+    let dir = TempDir::new().unwrap();
+    let (cert_leg, _, peer_leg) = gen_ed25519_identity();
+    let peer_leg_id = SpkiDeviceId::parse_device_id_string(&peer_leg).unwrap().0;
+    let leg_hex = hex::encode(peer_leg_id);
+
+    let peers = PeersMap::load_from_json(&format!(
+        r#"{{"legacy-obs": {{"address": "127.0.0.1:8888", "pin": "{leg_hex}", "allow": ["send", "observe"]}}}}"#
+    ))
+    .unwrap();
+    let peer_cfg = peers.get("legacy-obs").unwrap().clone();
+    let fed = test_fed_state_with_peers(&dir, peers);
+    let peers_arc = fed.current_peers();
+
+    let auth_leg = xmsg::fed::AuthenticatedPeer {
+        leaf_authority: xmsg::fed::LeafAuthority::from_certificate(
+            &rustls::pki_types::CertificateDer::from(cert_leg),
+            xmsg::fed::AdmissionMode::Pin,
+        )
+        .unwrap(),
+        name: "legacy-obs".into(),
+        pin: leg_hex,
+        uri: None,
+        certificate_has_uri: false,
+        user: String::new(),
+        remote_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    };
+
+    // Plant a pending block mark on the legacy peer's device ID.
+    let reg = xmsg::pairing::store::revocations_for_db(&fed.db);
+    {
+        let db = fed.db.lock().unwrap();
+        xmsg::pairing::store::block_device_with_marks(
+            &db,
+            &peer_leg_id,
+            xmsg::storage::now_epoch_secs(),
+            Some(&reg),
+        )
+        .unwrap();
+    }
+
+    // N30: Send must be refused on the legacy peer due to the pending block mark.
+    let send_res = xmsg::pairing::auth::Resource::default();
+    assert!(
+        fed.authorize_peer_op(&peers_arc, &auth_leg, xmsg::pairing::auth::Operation::Send, &send_res)
+            .is_err(),
+        "N30: pending block mark must deny legacy peer Send at permit"
+    );
+
+    // N11: observe_fed router must refuse the legacy peer when authorize_peer_op denies Observe.
+    let obs_router = xmsg::observe_fed::router(fed.clone());
+    let req = Request::builder()
+        .method("GET")
+        .uri("/fed/v2/observe/snapshot")
+        .extension(Arc::new(auth_leg))
+        .extension(xmsg::observe_fed::TlsAdmission {
+            peers: peers_arc,
+            config: peer_cfg,
+        })
+        .body(Body::empty())
+        .unwrap();
+    let resp = obs_router.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "N11: observe_fed must refuse when authorize_peer_op denies Observe"
+    );
+}
+
+#[tokio::test]
+async fn n12_handoff_refuses_observe_only_and_manual_contact_via_shared_decision() {
+    let dir = TempDir::new().unwrap();
+    let (cert_obs, _, peer_obs) = gen_ed25519_identity();
+    let obs_hex = hex::encode(SpkiDeviceId::parse_device_id_string(&peer_obs).unwrap().0);
+    let peers = PeersMap::load_from_json(&format!(
+        r#"{{"obs-only": {{"address": "127.0.0.1:8889", "pin": "{obs_hex}", "allow": ["observe"]}}}}"#
+    ))
+    .unwrap();
+    let fed = test_fed_state_with_peers(&dir, peers);
+
+    let auth_obs = xmsg::fed::AuthenticatedPeer {
+        leaf_authority: xmsg::fed::LeafAuthority::from_certificate(
+            &rustls::pki_types::CertificateDer::from(cert_obs),
+            xmsg::fed::AdmissionMode::Pin,
+        )
+        .unwrap(),
+        name: "obs-only".into(),
+        pin: obs_hex,
+        uri: None,
+        certificate_has_uri: false,
+        user: String::new(),
+        remote_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+    };
+    let err = xmsg::handoff::handoff_handler(
+        axum::extract::State(fed.clone()),
+        axum::Extension(Arc::new(auth_obs)),
+        axum::Json(xmsg::handoff::HandoffRequest {
+            id: "missing".into(),
+            limit: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, xmsg::error::AppError::OpDenied(_)),
+        "N12: handoff_handler must refuse observe-only peer via authorize_peer_op, got: {err:?}"
+    );
+
+    // Manual `Contact` peer with same user: only `authorize_peer_op` (shared decision) refuses Handoff.
+    let (cert_ct, _, peer_ct) = gen_ed25519_identity();
+    let peer_ct_id = SpkiDeviceId::parse_device_id_string(&peer_ct).unwrap().0;
+    let mut auth_ct = manual_auth_peer(&cert_ct, peer_ct_id, &peer_ct);
+    let dir2 = TempDir::new().unwrap();
+    let kp2 = KeyPair::generate_for(&PKCS_ED25519).unwrap();
+    let cert2 = CertificateParams::new(vec!["test.local".to_string()])
+        .unwrap()
+        .self_signed(&kp2)
+        .unwrap();
+    let cp2 = dir2.path().join("fed.crt");
+    let kp2_path = dir2.path().join("fed.key");
+    std::fs::write(&cp2, cert2.pem()).unwrap();
+    std::fs::write(&kp2_path, kp2.serialize_pem()).unwrap();
+    let conn2 = rusqlite::Connection::open(dir2.path().join("xmsg2.db")).unwrap();
+    xmsg::storage::init_db(&conn2).unwrap();
+    let fed3 = Arc::new(FedState {
+        discovery: Default::default(),
+        node_name: "test.local".into(),
+        peers: Arc::new(PeersMap::empty()).into(),
+        cert_der: cert2.der().to_vec(),
+        cert_chain_der: Vec::new(),
+        key_der: kp2.serialize_der(),
+        rate_limiter: Arc::new(RateLimiter::new(60, 20)),
+        db: Arc::new(Mutex::new(conn2)),
+        sessions_dirs: vec![dir2.path().join("sessions")],
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: dir2.path().join("presence"),
+            brain_dir: dir2.path().join("brain"),
+            ..Default::default()
+        },
+        agy_store: xmsg::agy::new_agy_store(),
+        pi_store: xmsg::pi::new_pi_store(),
+        pi_notify_tx: tokio::sync::broadcast::channel(16).0,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+        notify_tx: tokio::sync::broadcast::channel(16).0,
+        max_body: 65536,
+        max_attachment_bytes: 8 * 1024 * 1024,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Default::default(),
+        dynamic_tls: Default::default(),
+        reply_ttl: Duration::from_secs(3600),
+        list_queries: Default::default(),
+    });
+    seed_manual_grant(
+        &fed3,
+        peer_ct_id,
+        PairingProfile::Contact,
+        vec!["svc-a".into()],
+        None,
+    );
+    {
+        let db = fed3.db.lock().unwrap();
+        db.execute("UPDATE pairing_meta SET authority_revision = 1 WHERE singleton = 1", [])
+            .unwrap();
+    }
+    let rel3 = Arc::new(
+        xmsg::fed::CredentialReloader::new_full(
+            cp2,
+            kp2_path,
+            None,
+            None,
+            fed3.current_peers(),
+            Some(fed3.clone()),
+            Arc::new(Mutex::new(Default::default())),
+        )
+        .unwrap(),
+    );
+    xmsg::fed::attach_pairing_reloader(&fed3, &rel3);
+    fed3.publish_pairing_update(1).await.unwrap();
+    auth_ct.user = xmsg::fed::own_user(&fed3);
+    let err_ct = xmsg::handoff::handoff_handler(
+        axum::extract::State(fed3),
+        axum::Extension(Arc::new(auth_ct)),
+        axum::Json(xmsg::handoff::HandoffRequest {
+            id: "missing".into(),
+            limit: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err_ct, xmsg::error::AppError::OpDenied(_)),
+        "N12: handoff_handler must refuse manual Contact via authorize_peer_op, got: {err_ct:?}"
+    );
+}
+
+#[tokio::test]
+async fn b6_doctor_authority_names_last_publish_error() {
+    let dir = TempDir::new().unwrap();
+    let kp = KeyPair::generate_for(&PKCS_ED25519).unwrap();
+    let params = CertificateParams::new(vec!["test.local".to_string()]).unwrap();
+    let cert = params.self_signed(&kp).unwrap();
+    let cert_path = dir.path().join("fed.crt");
+    let key_path = dir.path().join("fed.key");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, kp.serialize_pem()).unwrap();
+
+    let conn = rusqlite::Connection::open(dir.path().join("xmsg.db")).unwrap();
+    xmsg::storage::init_db(&conn).unwrap();
+    let fed = Arc::new(FedState {
+        discovery: Default::default(),
+        node_name: "test.local".into(),
+        peers: Arc::new(PeersMap::empty()).into(),
+        cert_der: cert.der().to_vec(),
+        cert_chain_der: Vec::new(),
+        key_der: kp.serialize_der(),
+        rate_limiter: Arc::new(RateLimiter::new(60, 20)),
+        db: Arc::new(Mutex::new(conn)),
+        sessions_dirs: vec![dir.path().join("sessions")],
+        agy_config: xmsg::agy::AgyConfig {
+            presence_dir: dir.path().join("presence"),
+            brain_dir: dir.path().join("brain"),
+            ..Default::default()
+        },
+        agy_store: xmsg::agy::new_agy_store(),
+        pi_store: xmsg::pi::new_pi_store(),
+        pi_notify_tx: tokio::sync::broadcast::channel(16).0,
+        svc_store: xmsg::svc::new_svc_store(),
+        svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+        notify_tx: tokio::sync::broadcast::channel(16).0,
+        max_body: 65536,
+        max_attachment_bytes: 8 * 1024 * 1024,
+        is_leaf: false,
+        leaf_principal: None,
+        outbound_replies_pushed: Default::default(),
+        dynamic_tls: Default::default(),
+        reply_ttl: Duration::from_secs(3600),
+        list_queries: Default::default(),
+    });
+    let reloader = Arc::new(
+        xmsg::fed::CredentialReloader::new_full(
+            cert_path,
+            key_path,
+            None,
+            None,
+            fed.current_peers(),
+            Some(fed.clone()),
+            Arc::new(Mutex::new(Default::default())),
+        )
+        .unwrap(),
+    );
+    xmsg::fed::attach_pairing_reloader(&fed, &reloader);
+
+    let rt = pairing_runtime(&fed);
+    rt.service.attempt_startup_cancel(&fed).unwrap();
+    // Commit a higher revision (5) than installed (0) without publishing it, then fail publish_pairing_update(99).
+    {
+        let db = fed.db.lock().unwrap();
+        db.execute("UPDATE pairing_meta SET authority_revision = 5 WHERE singleton = 1", [])
+            .unwrap();
+    }
+    let err = fed.publish_pairing_update(99).await.unwrap_err();
+    assert_eq!(err.code(), "pairing.reload_failed");
+    {
+        let db = fed.db.lock().unwrap();
+        db.execute("UPDATE pairing_meta SET authority_revision = 6 WHERE singleton = 1", [])
+            .unwrap();
+    }
+
+    let diag = rt.service.diagnostics(&fed, true).await.unwrap();
+    assert_eq!(diag["pairing.authority"]["code"], "pairing.reload_failed");
+    assert!(
+        diag["pairing.authority"]["error"]
+            .as_str()
+            .is_some_and(|s| s.contains("installed revision remained behind")),
+        "B6: pairing.authority must name the last publication error: {}",
+        diag["pairing.authority"]
     );
 }

@@ -30,9 +30,9 @@ pub(crate) fn read_slots(fed: &Arc<FedState>) -> Arc<Semaphore> {
 const REQUEST_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
-pub(crate) struct TlsAdmission {
-    pub(crate) peers: Arc<PeersMap>,
-    pub(crate) config: PeerConfig,
+pub struct TlsAdmission {
+    pub peers: Arc<PeersMap>,
+    pub config: PeerConfig,
 }
 
 struct ExportState {
@@ -126,7 +126,7 @@ fn current(state: &ExportState, admission: &Admission) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn router(fed: Arc<FedState>) -> Router {
+pub fn router(fed: Arc<FedState>) -> Router {
     let state = Arc::new(ExportState {
         #[cfg(any(test, feature = "test-hooks"))]
         controls: test_hooks::controls(&fed),
