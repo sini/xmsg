@@ -115,6 +115,7 @@
     "tests/observe_arrival.rs",
     "tests/observe_http.rs",
     "tests/operator_cli.rs",
+    "tests/pairing_ceremony.rs",
     "tests/pairing_vectors.rs",
     "tests/pi_proc.rs",
     "tests/pi_queue.rs",
@@ -129,16 +130,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1869,
+      "passed": 1880,
       "failed": 0,
       "ignored": 13,
-      "summaries": 125
+      "summaries": 126
     },
     "darwin": {
-      "passed": 1854,
+      "passed": 1865,
       "failed": 0,
       "ignored": 13,
-      "summaries": 125
+      "summaries": 126
     }
   }
 }
