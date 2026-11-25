@@ -787,7 +787,29 @@ let
         ) msgs;
     }
     {
-      name = "D2/B3 unknown op sned in allow is an eval error";
+      name = "F5c same-user observe+send+list to collector names both send and list";
+      ok =
+        let
+          res = fleet.check (
+            baseFleet
+            // {
+              grants = baseFleet.grants // {
+                "alice.hub" = baseFleet.grants."alice.hub" // {
+                  "alice.collector".allow = [
+                    "observe"
+                    "send"
+                    "list"
+                  ];
+                };
+              };
+            }
+          );
+          msgs = map (c: c.message) (lib.filter (c: !c.assertion) res);
+        in
+        lib.any (m: lib.hasPrefix "F5:" m && lib.hasInfix "send" m && lib.hasInfix "list" m) msgs;
+    }
+    {
+      name = "D2/B3 unknown op sned in grant allow is an eval error";
       ok =
         !(builtins.tryEval (
           builtins.deepSeq (fleet.check (
@@ -801,6 +823,29 @@ let
                   ];
                 };
               };
+            }
+          )) true
+        )).success;
+    }
+    {
+      name = "D2b unknown op sned in mesh allow is an eval error";
+      ok =
+        !(builtins.tryEval (
+          builtins.deepSeq (fleet.check (
+            baseFleet
+            // {
+              meshes = [
+                {
+                  members = [
+                    "alice.hub"
+                    "alice.laptop"
+                  ];
+                  allow = [
+                    "sned"
+                    "reply"
+                  ];
+                }
+              ];
             }
           )) true
         )).success;

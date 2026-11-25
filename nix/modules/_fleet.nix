@@ -818,7 +818,7 @@ let
       self,
     }:
     let
-      # N8 equivalence (counting any grant to self) holds only because assertFleet runs check and throws on any F5 violation first.
+      # N8 equivalence (counting any grant to self) holds unconditionally because assertFleet throws on F5 first and self is a collector.
       f = assertFleet fleet;
       viewer = f.nodes.${self};
       viewerCa = caFor f viewer;
@@ -830,12 +830,15 @@ let
         g != null && builtins.elem "observe" g.allow
       ) (lib.sort builtins.lessThan (builtins.attrNames f.nodes));
     in
-    map (nName: {
-      node = nName;
-      address = addressFor viewer nName f.nodes.${nName};
-      identity = identityOf f nName;
-      ca = viewerCa;
-    }) sources;
+    if viewer.kind != "collector" then
+      builtins.throw "collectorSourcesFor: '${self}' is not a collector"
+    else
+      map (nName: {
+        node = nName;
+        address = addressFor viewer nName f.nodes.${nName};
+        identity = identityOf f nName;
+        ca = viewerCa;
+      }) sources;
 
   reachableFor =
     {
