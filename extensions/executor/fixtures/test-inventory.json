@@ -233,6 +233,7 @@
   "runtime_config::tests::configuration_is_strict_and_keeps_programs_owner_selected",
   "runtime_config::tests::executable_pin_checks_actual_bytes_without_execution",
   "runtime_config::tests::private_configuration_reads_refuse_permissions_symlink_and_oversize",
+  "runtime_process::descriptor_tests::native_exec_excludes_an_inheritable_unowned_socket",
   "safe_human_only_is_the_default_not_an_ambient_overseer",
   "status_freshness_background_and_normalized_result_are_explicit",
   "strict_steer_and_interrupt_require_generation_and_turn",

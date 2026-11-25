@@ -11,8 +11,6 @@ pub mod capability;
 mod content_delivery;
 #[allow(dead_code)]
 mod eligibility;
-#[cfg(test)]
-mod fd_diagnostics;
 pub mod framing;
 mod human_operator;
 pub mod launch_environment;

@@ -86,6 +86,9 @@ The verbs are `dispatch`, `send`, `steer`, `interrupt`, `resume`, `stop`, `statu
 attribution and current owner verb/target grants. Owner/human credentials do not
 substitute for that attribution; no per-agent control credential is minted.
 
+On macOS, native adapter exec marks descriptors above stdio close-on-exec,
+including ambient system sockets inherited by the supervisor.
+
 Authorization, durable admission, native submission and observed effect are
 separate receipt layers. Replaying the same canonical principal/request ID
 returns historical information, not fresh authority or another execution.

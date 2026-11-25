@@ -288,5 +288,15 @@
     "test_module": "lifecycle::tests",
     "test_file": "extensions/executor/src/lifecycle_tests.rs",
     "assertion": "expired adapter qualification emitted a queued native frame"
+  },
+  {
+    "id": "runtime-native-descriptor-cloexec",
+    "file": "extensions/executor/src/runtime_process.rs",
+    "needle": "if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {",
+    "replacement": "if flags >= 0 && { let _ = fd; false } {",
+    "test": "native_exec_excludes_an_inheritable_unowned_socket",
+    "test_module": "runtime_process::descriptor_tests",
+    "test_file": "extensions/executor/src/runtime_process.rs",
+    "assertion": "native exec inherited the deliberately unowned socket"
   }
 ]

@@ -152,8 +152,8 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
     if Instant::now() >= expires {
         return Err(ErrorCode::DeadlineExpired.into());
     }
-    #[cfg(test)]
-    crate::fd_diagnostics::before_spawn(&mut command);
+    #[cfg(target_os = "macos")]
+    native_descriptors_cloexec(&mut command);
     let mut backend =
         journal.spawn_native_backend(admission, &manifest.identity, &unix_now, &mut command)?;
     let mut input = backend.stdin.take().ok_or(SupervisorError::Protocol)?;
@@ -945,5 +945,86 @@ impl Session {
         }
         crate::supervisor::frame_until(&mut stream, &hello, deadline)?;
         Ok(stop)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn native_descriptors_cloexec(command: &mut ProcessCommand) {
+    use std::os::unix::process::CommandExt;
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let maximum = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        limit.rlim_cur.min(65536) as libc::c_int
+    } else {
+        65536
+    };
+    // Marking rather than closing preserves std's exec-error pipe.
+    unsafe {
+        command.pre_exec(move || {
+            for fd in 3..maximum {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(test)]
+mod descriptor_tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn native_exec_excludes_an_inheritable_unowned_socket() {
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let fd = socket.as_raw_fd();
+        let metadata = File::from(std::os::fd::OwnedFd::from(socket.try_clone().unwrap()))
+            .metadata()
+            .unwrap();
+        let python =
+            std::env::var_os("XMSG_EXECUTOR_FIXTURE_PYTHON").unwrap_or_else(|| "python3".into());
+        let mut command = ProcessCommand::new(python);
+        command
+            .args([
+                "-c",
+                "import os,sys
+sys.stdin.buffer.read(1)
+try:
+ s=os.fstat(int(sys.argv[1])); inherited=(s.st_dev,s.st_ino)==(int(sys.argv[2]),int(sys.argv[3]))
+except OSError:
+ inherited=False
+sys.exit(23 if inherited else 0)",
+            ])
+            .arg(fd.to_string())
+            .arg(metadata.dev().to_string())
+            .arg(metadata.ino().to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        native_descriptors_cloexec(&mut command);
+        crate::proof_processes::configure(&mut command);
+        let mut child = command.spawn().unwrap();
+        crate::proof_processes::record(&child);
+        child.stdin.take().unwrap().write_all(b"x").unwrap();
+        let status = child.wait().unwrap();
+        assert!(
+            status.success(),
+            "native exec inherited the deliberately unowned socket: {status}"
+        );
     }
 }

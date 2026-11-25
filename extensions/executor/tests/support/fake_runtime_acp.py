@@ -1,6 +1,4 @@
 """Test-only ACP peer: deterministic wire responses, without a provider or tools."""
-import fcntl
-import shutil
 import json
 import os
 import resource
@@ -25,43 +23,12 @@ for descriptor in range(limit):
     if stat.S_ISSOCK(metadata.st_mode):
         identity = {"dev": metadata.st_dev, "ino": metadata.st_ino,
                     "kind": stat.S_IFMT(metadata.st_mode), "fd": descriptor}
-        if os.environ.get("XMSG_EXECUTOR_FD_DIAGNOSTICS"):
-            identity["mode"] = metadata.st_mode
-            try:
-                identity["flags"] = fcntl.fcntl(descriptor, fcntl.F_GETFD)
-            except OSError as error:
-                identity["flags_error"] = {"errno": error.errno, "message": str(error)}
-            peer = None
-            try:
-                peer = socket.socket(fileno=descriptor)
-                for key, getter in [
-                    ("socket_type", lambda: peer.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)),
-                    ("family", lambda: peer.family),
-                    ("sockname", lambda: repr(peer.getsockname())),
-                    ("peername", lambda: repr(peer.getpeername())),
-                ]:
-                    try:
-                        identity[key] = getter()
-                    except OSError as error:
-                        identity[key + "_error"] = {"errno": error.errno, "message": str(error)}
-            except OSError as error:
-                identity["socket_wrap_error"] = {"errno": error.errno, "message": str(error)}
-            finally:
-                if peer is not None:
-                    peer.detach()
         inherited.append(identity)
         if all(identity[key] == expected[key] for key in ("dev", "ino", "kind")):
             matching.append(identity)
 with open(base + ".fd-proof", "w", encoding="utf-8") as output:
     json.dump({"matching_startup_sockets": matching, "inherited_sockets": inherited,
                "scanned": limit, "expected": expected}, output)
-if os.environ.get("XMSG_EXECUTOR_FD_DIAGNOSTICS"):
-    destination = os.environ["XMSG_EXECUTOR_FD_DIAGNOSTICS"]
-    os.makedirs(destination, exist_ok=True)
-    for suffix in [".fd-expected", ".fd-proof"]:
-        shutil.copyfile(base + suffix, os.path.join(destination, str(os.getpid()) + suffix))
-    with open(os.path.join(destination, str(os.getpid()) + ".child.json"), "w") as output:
-        json.dump({"pid": os.getpid(), "pgid": os.getpgid(0), "session": os.getsid(0), "fds": inherited}, output)
 session = "fake-native-session"
 model = "fake-model"
 mode = "default"
