@@ -744,5 +744,42 @@ mod tag_tests {
             ..c1.clone()
         };
         assert_ne!(c1.reg(), c2.reg());
+
+        // Pi: each registration mints a distinct reg key
+        let p1 = crate::pi::PiSessionInfo {
+            session_id: "pi-1".into(),
+            name: None,
+            pid: 100,
+            starttime: "st1".into(),
+            cwd: "/".into(),
+            registered_at: 10,
+            reg: format!("mint:{}", crate::claim::mint_uuid_v4()),
+        };
+        let p2 = crate::pi::PiSessionInfo {
+            reg: format!("mint:{}", crate::claim::mint_uuid_v4()),
+            ..p1.clone()
+        };
+        assert_ne!(p1.reg, p2.reg);
+        assert!(!p1.reg.is_empty());
+
+        // Plugin: each registration row in plugin_sessions mints a distinct reg key
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::init_db(&db).unwrap();
+        let reg1 = format!("mint:{}", crate::claim::mint_uuid_v4());
+        let reg2 = format!("mint:{}", crate::claim::mint_uuid_v4());
+        db.execute(
+            "INSERT INTO plugin_sessions (address, conn, harness, session, registered_at, pid, reg) VALUES ('plg-1', 'c1', 'opencode', 's1', 10, 100, ?1)",
+            [&reg1],
+        )
+        .unwrap();
+        let got1 = crate::plugin::session_reg(&db, "plg-1").unwrap().unwrap();
+        db.execute(
+            "INSERT OR REPLACE INTO plugin_sessions (address, conn, harness, session, registered_at, pid, reg) VALUES ('plg-1', 'c2', 'opencode', 's1', 11, 100, ?1)",
+            [&reg2],
+        )
+        .unwrap();
+        let got2 = crate::plugin::session_reg(&db, "plg-1").unwrap().unwrap();
+        assert_ne!(got1, got2);
+        assert!(!got1.is_empty());
     }
 }

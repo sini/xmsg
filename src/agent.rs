@@ -1740,6 +1740,70 @@ fn handle_agent_tag(
     )
 }
 
+fn lookup_current_reg(
+    state: &AppState,
+    db: &rusqlite::Connection,
+    caller: &Session,
+    codex_owner: Option<(i64, &str)>,
+) -> Result<Option<String>, AppError> {
+    match caller.harness.as_str() {
+        "claude" => {
+            let mut stmt = db
+                .prepare(
+                    "SELECT id, pid, proc_start, suffix, released, created_at FROM instance_claims WHERE released = 0",
+                )
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            let claims = stmt
+                .query_map([], |row| {
+                    Ok(crate::claim::InstanceClaim {
+                        id: row.get(0)?,
+                        pid: row.get(1)?,
+                        proc_start: row.get(2)?,
+                        suffix: row.get(3)?,
+                        released: row.get::<_, i64>(4)? != 0,
+                        created_at: row.get(5)?,
+                    })
+                })
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            for claim in claims {
+                let claim = claim.map_err(|e| AppError::Internal(e.to_string()))?;
+                if claim.address() == caller.session_id && claim.pid == caller.pid {
+                    return Ok(Some(claim.reg()));
+                }
+            }
+            Ok(None)
+        }
+        "codex" => {
+            let Some((owner_pid, owner_starttime)) = codex_owner else {
+                return Ok(None);
+            };
+            let gen: Option<i64> = db
+                .query_row(
+                    "SELECT generation FROM codex_roots WHERE root_id = ?1 AND owner_pid = ?2 AND owner_starttime = ?3 AND active = 1 AND revoked = 0",
+                    rusqlite::params![&caller.session_id, owner_pid, owner_starttime],
+                    |row| row.get(0),
+                )
+                .ok();
+            Ok(gen.map(|g| format!("codex:{g}")))
+        }
+        "agy" => {
+            let store = state.agy_store.read().unwrap();
+            Ok(store
+                .get(&caller.session_id)
+                .filter(|info| !info.reg.is_empty() && info.pid == caller.pid)
+                .map(|info| info.reg.clone()))
+        }
+        "pi" => {
+            let store = state.pi_store.read().unwrap();
+            Ok(store
+                .get(&caller.session_id)
+                .filter(|info| !info.reg.is_empty() && info.pid == caller.pid)
+                .map(|info| info.reg.clone()))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_agent_tag_with_before_lock(
     state: &AppState,
@@ -1782,95 +1846,82 @@ fn handle_agent_tag_with_before_lock(
             ));
         }
     };
-    let codex_owner = match &caller_trace {
+    let denied = || AppError::Denied("tag requires the attested session owner".to_string());
+    let (caller, codex_owner, traced_reg) = match caller_trace {
+        Ok(CallerTrace::Session(session))
+            if codex_session.is_none() && codex_thread.is_none() && codex_turn.is_none() =>
+        {
+            if session.harness == "svc" {
+                return Err(denied());
+            }
+            if session.session_id.contains('/') {
+                return Err(AppError::Denied(
+                    "tag requires a whole session, not a subagent".to_string(),
+                ));
+            }
+            let reg = {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|e| AppError::Internal(format!("db lock poisoned: {e}")))?;
+                lookup_current_reg(state, &db, &session, None)?
+            }
+            .ok_or_else(|| {
+                AppError::Denied("tag requires a registered live session".to_string())
+            })?;
+            (session, None, reg)
+        }
         Ok(CallerTrace::CodexOwner {
             owner_pid,
             owner_starttime,
-        }) => Some((*owner_pid as i64, owner_starttime.clone())),
-        _ => None,
+        }) => {
+            let (session, reg) = resolve_codex_mcp_caller_with_reg(
+                state,
+                owner_pid,
+                &owner_starttime,
+                codex_session,
+                codex_thread,
+                codex_turn,
+                false,
+            )
+            .map_err(|_| denied())?;
+            if session.session_id.contains('/') {
+                return Err(AppError::Denied(
+                    "tag requires a whole session, not a subagent".to_string(),
+                ));
+            }
+            (session, Some((owner_pid as i64, owner_starttime)), reg)
+        }
+        _ => return Err(denied()),
     };
-    let caller = context_owner(
-        state,
-        caller_trace,
-        None,
-        codex_session,
-        codex_thread,
-        codex_turn,
-    )
-    .map_err(|_| AppError::Denied("tag requires the attested session owner".to_string()))?;
-    if caller.session_id.contains('/') {
-        return Err(AppError::Denied(
-            "tag requires a whole session, not a subagent".to_string(),
-        ));
-    }
     before_lock();
     let db = state
         .db
         .lock()
         .map_err(|e| AppError::Internal(format!("db lock poisoned: {e}")))?;
-    let current_reg = || -> Result<Option<String>, AppError> {
-        match caller.harness.as_str() {
-            "claude" => {
-                let mut stmt = db
-                    .prepare(
-                        "SELECT id, pid, proc_start, suffix, released, created_at FROM instance_claims WHERE released = 0",
-                    )
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
-                let claims = stmt
-                    .query_map([], |row| {
-                        Ok(crate::claim::InstanceClaim {
-                            id: row.get(0)?,
-                            pid: row.get(1)?,
-                            proc_start: row.get(2)?,
-                            suffix: row.get(3)?,
-                            released: row.get::<_, i64>(4)? != 0,
-                            created_at: row.get(5)?,
-                        })
-                    })
-                    .map_err(|e| AppError::Internal(e.to_string()))?;
-                for claim in claims {
-                    let claim = claim.map_err(|e| AppError::Internal(e.to_string()))?;
-                    if claim.address() == caller.session_id && claim.pid == caller.pid {
-                        return Ok(Some(claim.reg()));
-                    }
-                }
-                Ok(None)
-            }
-            "codex" => {
-                let Some((owner_pid, ref owner_starttime)) = codex_owner else {
-                    return Ok(None);
-                };
-                let gen: Option<i64> = db
-                    .query_row(
-                        "SELECT generation FROM codex_roots WHERE root_id = ?1 AND owner_pid = ?2 AND owner_starttime = ?3 AND active = 1 AND revoked = 0",
-                        rusqlite::params![&caller.session_id, owner_pid, owner_starttime],
-                        |row| row.get(0),
-                    )
-                    .ok();
-                Ok(gen.map(|g| format!("codex:{g}")))
-            }
-            "agy" => {
-                let store = state.agy_store.read().unwrap();
-                Ok(store
-                    .get(&caller.session_id)
-                    .filter(|info| !info.reg.is_empty() && info.pid == caller.pid)
-                    .map(|info| info.reg.clone()))
-            }
-            _ => Ok(None),
-        }
-    };
-    let Some(reg) = current_reg()? else {
+    let codex_owner_ref = codex_owner.as_ref().map(|(pid, st)| (*pid, st.as_str()));
+    let Some(current) = lookup_current_reg(state, &db, &caller, codex_owner_ref)? else {
         return Err(AppError::Denied(
             "tag requires a registered live session".to_string(),
         ));
     };
-    let is_current = || Ok(current_reg()?.as_deref() == Some(reg.as_str()));
+    if current != traced_reg {
+        return Err(AppError::Denied(
+            "tag requires the attested session registration".to_string(),
+        ));
+    }
+    let is_current = || {
+        Ok(
+            lookup_current_reg(state, &db, &caller, codex_owner_ref)?.as_deref()
+                == Some(traced_reg.as_str()),
+        )
+    };
     let tags = match op {
         TagOp::Add(tag) => crate::session_context::add_tag_with_check(
             &db,
             &caller.session_id,
             &caller.harness,
-            &reg,
+            &traced_reg,
             &tag,
             crate::storage::now_epoch_secs(),
             is_current,
@@ -1879,7 +1930,7 @@ fn handle_agent_tag_with_before_lock(
             &db,
             &caller.session_id,
             &caller.harness,
-            &reg,
+            &traced_reg,
             &tag,
             is_current,
         )?,
@@ -2690,6 +2741,27 @@ pub fn resolve_codex_mcp_caller(
     codex_turn: Option<&str>,
     require_subagent: bool,
 ) -> Result<Session, AppError> {
+    resolve_codex_mcp_caller_with_reg(
+        state,
+        owner_pid,
+        owner_starttime,
+        codex_session,
+        codex_thread,
+        codex_turn,
+        require_subagent,
+    )
+    .map(|(session, _)| session)
+}
+
+fn resolve_codex_mcp_caller_with_reg(
+    state: &AppState,
+    owner_pid: u32,
+    owner_starttime: &str,
+    codex_session: Option<&str>,
+    codex_thread: Option<&str>,
+    codex_turn: Option<&str>,
+    require_subagent: bool,
+) -> Result<(Session, String), AppError> {
     let session_id = codex_session
         .map(str::trim)
         .filter(|s| !s.is_empty() && crate::claim::is_uuid_shaped(s))
@@ -2747,7 +2819,10 @@ pub fn resolve_codex_mcp_caller(
                 "'{session_id}' is a parent session and receives messages on its channel; 'inbox' is only for subagents"
             )));
         }
-        return Ok(crate::codex::codex_root_to_session(&root_snap));
+        return Ok((
+            crate::codex::codex_root_to_session(&root_snap),
+            format!("codex:{}", root_snap.generation),
+        ));
     }
 
     let (root_snap, _child_state, binding) =
@@ -2789,20 +2864,23 @@ pub fn resolve_codex_mcp_caller(
         }
     }
 
-    Ok(Session {
-        session_id: format!("{session_id}/{thread_id}"),
-        name: binding.display_label().map(str::to_string),
-        pid: root_snap.owner_pid,
-        cwd: root_snap.cwd.unwrap_or_else(|| "/".to_string()),
-        status: "idle".to_string(),
-        kind: "subagent".to_string(),
-        entrypoint: None,
-        version: None,
-        started_at: binding.bound_at as u64,
-        updated_at: binding.bound_at as u64,
-        harness: "codex".to_string(),
-        registered: Some(true),
-    })
+    Ok((
+        Session {
+            session_id: format!("{session_id}/{thread_id}"),
+            name: binding.display_label().map(str::to_string),
+            pid: root_snap.owner_pid,
+            cwd: root_snap.cwd.unwrap_or_else(|| "/".to_string()),
+            status: "idle".to_string(),
+            kind: "subagent".to_string(),
+            entrypoint: None,
+            version: None,
+            started_at: binding.bound_at as u64,
+            updated_at: binding.bound_at as u64,
+            harness: "codex".to_string(),
+            registered: Some(true),
+        },
+        format!("codex:{}", root_snap.generation),
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -3961,7 +4039,7 @@ mod tests {
         };
         let res = handle_agent_tag_with_before_lock(
             &state,
-            Ok(CallerTrace::Session(caller)),
+            Ok(CallerTrace::Session(caller.clone())),
             Some("review".into()),
             None,
             None,
@@ -3971,8 +4049,11 @@ mod tests {
             None,
             || {
                 let db = state.db.lock().unwrap();
-                db.execute("UPDATE instance_claims SET released = 1 WHERE id = ?1", [claude_id])
-                    .unwrap();
+                db.execute(
+                    "UPDATE instance_claims SET released = 1 WHERE id = ?1",
+                    [claude_id],
+                )
+                .unwrap();
                 db.execute(
                     "INSERT INTO instance_claims (id, pid, proc_start, suffix, released, created_at) VALUES (?1, 2002, 'st2', 1, 0, 20)",
                     [claude_id],
@@ -3980,7 +4061,10 @@ mod tests {
                 .unwrap();
             },
         );
-        assert!(matches!(res, Err(AppError::Denied(_))), "expected Denied on Claude re-claim, got {res:?}");
+        assert!(
+            matches!(res, Err(AppError::Denied(_))),
+            "expected Denied on Claude re-claim, got {res:?}"
+        );
         assert_eq!(count_session_tags(&state), 0);
 
         // 2. Agy takeover between trace and db lock
@@ -4018,7 +4102,7 @@ mod tests {
         };
         let res = handle_agent_tag_with_before_lock(
             &state,
-            Ok(CallerTrace::Session(agy_caller)),
+            Ok(CallerTrace::Session(agy_caller.clone())),
             Some("review".into()),
             None,
             None,
@@ -4035,7 +4119,216 @@ mod tests {
                 }
             },
         );
-        assert!(matches!(res, Err(AppError::Denied(_))), "expected Denied on agy takeover, got {res:?}");
+        assert!(
+            matches!(res, Err(AppError::Denied(_))),
+            "expected Denied on agy takeover, got {res:?}"
+        );
+        assert_eq!(count_session_tags(&state), 0);
+
+        // 3. Claude same-pid re-claim (created_at 10 -> 20) between trace and db lock
+        let state = test_app_state();
+        {
+            let db = state.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO instance_claims (id, pid, proc_start, suffix, released, created_at) VALUES (?1, 1001, 'st1', 1, 0, 10)",
+                [claude_id],
+            )
+            .unwrap();
+        }
+        let res = handle_agent_tag_with_before_lock(
+            &state,
+            Ok(CallerTrace::Session(caller)),
+            Some("review".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            || {
+                let db = state.db.lock().unwrap();
+                db.execute(
+                    "INSERT OR REPLACE INTO instance_claims (id, pid, proc_start, suffix, released, created_at) VALUES (?1, 1001, 'st1', 1, 0, 20)",
+                    [claude_id],
+                )
+                .unwrap();
+            },
+        );
+        assert!(
+            matches!(res, Err(AppError::Denied(_))),
+            "expected Denied on same-pid Claude re-claim, got {res:?}"
+        );
+        assert_eq!(count_session_tags(&state), 0);
+
+        // 4. Agy same-pid re-mint (agy:mint1 -> agy:mint2) between trace and db lock
+        let state = test_app_state();
+        {
+            let mut store = state.agy_store.write().unwrap();
+            store.insert(
+                agy_id.to_string(),
+                crate::agy::AgySessionInfo {
+                    session_key: agy_id.to_string(),
+                    conversation_id: agy_id.to_string(),
+                    pid: 3001,
+                    starttime: "3001".into(),
+                    label: Some("a1".into()),
+                    credentials: None,
+                    registered_at: 10,
+                    reg: "agy:mint1".into(),
+                },
+            );
+        }
+        let res = handle_agent_tag_with_before_lock(
+            &state,
+            Ok(CallerTrace::Session(agy_caller)),
+            Some("review".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            || {
+                let mut store = state.agy_store.write().unwrap();
+                if let Some(info) = store.get_mut(agy_id) {
+                    info.reg = "agy:mint2".into();
+                }
+            },
+        );
+        assert!(
+            matches!(res, Err(AppError::Denied(_))),
+            "expected Denied on same-pid agy re-mint, got {res:?}"
+        );
+        assert_eq!(count_session_tags(&state), 0);
+
+        // 5. Codex same-owner generation bump (generation 1 -> 2) and different-owner takeover
+        let codex_id = "33333333-3333-4333-8333-333333333333";
+        let my_pid = std::process::id();
+        let my_st = crate::process::starttime(std::path::Path::new("/proc"), my_pid)
+            .expect("starttime for self");
+        let setup_codex_state = || {
+            let mut state = test_app_state();
+            state.agy_config.proc_root = std::path::PathBuf::from("/proc");
+            let tmp = tempfile::tempdir().unwrap();
+            let rollout_dir = tmp.path().join("sessions/2026/11/24");
+            std::fs::create_dir_all(&rollout_dir).unwrap();
+            let rollout_path =
+                rollout_dir.join(format!("rollout-2026-11-24T00-00-00-{codex_id}.jsonl"));
+            std::fs::write(
+                &rollout_path,
+                format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{codex_id}\",\"session_id\":\"{codex_id}\",\"cwd\":\"/\"}}}}\n"),
+            )
+            .unwrap();
+            let locks_dir = tmp.path().join("thread-writer-locks");
+            std::fs::create_dir_all(&locks_dir).unwrap();
+            let lock_path = locks_dir.join(format!("{codex_id}.lock"));
+            let lock_file = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .unwrap();
+            {
+                use std::os::unix::io::AsRawFd;
+                let rc =
+                    unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                assert_eq!(rc, 0, "flock lock_path failed");
+            }
+            {
+                let rt_arc = crate::codex::for_state(&state);
+                let mut rt = rt_arc.lock().unwrap();
+                rt.config.codex_homes = vec![tmp.path().to_path_buf()];
+                rt.config.proc_root = std::path::PathBuf::from("/proc");
+                let cfg = rt.config.clone();
+                let snap = rt
+                    .store
+                    .register_fresh_root(
+                        &cfg,
+                        crate::codex::FreshRootRegistration {
+                            owner_pid: my_pid,
+                            owner_starttime: &my_st,
+                            root_id: codex_id,
+                            cwd_hint: Some("/"),
+                            label_override: Some("cx"),
+                            allow_candidate: true,
+                        },
+                    )
+                    .unwrap()
+                    .expect("codex root");
+                let db = state.db.lock().unwrap();
+                crate::storage::upsert_codex_root(&db, &snap).unwrap();
+            }
+            (state, tmp, lock_file)
+        };
+        let (state, _tmp, _lock1) = setup_codex_state();
+        let mut called_gen = false;
+        let res = handle_agent_tag_with_before_lock(
+            &state,
+            Ok(CallerTrace::CodexOwner {
+                owner_pid: my_pid,
+                owner_starttime: my_st.clone(),
+            }),
+            Some("review".into()),
+            None,
+            None,
+            None,
+            Some(codex_id),
+            Some(codex_id),
+            None,
+            || {
+                called_gen = true;
+                let db = state.db.lock().unwrap();
+                db.execute(
+                    "UPDATE codex_roots SET generation = generation + 1 WHERE root_id = ?1",
+                    [codex_id],
+                )
+                .unwrap();
+            },
+        );
+        assert!(
+            called_gen,
+            "Codex generation bump arm must reach before_lock"
+        );
+        assert!(
+            matches!(res, Err(AppError::Denied(_))),
+            "expected Denied on same-owner Codex generation bump, got {res:?}"
+        );
+        assert_eq!(count_session_tags(&state), 0);
+
+        let (state, _tmp2, _lock2) = setup_codex_state();
+        let mut called_owner = false;
+        let res = handle_agent_tag_with_before_lock(
+            &state,
+            Ok(CallerTrace::CodexOwner {
+                owner_pid: my_pid,
+                owner_starttime: my_st.clone(),
+            }),
+            Some("review".into()),
+            None,
+            None,
+            None,
+            Some(codex_id),
+            Some(codex_id),
+            None,
+            || {
+                called_owner = true;
+                let db = state.db.lock().unwrap();
+                db.execute(
+                    "UPDATE codex_roots SET owner_pid = 9999999, owner_starttime = '9999999' WHERE root_id = ?1",
+                    [codex_id],
+                )
+                .unwrap();
+            },
+        );
+        assert!(
+            called_owner,
+            "Codex owner takeover arm must reach before_lock"
+        );
+        assert!(
+            matches!(res, Err(AppError::Denied(_))),
+            "expected Denied on Codex different-owner takeover, got {res:?}"
+        );
         assert_eq!(count_session_tags(&state), 0);
     }
 }

@@ -538,8 +538,9 @@ fn o1_o4_o8_mesh_federation_and_consumer_inputs() {
                 .unwrap();
             assert_eq!(resp.status(), 200);
             let bytes = resp.bytes().await.unwrap();
-            let v2_entries: Vec<LegacyFedListEntry> = serde_json::from_slice(&bytes)
-                .expect("O4a /fed/v2/sessions?v=2 must decode under strict LegacyFedListEntry without tags");
+            let v2_entries: Vec<LegacyFedListEntry> = serde_json::from_slice(&bytes).expect(
+                "O4a /fed/v2/sessions?v=2 must decode under strict LegacyFedListEntry without tags",
+            );
             assert!(
                 v2_entries.iter().any(|e| e.id == id_o),
                 "O4a expected O in v2 entries: {v2_entries:?}"
@@ -636,7 +637,10 @@ fn o1_o4_o8_mesh_federation_and_consumer_inputs() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(rows, 0, "O1i/M1-end: session_tag row must be deleted on end()");
+        assert_eq!(
+            rows, 0,
+            "O1i/M1-end: session_tag row must be deleted on end()"
+        );
     }
 
     // O1b: hub asker, leaf holder
@@ -663,31 +667,87 @@ fn o1_o4_o8_mesh_federation_and_consumer_inputs() {
     assert_eq!(fb_v["total"], 1, "O5b HTTP fallback list(tag): {fb_v}");
     assert_eq!(fb_v["recipients"][0]["address"], format!("{id_l_holder}@L"));
 
-    // O1g: allow exclusion — peer B with allow=["send"] (no "list") does not expose its tagged holder to H's list(tag)
+    // O1g: targets + allow exclusion — configure H2 with peers B (targets excludes holder) and B2 (allow=["send"], no "list").
     {
+        let dir_h2 = NodeDir::new("p1o1gh2");
         let dir_b = NodeDir::new("p1o1gb");
+        let dir_b2 = NodeDir::new("p1o1gb2");
+        let port_h2 = free_port();
         let port_b = free_port();
+        let port_b2 = free_port();
+        let pem_h2 = ca.issue("H2", "alice", &dir_h2);
         let pem_b = ca.issue("B", "carol", &dir_b);
+        let pem_b2 = ca.issue("B2", "dave", &dir_b2);
+        let pin_h2 = spki_pin(&pem_h2);
         let pin_b = spki_pin(&pem_b);
+        let pin_b2 = spki_pin(&pem_b2);
         fs::write(
-            &dir_b.peers,
-            json!({ "H": { "name": "H", "pin": pin_h, "address": format!("127.0.0.1:{port_h}"), "allow": ["send"] } }).to_string(),
+            &dir_h2.peers,
+            json!({
+                "B": { "name": "B", "pin": pin_b, "address": format!("127.0.0.1:{port_b}"), "allow": ["list", "send"] },
+                "B2": { "name": "B2", "pin": pin_b2, "address": format!("127.0.0.1:{port_b2}"), "allow": ["list", "send"] }
+            })
+            .to_string(),
         )
         .unwrap();
+        // On B, H2 is allowed to list only a different target id (kills M1-targets at fed.rs:4758)
+        fs::write(
+            &dir_b.peers,
+            json!({ "H2": { "name": "H2", "pin": pin_h2, "address": format!("127.0.0.1:{port_h2}"), "allow": ["list", "send"], "targets": ["97777777-7777-4777-8777-777777777779"] } }).to_string(),
+        )
+        .unwrap();
+        // On B2, H2 has allow=["send"] (no "list") -> denied -> unanswered
+        fs::write(
+            &dir_b2.peers,
+            json!({ "H2": { "name": "H2", "pin": pin_h2, "address": format!("127.0.0.1:{port_h2}"), "allow": ["send"] } }).to_string(),
+        )
+        .unwrap();
+        let _d_h2 = Daemon::start(dir_h2, BIN, "H2", Some(port_h2), vec![]);
         let _d_b = Daemon::start(dir_b, BIN, "B", Some(port_b), vec![]);
+        let _d_b2 = Daemon::start(dir_b2, BIN, "B2", Some(port_b2), vec![]);
+        let _guard_h2 = spawn_tagged_claude(
+            &_d_h2.dir,
+            "97777777-7777-4777-8777-777777777771",
+            &["h2.only.tag"],
+            None,
+        );
         let _guard_b = spawn_tagged_claude(
             &_d_b.dir,
             "97777777-7777-4777-8777-777777777777",
             &["excluded.tag"],
             None,
         );
-        // Add B to H's peers? H doesn't hot-reload peers, so verify B's own list(tag: "leaf.tag") excludes L@H when B has no list allow,
-        // AND verify B's tagged holder is not visible on H.
-        let (_, b_list) = http_get(&_d_b.dir.http_sock, "/v1/recipients?tag=leaf.tag");
-        assert_eq!(b_list["total"], 0, "O1g: peer without list allow must not see H/L holders: {b_list}");
-        let (_, h_list) = http_get(&d_h.dir.http_sock, "/v1/recipients?tag=excluded.tag");
-        assert_eq!(h_list["total"], 0, "O1g: H must not see unallowed peer B holder: {h_list}");
-        let _ = pin_b;
+        let _guard_b2 = spawn_tagged_claude(
+            &_d_b2.dir,
+            "97777777-7777-4777-8777-777777777778",
+            &["excluded2.tag"],
+            None,
+        );
+        let (_, h2_list) = http_get(&_d_h2.dir.http_sock, "/v1/recipients?tag=excluded.tag");
+        assert_eq!(
+            h2_list["total"], 0,
+            "O1g: H2 must not see B holder excluded by targets: {h2_list}"
+        );
+        assert_eq!(
+            h2_list["coverage"]["complete"], false,
+            "O1g: B2 without list allow makes coverage incomplete: {h2_list}"
+        );
+        assert_eq!(
+            h2_list["coverage"]["unanswered"],
+            json!(["B2"]),
+            "O1g: B2 without list allow must appear in unanswered (and B must not): {h2_list}"
+        );
+        let (_, h2_list2) = http_get(&_d_h2.dir.http_sock, "/v1/recipients?tag=excluded2.tag");
+        assert_eq!(
+            h2_list2["total"], 0,
+            "O1g: H2 must not see B2 holder without list allow: {h2_list2}"
+        );
+        // Positive control on B's own allow=["list"] towards H2
+        let (_, b_list) = http_get(&_d_b.dir.http_sock, "/v1/recipients?tag=h2.only.tag");
+        assert_eq!(
+            b_list["total"], 1,
+            "O1g: B with allow=[list] sees H2 holder: {b_list}"
+        );
     }
 }
 
@@ -720,7 +780,9 @@ fn o6_limits_and_o7_refusals() {
     assert_eq!(body["coverage"]["complete"], true);
 
     // O6: invalid tag names (including uppercase after first byte)
-    for bad in ["Orch", "aB", "orchA", "a b", "a@b", "a/b", "a:b", ".a", "", "é"] {
+    for bad in [
+        "Orch", "aB", "orchA", "a b", "a@b", "a/b", "a:b", ".a", "", "é",
+    ] {
         assert!(
             xmsg::session_context::validate_tag(bad).is_err(),
             "O6: '{bad}' should be rejected"
@@ -738,6 +800,9 @@ fn o6_limits_and_o7_refusals() {
 
 #[test]
 fn o2_self_only_and_codes() {
+    if p1pz_child_mode_if_requested() {
+        return;
+    }
     let dir = NodeDir::new("p1o2");
     let d = Daemon::start(dir, BIN, "N", None, vec![]);
 
@@ -868,9 +933,47 @@ fn o2_self_only_and_codes() {
     assert_eq!(lines[1]["tags"], json!(["keep.tag", "my.tag"]));
     assert_eq!(lines[2]["tags"], json!(["keep.tag"]));
 
-    // O2e: unregistered agy / untraced agent.sock caller -> denied
-    let unreg_r = call_agent(&d.dir.agent_sock, &json!({ "action": "tag", "add": "t" }));
-    assert_eq!(unreg_r["error"], "denied", "O2e expected denied: {unreg_r}");
+    // O2e: unregistered agy session (real agy fixture without register agy) -> denied
+    {
+        let self_exe = std::env::current_exe().unwrap();
+        let dir_unreg = NodeDir::new("p1o2eagy");
+        let agy_unreg_bin = dir_unreg.run.join("agy-unreg-fixture");
+        copy_exe_fixture(&self_exe, &agy_unreg_bin);
+        let d_unreg = Daemon::start(
+            dir_unreg,
+            BIN,
+            "AGYU",
+            None,
+            vec!["--agy-exe".into(), agy_unreg_bin.display().to_string()],
+        );
+        let unreg_id = "98888888-8888-4888-8888-888888888888";
+        let lock_dir = d_unreg.dir.run.join("agy-presence");
+        fs::create_dir_all(&lock_dir).unwrap();
+        let out = d_unreg
+            .dir
+            .cmd(agy_unreg_bin.to_str().unwrap())
+            .args(["--exact", "o2_self_only_and_codes", "--nocapture"])
+            .env("XMSG_P1PZ_CHILD_MODE", "agy-unreg")
+            .env(
+                "XMSG_P1PZ_LOCK_PATH",
+                lock_dir.join(format!("{unreg_id}.lock")),
+            )
+            .env("ANTIGRAVITY_CONVERSATION_ID", unreg_id)
+            .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33397")
+            .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-unreg")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "O2e unregistered agy tag must fail");
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            combined.contains("denied") || combined.contains("requires"),
+            "O2e expected denied from unregistered agy fixture: {combined}"
+        );
+    }
 
     // O2b svc arm: registered svc calling agent.sock tag -> denied
     let self_exe = std::env::current_exe().unwrap();
@@ -895,8 +998,14 @@ fn o2_self_only_and_codes() {
         })
         .await
         .unwrap();
-        let svc_r = call_agent(&_d_svc.dir.agent_sock, &json!({ "action": "tag", "add": "t" }));
-        assert_eq!(svc_r["error"], "denied", "O2b svc arm expected denied: {svc_r}");
+        let svc_r = call_agent(
+            &_d_svc.dir.agent_sock,
+            &json!({ "action": "tag", "add": "t" }),
+        );
+        assert_eq!(
+            svc_r["error"], "denied",
+            "O2b svc arm expected denied: {svc_r}"
+        );
     });
 }
 
@@ -1096,7 +1205,12 @@ fn p1pz_child_mode_if_requested() -> bool {
             .open(&lock_path)
             .unwrap();
         let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(rc, 0, "child flock failed on {lock_path}: {}", std::io::Error::last_os_error());
+        assert_eq!(
+            rc,
+            0,
+            "child flock failed on {lock_path}: {}",
+            std::io::Error::last_os_error()
+        );
         f
     };
     match mode.as_str() {
@@ -1112,7 +1226,15 @@ fn p1pz_child_mode_if_requested() -> bool {
                 "source": source,
             });
             let mut reg = std::process::Command::new(BIN)
-                .args(["register", "codex", "--hook", "--event", "SessionStart", "--sock", &sock])
+                .args([
+                    "register",
+                    "codex",
+                    "--hook",
+                    "--event",
+                    "SessionStart",
+                    "--sock",
+                    &sock,
+                ])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1136,7 +1258,15 @@ fn p1pz_child_mode_if_requested() -> bool {
                     let db = std::env::var("XMSG_DB_PATH").unwrap();
                     let http = std::env::var("XMSG_HTTP_SOCK").unwrap();
                     let mut mcp = std::process::Command::new(BIN)
-                        .args(["mcp", "--db-path", &db, "--agent-sock", &sock, "--http-sock", &http])
+                        .args([
+                            "mcp",
+                            "--db-path",
+                            &db,
+                            "--agent-sock",
+                            &sock,
+                            "--http-sock",
+                            &http,
+                        ])
                         .stdin(Stdio::piped())
                         .stdout(Stdio::piped())
                         .stderr(Stdio::null())
@@ -1159,6 +1289,17 @@ fn p1pz_child_mode_if_requested() -> bool {
                     println!("TAGGED:{mstdout}");
                 }
             }
+        }
+        "agy-unreg" => {
+            let tag_out = std::process::Command::new(BIN)
+                .args(["tag", "add", "t", "--json"])
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&tag_out.stdout);
+            let stderr = String::from_utf8_lossy(&tag_out.stderr);
+            eprint!("{stderr}");
+            print!("{stdout}");
+            std::process::exit(if tag_out.status.success() { 0 } else { 1 });
         }
         "agy" => {
             let reg_sock = std::env::var("XMSG_REGISTER_SOCK").unwrap();
@@ -1223,9 +1364,27 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
         ],
     );
 
-    // 1. O3a + O3b: Claude healthy daemon restart keeps tags; re-claim drops them.
+    // 1. O3a + O3b: Claude healthy daemon restart keeps tags; re-adding held tag succeeds (X18); re-claim drops them.
     let id_cl = "91111111-1111-4111-8111-111111111111";
-    let guard_cl = spawn_tagged_claude(&d.dir, id_cl, &["claude.keep"], None);
+    let mut sh_cl = d.dir.cmd("sh");
+    sh_cl
+        .args([
+            "-c",
+            &format!(
+                "set -e; read _; {BIN} list --json >/dev/null; {BIN} tag add claude.keep --json >/dev/null; echo READY; read _; {BIN} tag add claude.keep --json; echo READD_DONE; read _"
+            ),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child_cl = sh_cl.spawn().unwrap();
+    write_claude_session_file(&d.dir, child_cl.id(), id_cl);
+    let mut cl_in = child_cl.stdin.take().unwrap();
+    let mut cl_out = BufReader::new(child_cl.stdout.take().unwrap());
+    writeln!(cl_in, "go").unwrap();
+    let mut ready_cl = String::new();
+    cl_out.read_line(&mut ready_cl).unwrap();
+    assert_eq!(ready_cl.trim(), "READY");
 
     // Healthy restart while Claude process is still alive
     d.stop();
@@ -1235,12 +1394,29 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
         cl_after_restart["total"], 1,
         "O3a: healthy restart must keep Claude tags: {cl_after_restart}"
     );
+    // O3a (X18): re-adding an already-held tag succeeds idempotently with one row
+    writeln!(cl_in, "readd").unwrap();
+    let mut readd_json_line = String::new();
+    cl_out.read_line(&mut readd_json_line).unwrap();
+    let readd_v: Value = serde_json::from_str(&readd_json_line).expect("O3a readd json");
+    assert_eq!(
+        readd_v["tags"],
+        json!(["claude.keep"]),
+        "O3a re-add held tag: {readd_v}"
+    );
+    let mut readd_done = String::new();
+    cl_out.read_line(&mut readd_done).unwrap();
+    assert_eq!(readd_done.trim(), "READD_DONE");
 
     // O3b: New Claude process re-claims the same id -> old tag dropped
-    drop(guard_cl);
+    writeln!(cl_in, "bye").unwrap();
+    let _ = child_cl.wait();
     let mut sh_reclaim = d.dir.cmd("sh");
     sh_reclaim
-        .args(["-c", &format!("read _; {BIN} list --json >/dev/null; echo READY; read _")])
+        .args([
+            "-c",
+            &format!("read _; {BIN} list --json >/dev/null; echo READY; read _"),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1285,8 +1461,13 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
         });
         let mut reg = d_unatt.dir.cmd(BIN);
         reg.args([
-            "register", "codex", "--hook", "--event", "SessionStart",
-            "--sock", &d_unatt.dir.agent_sock.display().to_string(),
+            "register",
+            "codex",
+            "--hook",
+            "--event",
+            "SessionStart",
+            "--sock",
+            &d_unatt.dir.agent_sock.display().to_string(),
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1303,15 +1484,19 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
 
     let spawn_codex_owner = |d: &Daemon, source: &str| {
         let mut cmd = d.dir.cmd(codex_bin.to_str().unwrap());
-        cmd.args(["--exact", "o3_claude_codex_agy_holders_and_lifecycle", "--nocapture"])
-            .env("XMSG_P1PZ_CHILD_MODE", "codex")
-            .env("XMSG_P1PZ_LOCK_PATH", &lock_path)
-            .env("XMSG_P1PZ_ROOT_ID", codex_root)
-            .env("XMSG_P1PZ_SOURCE", source)
-            .env("XMSG_P1PZ_CWD", &d.dir.run)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args([
+            "--exact",
+            "o3_claude_codex_agy_holders_and_lifecycle",
+            "--nocapture",
+        ])
+        .env("XMSG_P1PZ_CHILD_MODE", "codex")
+        .env("XMSG_P1PZ_LOCK_PATH", &lock_path)
+        .env("XMSG_P1PZ_ROOT_ID", codex_root)
+        .env("XMSG_P1PZ_SOURCE", source)
+        .env("XMSG_P1PZ_CWD", &d.dir.run)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
         let mut child = cmd.spawn().unwrap();
         let mut out = BufReader::new(child.stdout.take().unwrap());
         let mut lines = Vec::new();
@@ -1324,49 +1509,110 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
             }
             lines.push(l);
         };
-        assert_eq!(reg_line.trim(), "REGISTERED:", "positive codex registration must have no denial notice: {reg_line}");
+        assert_eq!(
+            reg_line.trim(),
+            "REGISTERED:",
+            "positive codex registration must have no denial notice: {reg_line}"
+        );
         (child, out)
+    };
+
+    let codex_tag = |cin: &mut std::process::ChildStdin,
+                     cout: &mut BufReader<std::process::ChildStdout>,
+                     tag: &str|
+     -> String {
+        writeln!(cin, "tag {tag}").unwrap();
+        loop {
+            let mut l = String::new();
+            let n = cout.read_line(&mut l).unwrap();
+            assert!(n > 0, "codex-fixture EOF before TAGGED for {tag}");
+            if let Some(rest) = l.strip_prefix("TAGGED:") {
+                return rest.to_string();
+            }
+        }
     };
 
     let (mut codex_p1, mut codex_out1) = spawn_codex_owner(&d, "startup");
     let mut codex_in1 = codex_p1.stdin.take().unwrap();
-    writeln!(codex_in1, "tag codex.tag").unwrap();
-    loop {
-        let mut l = String::new();
-        let n = codex_out1.read_line(&mut l).unwrap();
-        assert!(n > 0, "codex-fixture EOF before TAGGED");
-        if l.starts_with("TAGGED:") {
-            assert!(l.contains("codex.tag"), "expected codex.tag in MCP output: {l}");
-            break;
-        }
+    for i in 0..8 {
+        let t = format!("cx{i}");
+        let resp = codex_tag(&mut codex_in1, &mut codex_out1, &t);
+        assert!(
+            resp.contains(&t) && !resp.contains("\"isError\":true"),
+            "O3g initial tag {t} failed: {resp}"
+        );
     }
 
-    let (_, cx_list) = http_get(&d.dir.http_sock, "/v1/recipients?tag=codex.tag");
-    assert_eq!(cx_list["total"], 1, "O1a codex holder must be listed: {cx_list}");
+    let (_, cx_list) = http_get(&d.dir.http_sock, "/v1/recipients?tag=cx0");
+    assert_eq!(
+        cx_list["total"], 1,
+        "O1a codex holder must be listed: {cx_list}"
+    );
 
-    // O3e: healthy restart keeps codex tag row on codex:1 in session_tag (sweep_startup_tags preserves it)
+    // Healthy restart keeps all 8 codex:1 tag rows in session_tag (precondition for O3g)
     d.stop();
     d.spawn(BIN);
     {
         let db = rusqlite::Connection::open(&d.dir.db).unwrap();
         let kept: i64 = db
             .query_row(
-                "SELECT COUNT(*) FROM session_tag WHERE id = ?1 AND harness = 'codex' AND reg = 'codex:1' AND tag = 'codex.tag'",
+                "SELECT COUNT(*) FROM session_tag WHERE id = ?1 AND harness = 'codex' AND reg = 'codex:1'",
                 [codex_root],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(kept, 1, "O3e: healthy restart must preserve codex:1 tag row");
+        assert_eq!(
+            kept, 8,
+            "O3g precondition: healthy restart must preserve all 8 codex:1 tag rows"
+        );
     }
 
-    // O3g: park (exit owner) and resume on new owner -> generation increments, tag dropped
+    // O3g + O3e: park (exit owner) and resume on new owner -> generation increments to codex:2;
+    // none of the 8 old tags is listed; re-add "t" succeeds with tags == ["t"] (O3e); 8 fresh adds succeed and 9th is refused (O3g, kills M3-gen).
     writeln!(codex_in1, "quit").unwrap();
     drop(codex_in1);
     let _ = codex_p1.wait();
-    let (mut codex_p2, _codex_out2) = spawn_codex_owner(&d, "resume");
-    let (_, cx_resumed) = http_get(&d.dir.http_sock, "/v1/recipients?tag=codex.tag");
-    assert_eq!(cx_resumed["total"], 0, "O3g codex resume drops old tag: {cx_resumed}");
-    let _ = codex_p2.kill();
+    let (mut codex_p2, mut codex_out2) = spawn_codex_owner(&d, "resume");
+    let mut codex_in2 = codex_p2.stdin.take().unwrap();
+    for i in 0..8 {
+        let (_, cx_resumed) = http_get(&d.dir.http_sock, &format!("/v1/recipients?tag=cx{i}"));
+        assert_eq!(
+            cx_resumed["total"], 0,
+            "O3g codex resume must drop old tag cx{i}: {cx_resumed}"
+        );
+    }
+    let readd_t = codex_tag(&mut codex_in2, &mut codex_out2, "t");
+    assert!(
+        !readd_t.contains("\"isError\":true") && readd_t.contains("status\\\":\\\"ok\\\""),
+        "O3e re-add 't' after resume must succeed: {readd_t}"
+    );
+    let (_, cx_t_list) = http_get(&d.dir.http_sock, "/v1/recipients?tag=t");
+    assert_eq!(
+        cx_t_list["total"], 1,
+        "O3e: re-added 't' must be listed: {cx_t_list}"
+    );
+    assert_eq!(
+        cx_t_list["recipients"][0]["tags"],
+        json!(["t"]),
+        "O3e: tags must be [\"t\"]: {cx_t_list}"
+    );
+    for i in 1..8 {
+        let t = format!("r{i}");
+        let resp = codex_tag(&mut codex_in2, &mut codex_out2, &t);
+        assert!(
+            resp.contains(&t) && !resp.contains("\"isError\":true"),
+            "O3g fresh tag {t} after resume must succeed: {resp}"
+        );
+    }
+    let ninth = codex_tag(&mut codex_in2, &mut codex_out2, "r8");
+    assert!(
+        ninth.contains("\"isError\":true")
+            || ninth.contains("limit_exceeded")
+            || ninth.contains("8"),
+        "O3g 9th tag after resume must be refused: {ninth}"
+    );
+    writeln!(codex_in2, "quit").unwrap();
+    drop(codex_in2);
     let _ = codex_p2.wait();
 
     // 3. O1a agy holder + O3f (agy takeover by new process drops old tags)
@@ -1377,15 +1623,19 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
 
     let spawn_agy_holder = |d: &Daemon, tag: Option<&str>| {
         let mut cmd = d.dir.cmd(agy_bin.to_str().unwrap());
-        cmd.args(["--exact", "o3_claude_codex_agy_holders_and_lifecycle", "--nocapture"])
-            .env("XMSG_P1PZ_CHILD_MODE", "agy")
-            .env("XMSG_P1PZ_LOCK_PATH", &agy_lock_path)
-            .env("ANTIGRAVITY_CONVERSATION_ID", agy_id)
-            .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33399")
-            .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-agy-test")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.args([
+            "--exact",
+            "o3_claude_codex_agy_holders_and_lifecycle",
+            "--nocapture",
+        ])
+        .env("XMSG_P1PZ_CHILD_MODE", "agy")
+        .env("XMSG_P1PZ_LOCK_PATH", &agy_lock_path)
+        .env("ANTIGRAVITY_CONVERSATION_ID", agy_id)
+        .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33399")
+        .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-agy-test")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
         if let Some(t) = tag {
             cmd.env("XMSG_P1PZ_TAG", t);
         }
@@ -1404,14 +1654,34 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
 
     let mut agy1 = spawn_agy_holder(&d, Some("agy.tag"));
     let (_, agy_list) = http_get(&d.dir.http_sock, "/v1/recipients?tag=agy.tag");
-    assert_eq!(agy_list["total"], 1, "O1a agy holder must be listed: {agy_list}");
+    assert_eq!(
+        agy_list["total"], 1,
+        "O1a agy holder must be listed: {agy_list}"
+    );
+    {
+        let db = rusqlite::Connection::open(&d.dir.db).unwrap();
+        let agy_rows: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM session_tag WHERE id = ?1 AND harness = 'agy' AND tag = 'agy.tag'",
+                [agy_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            agy_rows, 1,
+            "O3f precondition: session_tag row must exist before takeover"
+        );
+    }
 
     // O3f: agy takeover by new process -> drops old tag
     let _ = agy1.kill();
     let _ = agy1.wait();
     let mut agy2 = spawn_agy_holder(&d, None);
     let (_, agy_takeover) = http_get(&d.dir.http_sock, "/v1/recipients?tag=agy.tag");
-    assert_eq!(agy_takeover["total"], 0, "O3f agy takeover drops old tag: {agy_takeover}");
+    assert_eq!(
+        agy_takeover["total"], 0,
+        "O3f agy takeover drops old tag: {agy_takeover}"
+    );
     let _ = agy2.kill();
     let _ = agy2.wait();
 }
@@ -1676,35 +1946,79 @@ fn compat_912ca97a_oracles() {
     }
 
     // O5h: new xmsg mcp under real Claude and agy fixture sessions against old daemon (912ca97a):
-    // assert mcp_start is accepted (status == "ok", not bad_request) and session registers and holds (kills M14).
+    // assert startup & background worker mcp_start are accepted (status == "ok", not bad_request)
+    // and the held connection persists for 10 s against 912ca97a (kills X14).
     {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
         let id_cl_old = "94444444-4444-4444-8444-444444444444";
         let spy_sock = d_old.dir.run.join("spy-agent.sock");
         let real_agent_sock = d_old.dir.agent_sock.clone();
         let spy_listener = std::os::unix::net::UnixListener::bind(&spy_sock).unwrap();
+        spy_listener.set_nonblocking(true).unwrap();
+        let stop_spy = Arc::new(AtomicBool::new(false));
+        let stop_spy_bg = Arc::clone(&stop_spy);
+        let ok_count = Arc::new(AtomicUsize::new(0));
+        let ok_count_bg = Arc::clone(&ok_count);
         let spy_handle = std::thread::spawn(move || {
-            let (mut client, _) = spy_listener.accept().unwrap();
-            let mut upstream = UnixStream::connect(&real_agent_sock).unwrap();
-            let mut cr = BufReader::new(client.try_clone().unwrap());
-            let mut ur = BufReader::new(upstream.try_clone().unwrap());
-            let mut req_line = String::new();
-            cr.read_line(&mut req_line).unwrap();
-            upstream.write_all(req_line.as_bytes()).unwrap();
-            upstream.flush().unwrap();
-            let mut resp_line = String::new();
-            ur.read_line(&mut resp_line).unwrap();
-            client.write_all(resp_line.as_bytes()).unwrap();
-            client.flush().unwrap();
-            let resp_v: Value = serde_json::from_str(&resp_line).unwrap();
-            assert_ne!(
-                resp_v.get("error").and_then(Value::as_str),
-                Some("bad_request"),
-                "O5h: 912ca97a daemon must not reject mcp_start as bad_request: req={req_line} resp={resp_v}"
-            );
+            let mut conns = Vec::new();
+            while !stop_spy_bg.load(Ordering::Relaxed) {
+                match spy_listener.accept() {
+                    Ok((mut client, _)) => {
+                        let upstream_sock = real_agent_sock.clone();
+                        let ok_c = Arc::clone(&ok_count_bg);
+                        conns.push(std::thread::spawn(move || {
+                            let mut upstream = UnixStream::connect(&upstream_sock).unwrap();
+                            let mut cr = BufReader::new(client.try_clone().unwrap());
+                            let mut ur = BufReader::new(upstream.try_clone().unwrap());
+                            let mut req_line = String::new();
+                            if cr.read_line(&mut req_line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            upstream.write_all(req_line.as_bytes()).unwrap();
+                            upstream.flush().unwrap();
+                            let mut resp_line = String::new();
+                            if ur.read_line(&mut resp_line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let _ = client.write_all(resp_line.as_bytes());
+                            let _ = client.flush();
+                            let resp_v: Value = serde_json::from_str(&resp_line).unwrap();
+                            assert_ne!(
+                                resp_v.get("error").and_then(Value::as_str),
+                                Some("bad_request"),
+                                "O5h: 912ca97a daemon must not reject mcp_start as bad_request: req={req_line} resp={resp_v}"
+                            );
+                            if resp_v.get("error").is_none() {
+                                ok_c.fetch_add(1, Ordering::Relaxed);
+                            }
+                            // Relay any held-connection traffic until EOF
+                            let mut up2 = upstream.try_clone().unwrap();
+                            let mut cl2 = client.try_clone().unwrap();
+                            let t1 = std::thread::spawn(move || {
+                                let _ = std::io::copy(&mut cr, &mut up2);
+                                let _ = up2.shutdown(std::net::Shutdown::Write);
+                            });
+                            let _ = std::io::copy(&mut ur, &mut cl2);
+                            let _ = cl2.shutdown(std::net::Shutdown::Write);
+                            let _ = t1.join();
+                        }));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+            for h in conns {
+                h.join().unwrap();
+            }
         });
 
         let mcp_script = format!(
-            "read _; (echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"claude\",\"version\":\"1\"}}}}}}'; sleep 0.3) | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} >/dev/null 2>&1; echo MCP_DONE; read _",
+            "read _; {BIN} list --json >/dev/null 2>&1; (echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"claude\",\"version\":\"1\"}}}}}}'; sleep 12) | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} >/dev/null 2>&1 & MCP_PID=$!; echo MCP_STARTED; read _; kill $MCP_PID 2>/dev/null || true; wait $MCP_PID 2>/dev/null || true",
             d_old.dir.db.display(),
             spy_sock.display(),
             d_old.dir.http_sock.display(),
@@ -1719,36 +2033,30 @@ fn compat_912ca97a_oracles() {
         let mut cl_in = cl_child.stdin.take().unwrap();
         let mut cl_out = BufReader::new(cl_child.stdout.take().unwrap());
         writeln!(cl_in, "go").unwrap();
-        let mut done_line = String::new();
-        cl_out.read_line(&mut done_line).unwrap();
-        assert_eq!(done_line.trim(), "MCP_DONE");
-        spy_handle.join().unwrap();
+        let mut started_line = String::new();
+        cl_out.read_line(&mut started_line).unwrap();
+        assert_eq!(started_line.trim(), "MCP_STARTED");
 
-        {
-            let db_old = rusqlite::Connection::open(&d_old.dir.db).unwrap();
-            let claims: i64 = db_old
-                .query_row(
-                    "SELECT COUNT(*) FROM instance_claims WHERE id = ?1 AND released = 0",
-                    [id_cl_old],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(claims, 1, "O5h: mcp_start must create an active instance_claims row on 912ca97a daemon");
+        // Poll up to 3s for Claude registration (asserting spy_sock saw no bad_request)
+        let mut registered = false;
+        for _ in 0..30 {
+            let (_, old_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
+            if old_list["recipients"].as_array().unwrap().iter().any(|r| {
+                r["address"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with(&format!("{id_cl_old}@")))
+            }) {
+                registered = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
-
-        let (_, old_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
-        assert!(
-            old_list["recipients"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|r| r["address"].as_str().is_some_and(|a| a.starts_with(&format!("{id_cl_old}@")))),
-            "O5h: Claude mcp_start must register session on 912ca97a daemon: {old_list}"
-        );
+        assert!(registered, "O5h: Claude session must register on 912ca97a");
         writeln!(cl_in, "bye").unwrap();
         let _ = cl_child.wait();
 
-        // Agy fixture session against old daemon
+        // Agy fixture session against old daemon (912ca97a):
+        // background worker mcp_start (mcp.rs:151-168) is accepted (status == "ok") and held for 10 s (kills X14).
         let agy_old_id = "95555555-5555-4555-8555-555555555555";
         let agy_old_presence = d_old.dir.run.join("agy-presence");
         fs::create_dir_all(&agy_old_presence).unwrap();
@@ -1766,7 +2074,8 @@ fn compat_912ca97a_oracles() {
             assert_eq!(rc, 0);
             f
         };
-        let reg_agy_old = d_old.dir
+        let reg_agy_old = d_old
+            .dir
             .cmd(BIN)
             .args([
                 "register",
@@ -1780,63 +2089,187 @@ fn compat_912ca97a_oracles() {
             .output()
             .unwrap();
         assert!(reg_agy_old.status.success(), "O5h register agy failed");
-        let _ = call_mcp_tools(
-            &d_old.dir,
-            &[json!({ "name": "list", "arguments": {} })],
-            &[
-                ("ANTIGRAVITY_CONVERSATION_ID", agy_old_id),
-                ("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33398"),
-                ("ANTIGRAVITY_CSRF_TOKEN", "csrf-old-agy"),
-            ],
+
+        let ok_before_agy = ok_count.load(Ordering::Relaxed);
+        let agy_mcp_script = format!(
+            "(echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"agy\",\"version\":\"1\"}}}}}}'; sleep 12) | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} >/dev/null 2>&1 & MCP_PID=$!; echo AGY_MCP_STARTED; read _; kill $MCP_PID 2>/dev/null || true; wait $MCP_PID 2>/dev/null || true",
+            d_old.dir.db.display(),
+            spy_sock.display(),
+            d_old.dir.http_sock.display(),
         );
-        let (_, old_agy_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
+        let mut agy_sh = d_old.dir.cmd("sh");
+        agy_sh
+            .args(["-c", &agy_mcp_script])
+            .env("ANTIGRAVITY_CONVERSATION_ID", agy_old_id)
+            .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33398")
+            .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-old-agy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut agy_child = agy_sh.spawn().unwrap();
+        let mut agy_in = agy_child.stdin.take().unwrap();
+        let mut agy_out = BufReader::new(agy_child.stdout.take().unwrap());
+        let mut agy_started = String::new();
+        agy_out.read_line(&mut agy_started).unwrap();
+        assert_eq!(agy_started.trim(), "AGY_MCP_STARTED");
+
+        let mut agy_ok = false;
+        for _ in 0..30 {
+            if ok_count.load(Ordering::Relaxed) > ok_before_agy {
+                let (_, old_agy_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
+                if old_agy_list["recipients"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| {
+                        r["address"]
+                            .as_str()
+                            .is_some_and(|a| a.starts_with(&format!("{agy_old_id}@")))
+                    })
+                {
+                    agy_ok = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         assert!(
-            old_agy_list["recipients"]
+            agy_ok,
+            "O5h: agy mcp_start (including background worker) must be accepted (status ok) on 912ca97a: ok_count={}",
+            ok_count.load(Ordering::Relaxed)
+        );
+
+        std::thread::sleep(Duration::from_secs(10));
+        assert!(
+            agy_child.try_wait().unwrap().is_none(),
+            "O5h: held mcp_start connection must persist for 10 s against 912ca97a"
+        );
+        let (_, held_agy_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
+        assert!(
+            held_agy_list["recipients"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|r| r["address"].as_str().is_some_and(|a| a.starts_with(&format!("{agy_old_id}@")))),
-            "O5h: agy mcp_start must register session on 912ca97a daemon: {old_agy_list}"
+                .any(|r| r["address"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with(&format!("{agy_old_id}@")))),
+            "O5h: agy session must remain registered after 10 s hold on 912ca97a: {held_agy_list}"
         );
+        writeln!(agy_in, "bye").unwrap();
+        let _ = agy_child.wait();
+        stop_spy.store(true, Ordering::Relaxed);
+        spy_handle.join().unwrap();
     }
 
-    // O3h: Claude rollback to 912ca97a and re-upgrade: old tag neither applied nor counted.
+    // O3h: Claude rollback to 912ca97a and re-upgrade while holder O stays ALIVE throughout:
+    // re-claim under 912ca97a changes created_at (T0 -> T1); after re-upgrade old tag is neither applied nor counted (kills M3-claimkey).
     {
         let dir_rb = NodeDir::new("p1o3h");
         let mut d_rb = Daemon::start(dir_rb, BIN, "RB", None, vec![]);
         let id_rb = "96666666-6666-4666-8666-666666666666";
-        let guard_rb = spawn_tagged_claude(&d_rb.dir, id_rb, &["rb.tag"], None);
+        let id_other = "96666666-6666-4666-8666-666666666667";
+        let rb_script = format!(
+            "set -e; while IFS= read -r cmd; do case \"$cmd\" in init) {BIN} list --json >/dev/null; {BIN} tag add rb.tag --json >/dev/null; echo INIT_OK ;; prevlist) {prev} list --json >/dev/null; echo PREV_OK ;; add:*) t=${{cmd#add:}}; if out=$({BIN} tag add \"$t\" --json 2>&1); then echo \"OK:$out\"; else echo \"ERR:$out\"; fi ;; bye) break ;; esac; done"
+        );
+        let mut sh_rb = d_rb.dir.cmd("sh");
+        sh_rb
+            .args(["-c", &rb_script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child_rb = sh_rb.spawn().unwrap();
+        let rb_pid = child_rb.id();
+        write_claude_session_file(&d_rb.dir, rb_pid, id_rb);
+        let mut rb_in = child_rb.stdin.take().unwrap();
+        let mut rb_out = BufReader::new(child_rb.stdout.take().unwrap());
+
+        writeln!(rb_in, "init").unwrap();
+        let mut l = String::new();
+        rb_out.read_line(&mut l).unwrap();
+        assert_eq!(l.trim(), "INIT_OK");
+
         let (_, before_rb) = http_get(&d_rb.dir.http_sock, "/v1/recipients?tag=rb.tag");
         assert_eq!(before_rb["total"], 1);
-
-        // Rollback to 912ca97a while holder exits (old daemon does not clean session_tag)
-        d_rb.stop();
-        d_rb.spawn(&prev);
-        drop(guard_rb);
-
-        // Re-upgrade to new BIN and start a fresh claim on the same id
-        d_rb.stop();
-        d_rb.spawn(BIN);
-        {
+        let created_at_0: i64 = {
             let db_rb = rusqlite::Connection::open(&d_rb.dir.db).unwrap();
-            let stale_rows: i64 = db_rb
+            db_rb
                 .query_row(
-                    "SELECT COUNT(*) FROM session_tag WHERE id = ?1",
+                    "SELECT created_at FROM instance_claims WHERE id = ?1 AND released = 0",
                     [id_rb],
                     |r| r.get(0),
                 )
-                .unwrap();
-            assert_eq!(
-                stale_rows, 0,
-                "O3h: sweep_startup_tags must delete pre-rollback dead tag rows on re-upgrade"
-            );
-        }
-        let _guard_rb2 = spawn_tagged_claude(&d_rb.dir, id_rb, &[], None);
+                .unwrap()
+        };
+
+        // Rollback to 912ca97a while holder O stays ALIVE, then re-claim id_rb via id_other -> id_rb so created_at advances
+        d_rb.stop();
+        d_rb.spawn(&prev);
+        std::thread::sleep(Duration::from_secs(1));
+        write_claude_session_file(&d_rb.dir, rb_pid, id_other);
+        writeln!(rb_in, "prevlist").unwrap();
+        l.clear();
+        rb_out.read_line(&mut l).unwrap();
+        assert_eq!(l.trim(), "PREV_OK");
+
+        write_claude_session_file(&d_rb.dir, rb_pid, id_rb);
+        writeln!(rb_in, "prevlist").unwrap();
+        l.clear();
+        rb_out.read_line(&mut l).unwrap();
+        assert_eq!(l.trim(), "PREV_OK");
+
+        let created_at_1: i64 = {
+            let db_rb = rusqlite::Connection::open(&d_rb.dir.db).unwrap();
+            db_rb
+                .query_row(
+                    "SELECT created_at FROM instance_claims WHERE id = ?1 AND released = 0",
+                    [id_rb],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert!(
+            created_at_1 > created_at_0,
+            "O3h precondition: re-claim under 912ca97a must advance created_at ({created_at_0} -> {created_at_1})"
+        );
+
+        // Re-upgrade to new BIN while holder O is STILL ALIVE
+        d_rb.stop();
+        d_rb.spawn(BIN);
+        let (_, live_list) = http_get(&d_rb.dir.http_sock, "/v1/recipients");
+        assert!(
+            live_list["recipients"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["address"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with(&format!("{id_rb}@")))
+                    && r.get("tags")
+                        .and_then(Value::as_array)
+                        .is_none_or(|t| t.is_empty())),
+            "O3h: live holder after re-upgrade must have tags == []: {live_list}"
+        );
         let (_, after_reup) = http_get(&d_rb.dir.http_sock, "/v1/recipients?tag=rb.tag");
         assert_eq!(
             after_reup["total"], 0,
-            "O3h: old tag from pre-rollback must not be counted after re-upgrade: {after_reup}"
+            "O3h: old tag from pre-rollback T0 must not be counted after re-upgrade: {after_reup}"
         );
+        // 8 fresh adds must all succeed (old T0 row not counted toward cap), 9th refused
+        for i in 0..8 {
+            writeln!(rb_in, "add:t{i}").unwrap();
+            l.clear();
+            rb_out.read_line(&mut l).unwrap();
+            assert!(l.starts_with("OK:"), "O3h fresh tag t{i} must succeed: {l}");
+        }
+        writeln!(rb_in, "add:t8").unwrap();
+        l.clear();
+        rb_out.read_line(&mut l).unwrap();
+        assert!(
+            l.starts_with("ERR:"),
+            "O3h 9th fresh tag must be refused: {l}"
+        );
+        writeln!(rb_in, "bye").unwrap();
+        let _ = child_rb.wait();
     }
 
     println!("p1pz: compat_912ca97a_oracles passed");
