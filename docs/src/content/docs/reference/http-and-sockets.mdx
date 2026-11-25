@@ -601,7 +601,7 @@ explicitly selected CLI configuration and never appear in this API.
 
 <Status id="xmsg.session-tags" />
 
-Registered live sessions can add or remove capability tags (`1..=64` ASCII `[A-Za-z0-9._-]`, up to 8 per registration) on their own session.
+Registered live sessions can add or remove capability tags (`^[a-z0-9][a-z0-9._-]{0,63}$`, up to 8 per registration) on their own session.
 
 - `agent.sock`: `{"action":"tag","add":"orchestrator.proj"}` or `{"action":"tag","remove":"orchestrator.proj"}` (with `codex_session`/`codex_thread`/`codex_turn` for Codex callers; `session_id` and `as_agent` are refused `bad_request`).
 - Pi (`register.sock`): `{"action":"tag","sessionId"?,"add"?,"remove"?}` (foreign `sessionId` is refused `denied`).

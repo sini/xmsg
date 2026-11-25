@@ -723,4 +723,26 @@ mod tag_tests {
             .unwrap_err();
         assert!(matches!(err9, AppError::BadRequest(_)));
     }
+
+    #[test]
+    fn u5_each_registration_mints_distinct_reg_key() {
+        let a1 = crate::agy::AgySessionInfo::new("conv-1".into(), 100, "st1".into(), None);
+        let a2 = crate::agy::AgySessionInfo::new("conv-1".into(), 100, "st1".into(), None);
+        assert_ne!(a1.reg, a2.reg);
+        assert!(!a1.reg.is_empty());
+
+        let c1 = crate::claim::InstanceClaim {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            pid: 100,
+            proc_start: "st1".into(),
+            suffix: 1,
+            released: false,
+            created_at: 10,
+        };
+        let c2 = crate::claim::InstanceClaim {
+            created_at: 11,
+            ..c1.clone()
+        };
+        assert_ne!(c1.reg(), c2.reg());
+    }
 }

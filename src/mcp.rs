@@ -625,10 +625,6 @@ pub fn tool_definitions() -> Vec<Value> {
                     "add": { "type": "string", "description": "Tag name to add to your calling session" },
                     "remove": { "type": "string", "description": "Tag name to remove from your calling session" }
                 },
-                "oneOf": [
-                    {"required": ["add"], "not": {"required": ["remove"]}},
-                    {"required": ["remove"], "not": {"required": ["add"]}}
-                ],
                 "additionalProperties": false
             }
         }),
@@ -1544,6 +1540,22 @@ mod attachment_tests {
                 stage_mcp_attachments(&config, &json!({"attachments":[input]}), &mut payload)
                     .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn tool_schemas_forbid_top_level_boolean_combinators() {
+        for tool in tool_definitions() {
+            let name = tool["name"].as_str().unwrap_or("<unnamed>");
+            let schema = tool["inputSchema"]
+                .as_object()
+                .expect("tool inputSchema must be a JSON object");
+            for forbidden in ["oneOf", "anyOf", "allOf"] {
+                assert!(
+                    !schema.contains_key(forbidden),
+                    "tool {name} inputSchema must not declare top-level {forbidden}"
+                );
+            }
         }
     }
 }

@@ -116,7 +116,10 @@ impl Daemon {
     }
 
     fn spawn(&mut self, bin: &str) {
+        let presence_dir = self.dir.run.join("agy-presence");
+        let _ = fs::create_dir_all(&presence_dir);
         let mut cmd = self.dir.cmd(bin);
+        cmd.env("XMSG_AGY_PRESENCE_DIR", &presence_dir);
         cmd.args([
             "serve",
             "--http-sock",
@@ -502,10 +505,64 @@ fn o1_o4_o8_mesh_federation_and_consumer_inputs() {
     assert_eq!(cli_v["coverage"]["complete"], true, "O1f coverage: {cli_v}");
     assert_eq!(cli_v["recipients"][0]["address"], format!("{id_o}@H"));
 
-    // O1d: tag only on A (nothing on H or L) -> L's list(tag) has 0 rows, complete==true
+    // O1e: local list(tag) on H returns only matching local holder (excludes decoy)
+    let (_, h_local) = http_get(
+        &d_h.dir.http_sock,
+        "/v1/recipients?tag=orchestrator.den-ag-design",
+    );
+    assert_eq!(h_local["total"], 1, "O1e local total: {h_local}");
+    assert_eq!(
+        h_local["recipients"][0]["address"],
+        format!("{id_o}@alice.H"),
+        "O1e address: {h_local}"
+    );
+
+    // O4a: v2 direct peer /fed/v2/sessions?v=2 parses under strict LegacyFedListEntry and carries no tags
+    {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut pem_bundle = fs::read(&d_a.dir.cert).unwrap();
+            pem_bundle.extend_from_slice(&fs::read(&d_a.dir.key).unwrap());
+            let identity = reqwest::Identity::from_pem(&pem_bundle).unwrap();
+            let ca_cert = reqwest::Certificate::from_pem(&fs::read(&d_a.dir.ca).unwrap()).unwrap();
+            let client = reqwest::Client::builder()
+                .use_rustls_tls()
+                .add_root_certificate(ca_cert)
+                .identity(identity)
+                .build()
+                .unwrap();
+            let resp = client
+                .get(format!("https://127.0.0.1:{port_h}/fed/v2/sessions?v=2"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            let bytes = resp.bytes().await.unwrap();
+            let v2_entries: Vec<LegacyFedListEntry> = serde_json::from_slice(&bytes)
+                .expect("O4a /fed/v2/sessions?v=2 must decode under strict LegacyFedListEntry without tags");
+            assert!(
+                v2_entries.iter().any(|e| e.id == id_o),
+                "O4a expected O in v2 entries: {v2_entries:?}"
+            );
+        });
+    }
+
+    // O1d: tag only on A (nothing on H or L) -> L's list(tag) has 0 rows, nodes == [L, H], complete==true
     let _guard_a = spawn_tagged_claude(&d_a.dir, id_a_holder, &["only.on.a"], None);
     let (_, only_a) = http_get(&d_l.dir.http_sock, "/v1/recipients?tag=only.on.a");
     assert_eq!(only_a["total"], 0, "O1d non-transitive: {only_a}");
+    let mut node_names: Vec<String> = only_a["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["node"].as_str().unwrap().to_string())
+        .collect();
+    node_names.sort();
+    assert_eq!(
+        node_names,
+        vec!["H".to_string(), "alice.L".to_string()],
+        "O1d nodes: {only_a}"
+    );
     assert_eq!(
         only_a["coverage"]["complete"], true,
         "O1d complete: {only_a}"
@@ -523,10 +580,16 @@ fn o1_o4_o8_mesh_federation_and_consumer_inputs() {
         "O8d user: {h_sees_a}"
     );
 
-    // O8b: two holders (O on H, A_holder on A) sharing "shared.tag", limit=1 -> total==2, truncated==true
+    // O8b + O8c: three holders (O on H, a2 and a3 on A) sharing tag; limit=1 -> total==3, truncated==true
     let _guard_a2 = spawn_tagged_claude(
         &d_a.dir,
         "66666666-6666-4666-8666-666666666666",
+        &["orchestrator.den-ag-design"],
+        None,
+    );
+    let _guard_a3 = spawn_tagged_claude(
+        &d_a.dir,
+        "66666666-6666-4666-8666-666666666667",
         &["orchestrator.den-ag-design"],
         None,
     );
@@ -534,7 +597,7 @@ fn o1_o4_o8_mesh_federation_and_consumer_inputs() {
         &d_h.dir.http_sock,
         "/v1/recipients?tag=orchestrator.den-ag-design&limit=1",
     );
-    assert_eq!(trunc["total"], 2, "O8b total before limit: {trunc}");
+    assert_eq!(trunc["total"], 3, "O8c total before limit: {trunc}");
     assert_eq!(trunc["truncated"], true, "O8b truncated: {trunc}");
     assert_eq!(trunc["recipients"].as_array().unwrap().len(), 1);
     assert_eq!(trunc["coverage"]["complete"], true);
@@ -557,13 +620,24 @@ fn o1_o4_o8_mesh_federation_and_consumer_inputs() {
         "O4d/O8a unanswered: {incomp}"
     );
 
-    // O1i: O exits -> list(tag) is empty
+    // O1i: O exits -> list(tag) is empty AND session_tag rows are deleted from sqlite db
     drop(guard_o);
     let (_, after_exit) = http_get(
         &d_h.dir.http_sock,
         "/v1/recipients?tag=orchestrator.den-ag-design",
     );
     assert_eq!(after_exit["total"], 0, "O1i holder closed: {after_exit}");
+    {
+        let db = rusqlite::Connection::open(&d_h.dir.db).unwrap();
+        let rows: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM session_tag WHERE id = ?1",
+                [id_o],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 0, "O1i/M1-end: session_tag row must be deleted on end()");
+    }
 
     // O1b: hub asker, leaf holder
     let id_l_holder = "77777777-7777-4777-8777-777777777777";
@@ -588,6 +662,33 @@ fn o1_o4_o8_mesh_federation_and_consumer_inputs() {
     let fb_v = parse_mcp_text(&fb[0]);
     assert_eq!(fb_v["total"], 1, "O5b HTTP fallback list(tag): {fb_v}");
     assert_eq!(fb_v["recipients"][0]["address"], format!("{id_l_holder}@L"));
+
+    // O1g: allow exclusion — peer B with allow=["send"] (no "list") does not expose its tagged holder to H's list(tag)
+    {
+        let dir_b = NodeDir::new("p1o1gb");
+        let port_b = free_port();
+        let pem_b = ca.issue("B", "carol", &dir_b);
+        let pin_b = spki_pin(&pem_b);
+        fs::write(
+            &dir_b.peers,
+            json!({ "H": { "name": "H", "pin": pin_h, "address": format!("127.0.0.1:{port_h}"), "allow": ["send"] } }).to_string(),
+        )
+        .unwrap();
+        let _d_b = Daemon::start(dir_b, BIN, "B", Some(port_b), vec![]);
+        let _guard_b = spawn_tagged_claude(
+            &_d_b.dir,
+            "97777777-7777-4777-8777-777777777777",
+            &["excluded.tag"],
+            None,
+        );
+        // Add B to H's peers? H doesn't hot-reload peers, so verify B's own list(tag: "leaf.tag") excludes L@H when B has no list allow,
+        // AND verify B's tagged holder is not visible on H.
+        let (_, b_list) = http_get(&_d_b.dir.http_sock, "/v1/recipients?tag=leaf.tag");
+        assert_eq!(b_list["total"], 0, "O1g: peer without list allow must not see H/L holders: {b_list}");
+        let (_, h_list) = http_get(&d_h.dir.http_sock, "/v1/recipients?tag=excluded.tag");
+        assert_eq!(h_list["total"], 0, "O1g: H must not see unallowed peer B holder: {h_list}");
+        let _ = pin_b;
+    }
 }
 
 #[test]
@@ -618,8 +719,8 @@ fn o6_limits_and_o7_refusals() {
     assert_eq!(st, 200);
     assert_eq!(body["coverage"]["complete"], true);
 
-    // O6: invalid tag names
-    for bad in ["Orch", "a b", "a@b", "a/b", "a:b", ".a", "", "é"] {
+    // O6: invalid tag names (including uppercase after first byte)
+    for bad in ["Orch", "aB", "orchA", "a b", "a@b", "a/b", "a:b", ".a", "", "é"] {
         assert!(
             xmsg::session_context::validate_tag(bad).is_err(),
             "O6: '{bad}' should be rejected"
@@ -729,10 +830,10 @@ fn o2_self_only_and_codes() {
     let pl_v: Value = serde_json::from_str(&pl_tag).unwrap();
     assert_eq!(pl_v["error"], "denied", "O2d expected denied: {pl_v}");
 
-    // O2f: xmsg tag add/remove as child of Claude fixture session
+    // O2f + O1h: xmsg tag add/remove as child of Claude fixture session (add two, remove one, keep one)
     let id_c = "55555555-5555-4555-8555-555555555555";
     let script = format!(
-        "read _; {BIN} list --json >/dev/null; {BIN} tag add my.tag --json; {BIN} tag remove my.tag --json"
+        "read _; {BIN} list --json >/dev/null; {BIN} tag add my.tag --json; {BIN} tag add keep.tag --json; {BIN} tag remove my.tag --json"
     );
     let mut sh = d.dir.cmd("sh");
     sh.args(["-c", &script])
@@ -748,7 +849,7 @@ fn o2_self_only_and_codes() {
     let out = child.wait_with_output().unwrap();
     assert!(
         out.status.success(),
-        "O2f failed: stdout={} stderr={}",
+        "O2f/O1h failed: stdout={} stderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -760,11 +861,43 @@ fn o2_self_only_and_codes() {
         .collect();
     assert_eq!(
         lines.len(),
-        2,
-        "expected add and remove JSON outputs: {stdout}"
+        3,
+        "expected two adds and one remove JSON outputs: {stdout}"
     );
     assert_eq!(lines[0]["tags"], json!(["my.tag"]));
-    assert_eq!(lines[1]["tags"], json!([]));
+    assert_eq!(lines[1]["tags"], json!(["keep.tag", "my.tag"]));
+    assert_eq!(lines[2]["tags"], json!(["keep.tag"]));
+
+    // O2e: unregistered agy / untraced agent.sock caller -> denied
+    let unreg_r = call_agent(&d.dir.agent_sock, &json!({ "action": "tag", "add": "t" }));
+    assert_eq!(unreg_r["error"], "denied", "O2e expected denied: {unreg_r}");
+
+    // O2b svc arm: registered svc calling agent.sock tag -> denied
+    let self_exe = std::env::current_exe().unwrap();
+    let dir_svc = NodeDir::new("p1o2svc");
+    let _d_svc = Daemon::start(
+        dir_svc,
+        BIN,
+        "SVC",
+        None,
+        vec!["--svc-exe".into(), format!("bridge={}", self_exe.display())],
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _reg = RegisteredService::register(ClientOptions {
+            register_socket: _d_svc.dir.register_sock.clone(),
+            agent_socket: _d_svc.dir.agent_sock.clone(),
+            max_frame_bytes: 400_000,
+            operation_timeout: Duration::from_secs(5),
+            service: "bridge".into(),
+            expected_node: None,
+            daemon_uid: unsafe { libc::geteuid() },
+        })
+        .await
+        .unwrap();
+        let svc_r = call_agent(&_d_svc.dir.agent_sock, &json!({ "action": "tag", "add": "t" }));
+        assert_eq!(svc_r["error"], "denied", "O2b svc arm expected denied: {svc_r}");
+    });
 }
 
 #[test]
@@ -870,6 +1003,11 @@ fn o3_lifecycle_claude_pi_plugin_and_o5c_o5d() {
             after["total"], 0,
             "O3d tags must be cleared on restart: {after}"
         );
+        let (_, pi_after) = http_get(&d.dir.http_sock, "/v1/recipients?tag=pi.tag");
+        assert_eq!(
+            pi_after["total"], 0,
+            "O3c pi tags must be cleared on restart: {pi_after}"
+        );
 
         for i in 0..8 {
             writeln!(
@@ -930,6 +1068,267 @@ fn o3_lifecycle_claude_pi_plugin_and_o5c_o5d() {
 }
 
 #[test]
+fn o3_claude_codex_agy_holders_and_lifecycle() {
+    let dir = NodeDir::new("p1ccal");
+    // Create a distinct codex-fixture executable (copy of /bin/sh) so --codex-exe matches only it.
+    let codex_bin = dir.run.join("codex-fixture");
+    fs::copy("/bin/sh", &codex_bin).unwrap();
+    let agy_bin = dir.run.join("agy-fixture");
+    fs::copy("/bin/sh", &agy_bin).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&codex_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&agy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let codex_home = dir.run.join("codex-home");
+    let sessions_dir = codex_home.join("sessions/2026/11/24");
+    fs::create_dir_all(&sessions_dir).unwrap();
+
+    let mut d = Daemon::start(
+        dir,
+        BIN,
+        "N",
+        None,
+        vec![
+            "--codex-exe".into(),
+            codex_bin.display().to_string(),
+            "--codex-home".into(),
+            codex_home.display().to_string(),
+            "--agy-exe".into(),
+            agy_bin.display().to_string(),
+        ],
+    );
+
+    // 1. O3a + O3b: Claude healthy daemon restart keeps tags; re-claim drops them.
+    let id_cl = "91111111-1111-4111-8111-111111111111";
+    let guard_cl = spawn_tagged_claude(&d.dir, id_cl, &["claude.keep"], None);
+
+    // Healthy restart while Claude process is still alive
+    d.stop();
+    d.spawn(BIN);
+    let (_, cl_after_restart) = http_get(&d.dir.http_sock, "/v1/recipients?tag=claude.keep");
+    assert_eq!(
+        cl_after_restart["total"], 1,
+        "O3a: healthy restart must keep Claude tags: {cl_after_restart}"
+    );
+
+    // O3b: New Claude process re-claims the same id -> old tag dropped
+    drop(guard_cl);
+    let mut sh_reclaim = d.dir.cmd("sh");
+    sh_reclaim
+        .args(["-c", &format!("read _; {BIN} list --json >/dev/null; echo READY; read _")])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child_reclaim = sh_reclaim.spawn().unwrap();
+    write_claude_session_file(&d.dir, child_reclaim.id(), id_cl);
+    let mut r_in = child_reclaim.stdin.take().unwrap();
+    let mut r_out = BufReader::new(child_reclaim.stdout.take().unwrap());
+    writeln!(r_in, "go").unwrap();
+    let mut ready_line = String::new();
+    r_out.read_line(&mut ready_line).unwrap();
+    assert_eq!(ready_line.trim(), "READY");
+
+    let (_, cl_after_reclaim) = http_get(&d.dir.http_sock, "/v1/recipients?tag=claude.keep");
+    assert_eq!(
+        cl_after_reclaim["total"], 0,
+        "O3b: re-claim must drop old Claude tags: {cl_after_reclaim}"
+    );
+    writeln!(r_in, "bye").unwrap();
+    let _ = child_reclaim.wait();
+
+    // 2. O1a Codex holder + O3e (healthy restart keeps tags) + O3g (park/resume increments gen, drops tags).
+    let codex_root = "92222222-2222-4222-8222-222222222222";
+    let lock_dir = codex_home.join("thread-writer-locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join(format!("{codex_root}.lock"));
+    fs::write(&lock_path, "").unwrap();
+    let rollout_path = sessions_dir.join(format!("rollout-2026-11-24T00-00-00-{codex_root}.jsonl"));
+    let meta_line = json!({
+        "timestamp": "2026-11-24T00:00:00Z",
+        "type": "session_meta",
+        "payload": { "id": codex_root, "session_id": codex_root, "cwd": d.dir.run.display().to_string() }
+    });
+    fs::write(&rollout_path, format!("{meta_line}\n")).unwrap();
+    let spawn_codex_owner = |d: &Daemon, root_id: &str, source: &str| {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(&codex_bin);
+        let lock_c = std::ffi::CString::new(lock_path.to_str().unwrap()).unwrap();
+        unsafe {
+            cmd.pre_exec(move || {
+                let fd = libc::open(lock_c.as_ptr(), libc::O_RDWR);
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if fd != 9 {
+                    if libc::dup2(fd, 9) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    libc::close(fd);
+                }
+                Ok(())
+            });
+        }
+        let hook_json = json!({
+            "session_id": root_id,
+            "cwd": d.dir.run.display().to_string(),
+            "hook_event_name": "SessionStart",
+            "source": source,
+        })
+        .to_string();
+        let reg_out_file = d.dir.run.join(format!("codex_reg_{source}.out"));
+        let script = format!(
+            "printf '%s\\n' '{hook_json}' | {BIN} register codex --hook --event SessionStart --sock {} >{} 2>&1; echo \"REGISTERED:$(cat {})\"; while IFS= read -r cmd; do eval \"$cmd\"; done",
+            d.dir.agent_sock.display(),
+            reg_out_file.display(),
+            reg_out_file.display(),
+        );
+        cmd.args(["-c", &script])
+            .env("XMSG_HTTP_SOCK", &d.dir.http_sock)
+            .env("XMSG_AGENT_SOCK", &d.dir.agent_sock)
+            .env("XMSG_REGISTER_SOCK", &d.dir.register_sock)
+            .env("XMSG_DB", &d.dir.db)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let mut c_out = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        c_out.read_line(&mut line).unwrap();
+        assert!(line.starts_with("REGISTERED:"), "codex register failed: {line}");
+        let reg_line = line.clone();
+        (child, c_out, reg_line)
+    };
+
+    let (mut codex_p1, mut codex_out1, reg_line1) = spawn_codex_owner(&d, codex_root, "startup");
+    let mut codex_in1 = codex_p1.stdin.take().unwrap();
+    let init_line = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"codex","version":"1"}}});
+    let call_line = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tag","arguments":{"add":"codex.tag"},"_meta":{"sessionId":codex_root,"threadId":codex_root,"turnId":"t1"}}});
+    let tag_script_path = d.dir.run.join("codex_tag.sh");
+    fs::write(
+        &tag_script_path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n%s\\n' '{init_line}' '{call_line}' | {BIN} mcp --db-path {} --agent-sock {} --http-sock {}\n",
+            d.dir.db.display(),
+            d.dir.agent_sock.display(),
+            d.dir.http_sock.display(),
+        ),
+    )
+    .unwrap();
+    writeln!(codex_in1, "sh {} 2>&1 | while IFS= read -r l; do echo \"MCP:$l\"; done; echo TAGGED", tag_script_path.display()).unwrap();
+    let mut mcp_lines = Vec::new();
+    loop {
+        let mut tline = String::new();
+        let n = codex_out1.read_line(&mut tline).unwrap();
+        assert!(n > 0, "codex_out1 EOF before TAGGED: {mcp_lines:?}");
+        if tline.trim() == "TAGGED" {
+            break;
+        }
+        mcp_lines.push(tline);
+    }
+
+    let (_, cx_list) = http_get(&d.dir.http_sock, "/v1/recipients?tag=codex.tag");
+    assert_eq!(cx_list["total"], 1, "O1a codex holder must be listed: {cx_list} (reg={reg_line1}, mcp_lines={mcp_lines:?})");
+
+    // O3e: healthy restart keeps codex tag row on codex:1 in session_tag (sweep_startup_tags preserves it)
+    d.stop();
+    d.spawn(BIN);
+    {
+        let db = rusqlite::Connection::open(&d.dir.db).unwrap();
+        let kept: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM session_tag WHERE id = ?1 AND harness = 'codex' AND reg = 'codex:1' AND tag = 'codex.tag'",
+                [codex_root],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "O3e: healthy restart must preserve codex:1 tag row");
+    }
+
+    // O3g: park (exit owner) and resume on new owner -> generation increments, tag dropped
+    drop(codex_in1);
+    let _ = codex_p1.wait();
+    let (mut codex_p2, _codex_out2, _reg_line2) = spawn_codex_owner(&d, codex_root, "resume");
+    let (_, cx_resumed) = http_get(&d.dir.http_sock, "/v1/recipients?tag=codex.tag");
+    assert_eq!(cx_resumed["total"], 0, "O3g codex resume drops old tag: {cx_resumed}");
+    let _ = codex_p2.kill();
+    let _ = codex_p2.wait();
+
+    // 3. O1a agy holder + O3f (agy takeover drops old tags)
+    let agy_id = "93333333-3333-4333-8333-333333333333";
+    let agy_presence_dir = d.dir.run.join("agy-presence");
+    fs::create_dir_all(&agy_presence_dir).unwrap();
+    let agy_lock_path = agy_presence_dir.join(format!("{agy_id}.lock"));
+    fs::write(&agy_lock_path, "").unwrap();
+    let spawn_agy_holder = |d: &Daemon, tag_to_add: Option<&str>| {
+        use std::os::unix::process::CommandExt;
+        let tag_step = tag_to_add.map_or_else(String::new, |t| format!("{BIN} tag add {t} --json 2>&1;"));
+        let script = format!(
+            "{BIN} register agy --sock {} 2>&1; {tag_step} echo AGY_READY; read _",
+            d.dir.register_sock.display()
+        );
+        let mut cmd = d.dir.cmd(agy_bin.to_str().unwrap());
+        let lock_c = std::ffi::CString::new(agy_lock_path.to_str().unwrap()).unwrap();
+        unsafe {
+            cmd.pre_exec(move || {
+                let fd = libc::open(lock_c.as_ptr(), libc::O_RDWR);
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if fd != 9 {
+                    if libc::dup2(fd, 9) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    libc::close(fd);
+                }
+                Ok(())
+            });
+        }
+        cmd.args(["-c", &script])
+            .env("ANTIGRAVITY_CONVERSATION_ID", agy_id)
+            .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33399")
+            .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-agy-test")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let mut lines = Vec::new();
+        loop {
+            let mut line = String::new();
+            let n = out.read_line(&mut line).unwrap();
+            assert!(n > 0, "agy holder EOF before AGY_READY: {lines:?}");
+            if line.trim() == "AGY_READY" {
+                break;
+            }
+            lines.push(line);
+        }
+        (child, lines)
+    };
+
+    let (mut agy1, agy1_lines) = spawn_agy_holder(&d, Some("agy.tag"));
+    let (_, agy_list) = http_get(&d.dir.http_sock, "/v1/recipients?tag=agy.tag");
+    assert_eq!(agy_list["total"], 1, "O1a agy holder must be listed: {agy_list} (agy1_lines={agy1_lines:?})");
+
+    // O3f: agy takeover by new process -> drops old tag
+    let _ = agy1.kill();
+    let _ = agy1.wait();
+    let (mut agy2, _agy2_lines) = spawn_agy_holder(&d, None);
+    let (_, agy_takeover) = http_get(&d.dir.http_sock, "/v1/recipients?tag=agy.tag");
+    assert_eq!(agy_takeover["total"], 0, "O3f agy takeover drops old tag: {agy_takeover}");
+    let _ = agy2.kill();
+    let _ = agy2.wait();
+}
+
+#[test]
 #[ignore = "p1pz compat CI runs with XMSG_PREV_BIN=912ca97a"]
 fn compat_912ca97a_oracles() {
     let prev =
@@ -939,12 +1338,24 @@ fn compat_912ca97a_oracles() {
     // O5f: re-pinned AgentClient::list against old daemon succeeds
     let self_exe = std::env::current_exe().unwrap();
     let dir_old = NodeDir::new("p1old");
+    let agy_old_bin = dir_old.run.join("agy-fixture");
+    fs::copy("/bin/sh", &agy_old_bin).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&agy_old_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let d_old = Daemon::start(
         dir_old,
         &prev,
         "OLD",
         None,
-        vec!["--svc-exe".into(), format!("bridge={}", self_exe.display())],
+        vec![
+            "--svc-exe".into(),
+            format!("bridge={}", self_exe.display()),
+            "--agy-exe".into(),
+            agy_old_bin.display().to_string(),
+        ],
     );
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -1180,6 +1591,181 @@ fn compat_912ca97a_oracles() {
             w_new.status.success(),
             "O5g new watch failed: {}",
             String::from_utf8_lossy(&w_new.stderr)
+        );
+    }
+
+    // O5h: new xmsg mcp under real Claude and agy fixture sessions against old daemon (912ca97a):
+    // assert mcp_start is accepted (status == "ok", not bad_request) and session registers and holds (kills M14).
+    {
+        let id_cl_old = "94444444-4444-4444-8444-444444444444";
+        let spy_sock = d_old.dir.run.join("spy-agent.sock");
+        let real_agent_sock = d_old.dir.agent_sock.clone();
+        let spy_listener = std::os::unix::net::UnixListener::bind(&spy_sock).unwrap();
+        let spy_handle = std::thread::spawn(move || {
+            let (mut client, _) = spy_listener.accept().unwrap();
+            let mut upstream = UnixStream::connect(&real_agent_sock).unwrap();
+            let mut cr = BufReader::new(client.try_clone().unwrap());
+            let mut ur = BufReader::new(upstream.try_clone().unwrap());
+            let mut req_line = String::new();
+            cr.read_line(&mut req_line).unwrap();
+            upstream.write_all(req_line.as_bytes()).unwrap();
+            upstream.flush().unwrap();
+            let mut resp_line = String::new();
+            ur.read_line(&mut resp_line).unwrap();
+            client.write_all(resp_line.as_bytes()).unwrap();
+            client.flush().unwrap();
+            let resp_v: Value = serde_json::from_str(&resp_line).unwrap();
+            assert_ne!(
+                resp_v.get("error").and_then(Value::as_str),
+                Some("bad_request"),
+                "O5h: 912ca97a daemon must not reject mcp_start as bad_request: req={req_line} resp={resp_v}"
+            );
+        });
+
+        let mcp_script = format!(
+            "read _; (echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"claude\",\"version\":\"1\"}}}}}}'; sleep 0.3) | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} >/dev/null 2>&1; echo MCP_DONE; read _",
+            d_old.dir.db.display(),
+            spy_sock.display(),
+            d_old.dir.http_sock.display(),
+        );
+        let mut sh = d_old.dir.cmd("sh");
+        sh.args(["-c", &mcp_script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut cl_child = sh.spawn().unwrap();
+        write_claude_session_file(&d_old.dir, cl_child.id(), id_cl_old);
+        let mut cl_in = cl_child.stdin.take().unwrap();
+        let mut cl_out = BufReader::new(cl_child.stdout.take().unwrap());
+        writeln!(cl_in, "go").unwrap();
+        let mut done_line = String::new();
+        cl_out.read_line(&mut done_line).unwrap();
+        assert_eq!(done_line.trim(), "MCP_DONE");
+        spy_handle.join().unwrap();
+
+        {
+            let db_old = rusqlite::Connection::open(&d_old.dir.db).unwrap();
+            let claims: i64 = db_old
+                .query_row(
+                    "SELECT COUNT(*) FROM instance_claims WHERE id = ?1 AND released = 0",
+                    [id_cl_old],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(claims, 1, "O5h: mcp_start must create an active instance_claims row on 912ca97a daemon");
+        }
+
+        let (_, old_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
+        assert!(
+            old_list["recipients"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["address"].as_str().is_some_and(|a| a.starts_with(&format!("{id_cl_old}@")))),
+            "O5h: Claude mcp_start must register session on 912ca97a daemon: {old_list}"
+        );
+        writeln!(cl_in, "bye").unwrap();
+        let _ = cl_child.wait();
+
+        // Agy fixture session against old daemon
+        let agy_old_id = "95555555-5555-4555-8555-555555555555";
+        let agy_old_presence = d_old.dir.run.join("agy-presence");
+        fs::create_dir_all(&agy_old_presence).unwrap();
+        let agy_old_lock = agy_old_presence.join(format!("{agy_old_id}.lock"));
+        fs::write(&agy_old_lock, "").unwrap();
+        let agy_script = format!(
+            "{BIN} register agy --sock {} >/dev/null && echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"agy\",\"version\":\"1\"}}}}}}' | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} >/dev/null 2>&1 && echo AGY_MCP_DONE; read _",
+            d_old.dir.register_sock.display(),
+            d_old.dir.db.display(),
+            d_old.dir.agent_sock.display(),
+            d_old.dir.http_sock.display(),
+        );
+        let mut agy_sh = d_old.dir.cmd(agy_old_bin.to_str().unwrap());
+        {
+            use std::os::unix::process::CommandExt;
+            let lock_c = std::ffi::CString::new(agy_old_lock.to_str().unwrap()).unwrap();
+            unsafe {
+                agy_sh.pre_exec(move || {
+                    let fd = libc::open(lock_c.as_ptr(), libc::O_RDWR);
+                    if fd < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if fd != 9 {
+                        if libc::dup2(fd, 9) < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        libc::close(fd);
+                    }
+                    Ok(())
+                });
+            }
+        }
+        agy_sh
+            .args(["-c", &agy_script])
+            .env("ANTIGRAVITY_CONVERSATION_ID", agy_old_id)
+            .env("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:33398")
+            .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-old-agy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut agy_child = agy_sh.spawn().unwrap();
+        let mut agy_in = agy_child.stdin.take().unwrap();
+        let mut agy_out = BufReader::new(agy_child.stdout.take().unwrap());
+        let mut al = String::new();
+        agy_out.read_line(&mut al).unwrap();
+        assert_eq!(al.trim(), "AGY_MCP_DONE", "O5h agy mcp_start against 912ca97a");
+        let (_, old_agy_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
+        assert!(
+            old_agy_list["recipients"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["address"].as_str().is_some_and(|a| a.starts_with(&format!("{agy_old_id}@")))),
+            "O5h: agy mcp_start must register session on 912ca97a daemon: {old_agy_list}"
+        );
+        writeln!(agy_in, "bye").unwrap();
+        let _ = agy_child.wait();
+    }
+
+    // O3h: Claude rollback to 912ca97a and re-upgrade: old tag neither applied nor counted.
+    {
+        let dir_rb = NodeDir::new("p1o3h");
+        let mut d_rb = Daemon::start(dir_rb, BIN, "RB", None, vec![]);
+        let id_rb = "96666666-6666-4666-8666-666666666666";
+        let guard_rb = spawn_tagged_claude(&d_rb.dir, id_rb, &["rb.tag"], None);
+        let (_, before_rb) = http_get(&d_rb.dir.http_sock, "/v1/recipients?tag=rb.tag");
+        assert_eq!(before_rb["total"], 1);
+
+        // Rollback to 912ca97a while holder exits (old daemon does not clean session_tag)
+        d_rb.stop();
+        d_rb.spawn(&prev);
+        drop(guard_rb);
+
+        // Re-upgrade to new BIN and start a fresh claim on the same id
+        d_rb.stop();
+        d_rb.spawn(BIN);
+        {
+            let db_rb = rusqlite::Connection::open(&d_rb.dir.db).unwrap();
+            let stale_rows: i64 = db_rb
+                .query_row(
+                    "SELECT COUNT(*) FROM session_tag WHERE id = ?1",
+                    [id_rb],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                stale_rows, 0,
+                "O3h: sweep_startup_tags must delete pre-rollback dead tag rows on re-upgrade"
+            );
+        }
+        let _guard_rb2 = spawn_tagged_claude(&d_rb.dir, id_rb, &[], None);
+        let (_, after_reup) = http_get(&d_rb.dir.http_sock, "/v1/recipients?tag=rb.tag");
+        assert_eq!(
+            after_reup["total"], 0,
+            "O3h: old tag from pre-rollback must not be counted after re-upgrade: {after_reup}"
         );
     }
 

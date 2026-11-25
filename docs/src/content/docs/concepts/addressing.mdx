@@ -52,7 +52,7 @@ xmsg always shows the attested `id@node` part whole.
 
 <Status id="xmsg.session-tags" />
 
-A **session tag** is a capability label (`1..=64` ASCII `[A-Za-z0-9._-]`, up to 8 per live registration) that a registered whole session attaches to itself via `tag(add?, remove?)` or `xmsg tag add|remove <NAME>`. Unlike a sender [label](/glossary/#label), a tag is not a display name on delivered messages and is never a `to` address for `send`. Unlike [session context tags](/reference/cli-and-mcp/#session-context-tags), session tags are not masked, have no staleness TTL, and carry a `tags` array on live whole-instance rows in `list` and `/fed/v2/sessions?v=3`.
+A **session tag** is a capability label (`^[a-z0-9][a-z0-9._-]{0,63}$`, up to 8 per live registration) that a registered whole session attaches to itself via `tag(add?, remove?)` or `xmsg tag add|remove <NAME>`. Unlike a sender [label](/glossary/#label), a tag is not a display name on delivered messages and is never a `to` address for `send`. Unlike [session context tags](/reference/cli-and-mcp/#session-context-tags), session tags are not masked, have no staleness TTL, and carry a `tags` array on live whole-instance rows in `list` and `/fed/v2/sessions?v=3`.
 
 ## Local resolution order
 

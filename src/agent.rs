@@ -1726,6 +1726,33 @@ fn handle_agent_tag(
     codex_thread: Option<&str>,
     codex_turn: Option<&str>,
 ) -> Result<serde_json::Value, AppError> {
+    handle_agent_tag_with_before_lock(
+        state,
+        caller_trace,
+        add,
+        remove,
+        session_id,
+        as_agent,
+        codex_session,
+        codex_thread,
+        codex_turn,
+        || {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_agent_tag_with_before_lock(
+    state: &AppState,
+    caller_trace: Result<CallerTrace, AppError>,
+    add: Option<String>,
+    remove: Option<String>,
+    session_id: Option<String>,
+    as_agent: Option<String>,
+    codex_session: Option<&str>,
+    codex_thread: Option<&str>,
+    codex_turn: Option<&str>,
+    before_lock: impl FnOnce(),
+) -> Result<serde_json::Value, AppError> {
     if session_id.is_some() {
         return Err(AppError::BadRequest(
             "'session_id' is not accepted on tag".to_string(),
@@ -1755,6 +1782,13 @@ fn handle_agent_tag(
             ));
         }
     };
+    let codex_owner = match &caller_trace {
+        Ok(CallerTrace::CodexOwner {
+            owner_pid,
+            owner_starttime,
+        }) => Some((*owner_pid as i64, owner_starttime.clone())),
+        _ => None,
+    };
     let caller = context_owner(
         state,
         caller_trace,
@@ -1769,6 +1803,7 @@ fn handle_agent_tag(
             "tag requires a whole session, not a subagent".to_string(),
         ));
     }
+    before_lock();
     let db = state
         .db
         .lock()
@@ -1795,17 +1830,20 @@ fn handle_agent_tag(
                     .map_err(|e| AppError::Internal(e.to_string()))?;
                 for claim in claims {
                     let claim = claim.map_err(|e| AppError::Internal(e.to_string()))?;
-                    if claim.address() == caller.session_id {
+                    if claim.address() == caller.session_id && claim.pid == caller.pid {
                         return Ok(Some(claim.reg()));
                     }
                 }
                 Ok(None)
             }
             "codex" => {
+                let Some((owner_pid, ref owner_starttime)) = codex_owner else {
+                    return Ok(None);
+                };
                 let gen: Option<i64> = db
                     .query_row(
-                        "SELECT generation FROM codex_roots WHERE root_id = ?1 AND active = 1 AND revoked = 0",
-                        [&caller.session_id],
+                        "SELECT generation FROM codex_roots WHERE root_id = ?1 AND owner_pid = ?2 AND owner_starttime = ?3 AND active = 1 AND revoked = 0",
+                        rusqlite::params![&caller.session_id, owner_pid, owner_starttime],
                         |row| row.get(0),
                     )
                     .ok();
@@ -1815,7 +1853,7 @@ fn handle_agent_tag(
                 let store = state.agy_store.read().unwrap();
                 Ok(store
                     .get(&caller.session_id)
-                    .filter(|info| !info.reg.is_empty())
+                    .filter(|info| !info.reg.is_empty() && info.pid == caller.pid)
                     .map(|info| info.reg.clone()))
             }
             _ => Ok(None),
@@ -3858,4 +3896,146 @@ pub fn run_codex_revoke(
         clear_client_unavailable_note(Some(&sock_path), Some(session_id.trim()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app_state() -> AppState {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        crate::storage::init_db(&connection).unwrap();
+        AppState {
+            sessions_dirs: vec![],
+            agy_config: Default::default(),
+            agy_store: crate::agy::new_agy_store(),
+            pi_store: crate::pi::new_pi_store(),
+            pi_notify_tx: tokio::sync::broadcast::channel(16).0,
+            svc_store: crate::svc::new_svc_store(),
+            svc_notify_tx: tokio::sync::broadcast::channel(16).0,
+            node_name: "tag-u3-test".into(),
+            max_body: 65536,
+            max_attachment_bytes: 65536,
+            request_counter: std::sync::atomic::AtomicU64::new(1),
+            db: Arc::new(std::sync::Mutex::new(connection)),
+            notify_tx: tokio::sync::broadcast::channel(16).0,
+            reply_ttl: std::time::Duration::from_secs(60),
+            idempotency_ttl: std::time::Duration::from_secs(60),
+            long_poll_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            fed_state: None,
+        }
+    }
+
+    fn count_session_tags(state: &AppState) -> i64 {
+        let db = state.db.lock().unwrap();
+        db.query_row("SELECT COUNT(*) FROM session_tag", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn u3_tag_refuses_when_registration_changes_before_lock() {
+        // 1. Claude re-claim between trace and db lock
+        let state = test_app_state();
+        let claude_id = "11111111-1111-4111-8111-111111111111";
+        {
+            let db = state.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO instance_claims (id, pid, proc_start, suffix, released, created_at) VALUES (?1, 1001, 'st1', 1, 0, 10)",
+                [claude_id],
+            )
+            .unwrap();
+        }
+        let caller = Session {
+            session_id: claude_id.to_string(),
+            name: Some("c1".into()),
+            pid: 1001,
+            cwd: "/".into(),
+            status: "idle".into(),
+            kind: "interactive".into(),
+            entrypoint: None,
+            version: None,
+            started_at: 10,
+            updated_at: 10,
+            harness: "claude".into(),
+            registered: Some(true),
+        };
+        let res = handle_agent_tag_with_before_lock(
+            &state,
+            Ok(CallerTrace::Session(caller)),
+            Some("review".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            || {
+                let db = state.db.lock().unwrap();
+                db.execute("UPDATE instance_claims SET released = 1 WHERE id = ?1", [claude_id])
+                    .unwrap();
+                db.execute(
+                    "INSERT INTO instance_claims (id, pid, proc_start, suffix, released, created_at) VALUES (?1, 2002, 'st2', 1, 0, 20)",
+                    [claude_id],
+                )
+                .unwrap();
+            },
+        );
+        assert!(matches!(res, Err(AppError::Denied(_))), "expected Denied on Claude re-claim, got {res:?}");
+        assert_eq!(count_session_tags(&state), 0);
+
+        // 2. Agy takeover between trace and db lock
+        let state = test_app_state();
+        let agy_id = "22222222-2222-4222-8222-222222222222";
+        {
+            let mut store = state.agy_store.write().unwrap();
+            store.insert(
+                agy_id.to_string(),
+                crate::agy::AgySessionInfo {
+                    session_key: agy_id.to_string(),
+                    conversation_id: agy_id.to_string(),
+                    pid: 3001,
+                    starttime: "3001".into(),
+                    label: Some("a1".into()),
+                    credentials: None,
+                    registered_at: 10,
+                    reg: "agy:mint1".into(),
+                },
+            );
+        }
+        let agy_caller = Session {
+            session_id: agy_id.to_string(),
+            name: Some("a1".into()),
+            pid: 3001,
+            cwd: "/".into(),
+            status: "idle".into(),
+            kind: "interactive".into(),
+            entrypoint: None,
+            version: None,
+            started_at: 10,
+            updated_at: 10,
+            harness: "agy".into(),
+            registered: Some(true),
+        };
+        let res = handle_agent_tag_with_before_lock(
+            &state,
+            Ok(CallerTrace::Session(agy_caller)),
+            Some("review".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            || {
+                let mut store = state.agy_store.write().unwrap();
+                if let Some(info) = store.get_mut(agy_id) {
+                    info.pid = 4002;
+                    info.starttime = "4002".into();
+                    info.reg = "agy:mint2".into();
+                }
+            },
+        );
+        assert!(matches!(res, Err(AppError::Denied(_))), "expected Denied on agy takeover, got {res:?}");
+        assert_eq!(count_session_tags(&state), 0);
+    }
 }

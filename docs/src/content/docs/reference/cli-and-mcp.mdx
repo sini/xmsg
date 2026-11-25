@@ -540,7 +540,7 @@ first reply.
 
 <Status id="xmsg.session-tags" />
 
-Adds or removes a capability tag (`1..=64` ASCII `[A-Za-z0-9._-]`, up to 8 per live registration) on your own calling session. Provide exactly one of `add` or `remove`; unknown arguments and `from` are refused.
+Adds or removes a capability tag (`^[a-z0-9][a-z0-9._-]{0,63}$`, up to 8 per live registration) on your own calling session. Provide exactly one of `add` or `remove`; unknown arguments and `from` are refused.
 
 - **Returns:** `{ status: "ok", address, tags }`.
 
