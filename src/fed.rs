@@ -3510,9 +3510,26 @@ impl FedState {
             crate::pairing::auth::Operation::Handoff => !peer_cfg.is_observe_only(),
         };
         if !allowed {
-            return Err(AppError::OpDenied(format!(
-                "operation {op:?} not allowed for peer '{peer_name}'",
-            )));
+            return Err(match op {
+                crate::pairing::auth::Operation::Send => {
+                    AppError::OpDenied("send operation not allowed for peer".to_string())
+                }
+                crate::pairing::auth::Operation::Reply => {
+                    AppError::OpDenied("reply operation not allowed for peer".to_string())
+                }
+                crate::pairing::auth::Operation::SessionList => {
+                    AppError::OpDenied("list operation not allowed for peer".to_string())
+                }
+                crate::pairing::auth::Operation::Forward => {
+                    AppError::NoForward("Forwarding cross-host is not permitted".to_string())
+                }
+                crate::pairing::auth::Operation::Relayed => {
+                    AppError::OpDenied("relayed messages not allowed for peer".to_string())
+                }
+                _ => AppError::OpDenied(format!(
+                    "operation {op:?} not allowed for peer '{peer_name}'"
+                )),
+            });
         }
         Ok(())
     }
