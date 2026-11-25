@@ -737,6 +737,34 @@ fn add_stalled_leaf_ack_checks(report: &mut Report, ages: &serde_json::Value) {
     }
 }
 
+async fn pairing(report: &mut Report, path: Option<&Path>) {
+    let Some(path) = path else {
+        return;
+    };
+    let Ok(value) = read_json(
+        path,
+        "http://localhost/v1/diagnostics/pairing",
+        MAX_FED_BODY,
+        Duration::from_secs(5),
+    )
+    .await
+    else {
+        return;
+    };
+    let Some(obj) = value.as_object() else {
+        return;
+    };
+    for (key, detail) in obj {
+        let status = match detail["status"].as_str() {
+            Some("pass") => Status::Pass,
+            Some("warn") => Status::Warn,
+            Some("fail") => Status::Fail,
+            _ => Status::Info,
+        };
+        report.add(key, status, detail.to_string(), None);
+    }
+}
+
 async fn federation(report: &mut Report, path: Option<&Path>, configured_names: &[String]) {
     let Some(path) = path else {
         unknown_federation(report, configured_names);
@@ -1068,6 +1096,7 @@ async fn inspect(args: &DoctorArgs) -> Report {
         &configured_peers,
     )
     .await;
+    pairing(&mut report, http.as_deref().filter(|_| http_good)).await;
     let enrollment_enabled = ca_application(
         &mut report,
         http.as_deref().filter(|_| http_good),

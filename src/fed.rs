@@ -1983,6 +1983,17 @@ pub fn split_peer_ref(r: &str) -> Option<(&str, &str)> {
 /// Serve start: cancels every open pairing intent (no ceremony survives a restart), then
 /// applies the store to the first policy generation. A failed cancel is logged and never
 /// blocks serving or revocation; an unreadable store still refuses to start.
+pub fn attach_pairing_reloader(fs: &FedState, reloader: &Arc<CredentialReloader>) {
+    crate::pairing::service::attach_reloader(fs, reloader);
+}
+
+pub fn attempt_pairing_startup_cancel(fs: &FedState) -> Result<usize, String> {
+    crate::pairing::service::pairing_runtime(fs)
+        .service
+        .attempt_startup_cancel(fs)
+        .map_err(|e| e.to_string())
+}
+
 pub fn startup_pairing_authority(
     conn: &rusqlite::Connection,
     peers: &mut PeersMap,

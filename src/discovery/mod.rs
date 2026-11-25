@@ -173,6 +173,12 @@ pub struct CandidateTable {
     entries: HashMap<(Source, SocketAddr), Candidate>,
 }
 
+impl CandidateTable {
+    pub fn addresses(&self) -> Vec<SocketAddr> {
+        self.entries.keys().map(|(_, addr)| *addr).collect()
+    }
+}
+
 /// Shared handle to the candidate table.
 pub type SharedCandidates = std::sync::Arc<std::sync::RwLock<CandidateTable>>;
 

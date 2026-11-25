@@ -111,6 +111,9 @@ enum Commands {
     /// Explicitly revoke or unregister a session (e.g. `--codex-session <P>`)
     Unregister(UnregisterArgs),
 
+    /// Manage manual peer-to-peer pairing
+    Pair(PairArgs),
+
     /// Load a peers file with every rule `serve` applies, and exit 0 or name the failure
     #[command(
         long_about = "Validate a peers file (the same rules `serve` applies at startup); exit 0 if valid, otherwise print the failing rule. Use it in CI or before a deploy."
@@ -636,6 +639,12 @@ fn main_from_args(
             if doctor::run(args)? {
                 std::process::exit(1);
             }
+        }
+        Commands::Pair(args) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(run_pair_command(args))?;
         }
         Commands::Install { adapter } => {
             if !run_install_adapter(adapter, xmsg::install::Action::Install) {
@@ -2082,9 +2091,16 @@ async fn run_serve(mut args: ServeArgs) -> Result<(), Box<dyn std::error::Error>
             );
 
             reloader_for_sighup = Some(reloader.clone());
+            xmsg::fed::attach_pairing_reloader(&fs, &reloader);
 
             if args.fed_reload_interval_secs > 0 {
                 reloader.start_watcher(Duration::from_secs(args.fed_reload_interval_secs));
+            }
+        }
+
+        {
+            if let Err(e) = xmsg::fed::attempt_pairing_startup_cancel(&fs) {
+                tracing::warn!("pairing startup cancel failed; ceremonies refused until watcher/retry succeeds: {e}");
             }
         }
 
@@ -2691,6 +2707,250 @@ async fn run_shutdown_drain(
 
     // 5. Log completion line and exit 0
     info!("shutdown complete, exiting cleanly");
+    Ok(())
+}
+
+#[derive(clap::Args, Debug)]
+struct PairArgs {
+    /// Unix HTTP socket path (defaults to XMSG_HTTP_SOCK or XMSG_DATA_DIR/http.sock)
+    #[arg(long, env = "XMSG_HTTP_SOCK")]
+    http_sock: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: PairCommand,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum PairCommand {
+    /// Print this node's canonical Ed25519 device ID for OOB sharing
+    Id {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Persist a responder intent and wait up to 120s for the peer to dial
+    Accept {
+        peer_id: String,
+        #[arg(long, default_value = "contact")]
+        profile: String,
+        #[arg(long = "target")]
+        targets: Vec<String>,
+        #[arg(long = "principal")]
+        principals: Vec<String>,
+        #[arg(long)]
+        expires: Option<String>,
+        #[arg(long)]
+        no_wait: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Persist an initiator intent and dial the peer
+    Start {
+        peer_id: String,
+        #[arg(long, default_value = "contact")]
+        profile: String,
+        #[arg(long = "target")]
+        targets: Vec<String>,
+        #[arg(long = "principal")]
+        principals: Vec<String>,
+        #[arg(long)]
+        expires: Option<String>,
+        #[arg(long = "address")]
+        addresses: Vec<std::net::SocketAddr>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a pending intent by intent ID or peer ID
+    Cancel {
+        target: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List pairing grants, pending intents, blocks, and authority revisions
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a manual pairing grant by grant ID
+    Remove {
+        grant_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Durably block a peer device ID across all paths
+    Block {
+        peer_id: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Lift a device block under the interim no-restore proof
+    Unblock {
+        peer_id: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+fn parse_duration_secs(spec: &str) -> Result<i64, String> {
+    let trimmed = spec.trim();
+    if let Some(s) = trimmed.strip_suffix('s') {
+        s.parse::<i64>().map_err(|e| format!("invalid duration '{spec}': {e}"))
+    } else if let Some(m) = trimmed.strip_suffix('m') {
+        m.parse::<i64>()
+            .map(|v| v * 60)
+            .map_err(|e| format!("invalid duration '{spec}': {e}"))
+    } else if let Some(h) = trimmed.strip_suffix('h') {
+        h.parse::<i64>()
+            .map(|v| v * 3600)
+            .map_err(|e| format!("invalid duration '{spec}': {e}"))
+    } else if let Some(d) = trimmed.strip_suffix('d') {
+        d.parse::<i64>()
+            .map(|v| v * 86400)
+            .map_err(|e| format!("invalid duration '{spec}': {e}"))
+    } else {
+        trimmed
+            .parse::<i64>()
+            .map_err(|e| format!("invalid duration '{spec}': {e}"))
+    }
+}
+
+async fn run_pair_command(args: PairArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let sock = match args.http_sock {
+        Some(p) => p,
+        None => xmsg::http::default_http_sock_path()?,
+    };
+    let client = reqwest::Client::builder()
+        .unix_socket(sock)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(130))
+        .build()?;
+
+    let now_utc = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+
+    let (resp, json_out) = match args.command {
+        PairCommand::Id { json } => (client.get("http://localhost/v1/pairing/id").send().await?, json),
+        PairCommand::List { json } => {
+            (client.get("http://localhost/v1/pairing/list").send().await?, json)
+        }
+        PairCommand::Accept {
+            peer_id,
+            profile,
+            targets,
+            principals,
+            expires,
+            no_wait,
+            json,
+        } => {
+            let grant_not_after = match expires {
+                Some(ref spec) => Some(now_utc + parse_duration_secs(spec)?),
+                None => None,
+            };
+            let body = serde_json::json!({
+                "peer_id": peer_id,
+                "profile": profile,
+                "targets": targets,
+                "principals": principals,
+                "grant_not_after": grant_not_after,
+                "wait": !no_wait,
+            });
+            (
+                client
+                    .post("http://localhost/v1/pairing/accept")
+                    .json(&body)
+                    .send()
+                    .await?,
+                json,
+            )
+        }
+        PairCommand::Start {
+            peer_id,
+            profile,
+            targets,
+            principals,
+            expires,
+            addresses,
+            json,
+        } => {
+            let grant_not_after = match expires {
+                Some(ref spec) => Some(now_utc + parse_duration_secs(spec)?),
+                None => None,
+            };
+            let body = serde_json::json!({
+                "peer_id": peer_id,
+                "profile": profile,
+                "targets": targets,
+                "principals": principals,
+                "grant_not_after": grant_not_after,
+                "addresses": addresses,
+            });
+            (
+                client
+                    .post("http://localhost/v1/pairing/start")
+                    .json(&body)
+                    .send()
+                    .await?,
+                json,
+            )
+        }
+        PairCommand::Cancel { target, json } => (
+            client
+                .post("http://localhost/v1/pairing/cancel")
+                .json(&serde_json::json!({ "target": target }))
+                .send()
+                .await?,
+            json,
+        ),
+        PairCommand::Remove { grant_id, json } => (
+            client
+                .post("http://localhost/v1/pairing/remove")
+                .json(&serde_json::json!({ "target": grant_id }))
+                .send()
+                .await?,
+            json,
+        ),
+        PairCommand::Block {
+            peer_id,
+            note: _,
+            json,
+        } => (
+            client
+                .post("http://localhost/v1/pairing/block")
+                .json(&serde_json::json!({ "target": peer_id }))
+                .send()
+                .await?,
+            json,
+        ),
+        PairCommand::Unblock { peer_id, json } => (
+            client
+                .post("http://localhost/v1/pairing/unblock")
+                .json(&serde_json::json!({ "target": peer_id }))
+                .send()
+                .await?,
+            json,
+        ),
+    };
+
+    let status = resp.status();
+    let text = resp.text().await?;
+    if json_out {
+        println!("{text}");
+    } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(id) = v.get("device_id").and_then(|d| d.as_str()) {
+            println!("{id}");
+        } else {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+    } else {
+        println!("{text}");
+    }
+    if !status.is_success() {
+        eprintln!("{text}");
+        std::process::exit(1);
+    }
     Ok(())
 }
 

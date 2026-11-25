@@ -166,6 +166,15 @@ pub fn build_unix_router_with_enrollment(
                     "/v1/harnesses/{name}/revoke",
                     post(harnesses_revoke_handler),
                 )
+                .route("/v1/pairing/id", get(pairing_id_handler))
+                .route("/v1/pairing/list", get(pairing_list_handler))
+                .route("/v1/diagnostics/pairing", get(pairing_diagnostics_handler))
+                .route("/v1/pairing/accept", post(pairing_accept_handler))
+                .route("/v1/pairing/start", post(pairing_start_handler))
+                .route("/v1/pairing/cancel", post(pairing_cancel_handler))
+                .route("/v1/pairing/remove", post(pairing_remove_handler))
+                .route("/v1/pairing/block", post(pairing_block_handler))
+                .route("/v1/pairing/unblock", post(pairing_unblock_handler))
                 .layer(DefaultBodyLimit::max(4096))
                 .with_state(state),
         )
@@ -204,6 +213,279 @@ fn require_local_non_plugin_owner(
         }
     }
     Ok(())
+}
+
+fn require_local_positive_non_plugin_owner(
+    state: &AppState,
+    peer: &PeerInfo,
+    action: &str,
+) -> Result<(), AppError> {
+    let Some(cred) = peer.as_ref().and_then(|p| p.0 .0.peer.as_ref()) else {
+        return Err(AppError::Denied(format!(
+            "pairing.caller_indeterminate: {action} requires a local same-UID Unix connection"
+        )));
+    };
+    if cred.uid != crate::agent::current_uid() {
+        return Err(AppError::Denied(format!(
+            "pairing.caller_indeterminate: {action} requires a same-UID Unix connection"
+        )));
+    }
+    let Some(pid) = cred.pid else {
+        return Err(AppError::Denied(format!(
+            "pairing.caller_indeterminate: caller PID unavailable for {action}"
+        )));
+    };
+    let starttime = crate::process::starttime(&state.agy_config.proc_root, pid).map_err(|_| {
+        AppError::Denied(format!(
+            "pairing.caller_indeterminate: caller start time unavailable for {action}"
+        ))
+    })?;
+    let conn = state.db.lock().map_err(|_| {
+        AppError::Denied(format!(
+            "pairing.caller_indeterminate: plugin lookup unavailable for {action}"
+        ))
+    })?;
+    let is_plugin = crate::plugin::is_plugin_process(&conn, pid, &starttime).map_err(|_| {
+        AppError::Denied(format!(
+            "pairing.caller_indeterminate: plugin lookup failed for {action}"
+        ))
+    })?;
+    if is_plugin {
+        return Err(AppError::Denied(format!(
+            "pairing.caller_indeterminate: plugin processes cannot invoke {action}"
+        )));
+    }
+    Ok(())
+}
+
+fn pairing_fed_and_runtime(
+    state: &AppState,
+) -> Result<(Arc<crate::fed::FedState>, Arc<crate::pairing::service::PairingRuntime>), AppError> {
+    let fed = state
+        .fed_state
+        .clone()
+        .ok_or_else(|| AppError::ServiceUnavailable("federation is not enabled on this daemon".into()))?;
+    let rt = crate::pairing::service::pairing_runtime(&fed);
+    Ok((fed, rt))
+}
+
+fn map_pairing_error(err: crate::pairing::budgets::PairingError) -> AppError {
+    use crate::pairing::budgets::PairingError;
+    match err {
+        PairingError::CallerIndeterminate(_) => AppError::Denied(err.to_string()),
+        PairingError::NotFound(_) => AppError::NotFoundDetail(err.to_string()),
+        PairingError::InvalidDeviceId(_)
+        | PairingError::TargetsRequired(_)
+        | PairingError::KeyAlgorithm(_)
+        | PairingError::LegacyConfigOwned(_)
+        | PairingError::UnblockWouldRestore(_) => AppError::BadRequest(err.to_string()),
+        PairingError::ReloadFailed(_) | PairingError::Internal(_) => {
+            AppError::Internal(err.to_string())
+        }
+        _ => AppError::OpDenied(err.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PairingIntentBody {
+    peer_id: String,
+    #[serde(default = "default_pairing_profile")]
+    profile: String,
+    #[serde(default)]
+    targets: Vec<String>,
+    #[serde(default)]
+    principals: Vec<String>,
+    grant_not_after: Option<i64>,
+    #[serde(default)]
+    addresses: Vec<std::net::SocketAddr>,
+    #[serde(default)]
+    wait: bool,
+}
+
+fn default_pairing_profile() -> String {
+    "contact".to_string()
+}
+
+#[derive(serde::Deserialize)]
+struct PairingTargetBody {
+    target: String,
+}
+
+async fn pairing_id_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_non_plugin_owner(&state, &peer, "pairing id")?;
+    let (fed, rt) = pairing_fed_and_runtime(&state)?;
+    let id = rt.service.own_device_id(&fed).map_err(map_pairing_error)?;
+    Ok(Json(json!({ "device_id": id.to_device_id_string() })))
+}
+
+async fn pairing_list_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_non_plugin_owner(&state, &peer, "pairing list")?;
+    let (fed, rt) = pairing_fed_and_runtime(&state)?;
+    let body = rt
+        .service
+        .list_state(&fed)
+        .await
+        .map_err(map_pairing_error)?;
+    Ok(Json(body))
+}
+
+async fn pairing_diagnostics_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_non_plugin_owner(&state, &peer, "pairing diagnostics")?;
+    let (fed, rt) = pairing_fed_and_runtime(&state)?;
+    let body = rt
+        .service
+        .diagnostics(&fed, !fed.is_leaf)
+        .await
+        .map_err(map_pairing_error)?;
+    Ok(Json(body))
+}
+
+async fn pairing_accept_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    Json(body): Json<PairingIntentBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_positive_non_plugin_owner(&state, &peer, "pair accept")?;
+    let (fed, rt) = pairing_fed_and_runtime(&state)?;
+    let profile = crate::pairing::codec::PairingProfile::parse(&body.profile)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let (intent, reconfirmed) = rt
+        .service
+        .create_intent(
+            &fed,
+            &body.peer_id,
+            crate::pairing::service::IntentRole::Responder,
+            profile,
+            body.targets,
+            body.principals,
+            body.grant_not_after,
+        )
+        .await
+        .map_err(map_pairing_error)?;
+    if body.wait && !reconfirmed {
+        let summary = rt
+            .service
+            .wait_for_responder(&intent)
+            .await
+            .map_err(map_pairing_error)?;
+        return Ok(Json(serde_json::to_value(summary).unwrap()));
+    }
+    Ok(Json(json!({
+        "intent_id": hex::encode(intent.intent_id),
+        "reconfirmed": reconfirmed,
+        "role": "responder",
+    })))
+}
+
+async fn pairing_start_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    Json(body): Json<PairingIntentBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_positive_non_plugin_owner(&state, &peer, "pair start")?;
+    let (fed, rt) = pairing_fed_and_runtime(&state)?;
+    let profile = crate::pairing::codec::PairingProfile::parse(&body.profile)
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let (intent, reconfirmed) = rt
+        .service
+        .create_intent(
+            &fed,
+            &body.peer_id,
+            crate::pairing::service::IntentRole::Initiator,
+            profile,
+            body.targets,
+            body.principals,
+            body.grant_not_after,
+        )
+        .await
+        .map_err(map_pairing_error)?;
+    if reconfirmed && body.addresses.is_empty() {
+        return Ok(Json(json!({
+            "intent_id": hex::encode(intent.intent_id),
+            "reconfirmed": true,
+            "role": "initiator",
+        })));
+    }
+    let addrs = if body.addresses.is_empty() {
+        fed.discovery.candidates.read().unwrap().addresses()
+    } else {
+        body.addresses
+    };
+    let summary = rt
+        .service
+        .run_initiator_and_wait(&fed, intent, addrs)
+        .await
+        .map_err(map_pairing_error)?;
+    Ok(Json(serde_json::to_value(summary).unwrap()))
+}
+
+async fn pairing_cancel_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    Json(body): Json<PairingTargetBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_positive_non_plugin_owner(&state, &peer, "pair cancel")?;
+    let (fed, rt) = pairing_fed_and_runtime(&state)?;
+    let cancelled = rt
+        .service
+        .cancel_intent(&fed, &body.target)
+        .await
+        .map_err(map_pairing_error)?;
+    Ok(Json(json!({ "cancelled": cancelled })))
+}
+
+async fn pairing_remove_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    Json(body): Json<PairingTargetBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_positive_non_plugin_owner(&state, &peer, "pair remove")?;
+    let (fed, rt) = pairing_fed_and_runtime(&state)?;
+    let out = rt
+        .service
+        .remove_grant(&fed, &body.target)
+        .await
+        .map_err(map_pairing_error)?;
+    Ok(Json(out))
+}
+
+async fn pairing_block_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    Json(body): Json<PairingTargetBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_positive_non_plugin_owner(&state, &peer, "pair block")?;
+    let (fed, rt) = pairing_fed_and_runtime(&state)?;
+    let out = rt
+        .service
+        .block_device(&fed, &body.target)
+        .await
+        .map_err(map_pairing_error)?;
+    Ok(Json(serde_json::to_value(out).unwrap()))
+}
+
+async fn pairing_unblock_handler(
+    State(state): State<Arc<AppState>>,
+    peer: PeerInfo,
+    Json(body): Json<PairingTargetBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_local_positive_non_plugin_owner(&state, &peer, "pair unblock")?;
+    let (fed, rt) = pairing_fed_and_runtime(&state)?;
+    let out = rt
+        .service
+        .unblock_device(&fed, &body.target)
+        .await
+        .map_err(map_pairing_error)?;
+    Ok(Json(serde_json::to_value(out).unwrap()))
 }
 
 async fn harnesses_reload_handler(
