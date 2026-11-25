@@ -1155,6 +1155,7 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
     let spawn_codex_owner = |d: &Daemon, root_id: &str, source: &str| {
         use std::os::unix::process::CommandExt;
         let mut cmd = std::process::Command::new(&codex_bin);
+        cmd.arg0("sh");
         let lock_c = std::ffi::CString::new(lock_path.to_str().unwrap()).unwrap();
         unsafe {
             cmd.pre_exec(move || {
@@ -1273,6 +1274,7 @@ fn o3_claude_codex_agy_holders_and_lifecycle() {
             d.dir.register_sock.display()
         );
         let mut cmd = d.dir.cmd(agy_bin.to_str().unwrap());
+        cmd.arg0("sh");
         let lock_c = std::ffi::CString::new(agy_lock_path.to_str().unwrap()).unwrap();
         unsafe {
             cmd.pre_exec(move || {
@@ -1674,7 +1676,7 @@ fn compat_912ca97a_oracles() {
         let agy_old_lock = agy_old_presence.join(format!("{agy_old_id}.lock"));
         fs::write(&agy_old_lock, "").unwrap();
         let agy_script = format!(
-            "{BIN} register agy --sock {} >/dev/null && echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"agy\",\"version\":\"1\"}}}}}}' | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} >/dev/null 2>&1 && echo AGY_MCP_DONE; read _",
+            "{BIN} register agy --sock {} 2>&1 && (echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"agy\",\"version\":\"1\"}}}}}}'; sleep 0.3) | {BIN} mcp --db-path {} --agent-sock {} --http-sock {} 2>&1 && echo AGY_MCP_DONE; read _",
             d_old.dir.register_sock.display(),
             d_old.dir.db.display(),
             d_old.dir.agent_sock.display(),
@@ -1683,6 +1685,7 @@ fn compat_912ca97a_oracles() {
         let mut agy_sh = d_old.dir.cmd(agy_old_bin.to_str().unwrap());
         {
             use std::os::unix::process::CommandExt;
+            agy_sh.arg0("sh");
             let lock_c = std::ffi::CString::new(agy_old_lock.to_str().unwrap()).unwrap();
             unsafe {
                 agy_sh.pre_exec(move || {
@@ -1710,13 +1713,26 @@ fn compat_912ca97a_oracles() {
             .env("ANTIGRAVITY_CSRF_TOKEN", "csrf-old-agy")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut agy_child = agy_sh.spawn().unwrap();
         let mut agy_in = agy_child.stdin.take().unwrap();
         let mut agy_out = BufReader::new(agy_child.stdout.take().unwrap());
-        let mut al = String::new();
-        agy_out.read_line(&mut al).unwrap();
-        assert_eq!(al.trim(), "AGY_MCP_DONE", "O5h agy mcp_start against 912ca97a");
+        let mut agy_err = agy_child.stderr.take().unwrap();
+        let mut agy_lines = Vec::new();
+        loop {
+            let mut al = String::new();
+            let n = agy_out.read_line(&mut al).unwrap();
+            if n == 0 {
+                let mut err_s = String::new();
+                let _ = std::io::Read::read_to_string(&mut agy_err, &mut err_s);
+                let st = agy_child.try_wait();
+                panic!("O5h agy mcp_start against 912ca97a EOF: lines={agy_lines:?} stderr={err_s} status={st:?}");
+            }
+            if al.trim() == "AGY_MCP_DONE" {
+                break;
+            }
+            agy_lines.push(al);
+        }
         let (_, old_agy_list) = http_get(&d_old.dir.http_sock, "/v1/recipients");
         assert!(
             old_agy_list["recipients"]
