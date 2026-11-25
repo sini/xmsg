@@ -1014,4 +1014,135 @@ mod tests {
         assert!(res.is_err());
         assert!(key_alg_flag.load(Ordering::SeqCst));
     }
+
+    #[tokio::test]
+    async fn q2_15_reserve_capacity_failure_refuses_before_signing_receipt() {
+        let (cert_i, key_i, ring_i, id_i, spki_i) = gen_ed25519_cert();
+        let (cert_r, key_r, ring_r, id_r, spki_r) = gen_ed25519_cert();
+        let (client_cfg, _) = build_pairing_client_config(cert_i, key_i, id_r, None).unwrap();
+        let (server_cfg, _) =
+            build_pairing_server_config(cert_r, key_r, Arc::new(move |id| *id == id_i), None)
+                .unwrap();
+        let (client_io, server_io) = tokio::io::duplex(32768);
+        let connector = TlsConnector::from(client_cfg);
+        let acceptor = TlsAcceptor::from(server_cfg);
+        let dns = ServerName::try_from("xmsg-pair.local").unwrap();
+        let now_utc = unix_now_u32();
+        let exp = ExposurePolicy {
+            profile: PairingProfile::OwnerDevice,
+            target_selectors: vec!["*".to_owned()],
+            principal_selectors: vec!["*".to_owned()],
+            max_body_bytes: 65536,
+            max_attachment_bytes: 65536,
+            rate_burst: 10,
+            rate_per_minute: 60,
+        };
+        let offer_i = Offer {
+            profile: PairingProfile::OwnerDevice,
+            grant_not_after: None,
+            exposure_policy_sha256: exp.sha256().unwrap(),
+        };
+        let offer_r = Offer {
+            profile: PairingProfile::OwnerDevice,
+            grant_not_after: None,
+            exposure_policy_sha256: exp.sha256().unwrap(),
+        };
+        let srv_fut = async {
+            let mut tls = acceptor.accept(server_io).await.unwrap();
+            let exporter = export_pairing_keying_material(tls.get_ref().1).unwrap();
+            let inputs = ResponderInputs {
+                own_id: id_r,
+                peer_id: id_i,
+                own_spki: &spki_r,
+                peer_spki: &spki_i,
+                offer_r,
+                policy_r: 1,
+                intent_id: [1u8; 16],
+                grant_id: [2u8; 16],
+                signing_key: &ring_r,
+                exporter,
+                deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+                start_mono_secs: 100,
+                now_utc,
+            };
+            execute_responder_exchange(&mut tls, inputs, |_, _| Ok(()), |_| Ok(())).await
+        };
+        let cli_fut = async {
+            let mut tls = connector.connect(dns, client_io).await.unwrap();
+            let exporter = export_pairing_keying_material(tls.get_ref().1).unwrap();
+            let inputs = InitiatorInputs {
+                own_id: id_i,
+                peer_id: id_r,
+                own_spki: &spki_i,
+                peer_spki: &spki_r,
+                offer_i,
+                policy_i: 1,
+                intent_id: [3u8; 16],
+                grant_id: [4u8; 16],
+                signing_key: &ring_i,
+                exporter,
+                deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+                start_mono_secs: 100,
+                now_utc,
+            };
+            execute_initiator_exchange(&mut tls, inputs, |_, _| {
+                Err(PairingError::GrantsFull("cap 1024".into()))
+            })
+            .await
+        };
+        let (_, cli_res) = tokio::join!(srv_fut, cli_fut);
+        assert!(matches!(cli_res, Err(PairingError::GrantsFull(_))));
+    }
+
+    #[test]
+    fn q2_10_mismatched_exposure_digest_in_receipt_is_rejected() {
+        let (_, _, ring_i, id_i, spki_i) = gen_ed25519_cert();
+        let (_, _, _, id_r, _) = gen_ed25519_cert();
+        let exporter = [0x44u8; 32];
+        let txn_id = [0x55u8; 32];
+        let now = 1_700_000_100u32;
+        let receipt = Receipt {
+            signer_role: SignerRole::Initiator,
+            signer_id: id_i,
+            subject_id: id_r,
+            transaction_id: txn_id,
+            grant_id: [0x66u8; 16],
+            profile: PairingProfile::Contact,
+            grant_not_after: None,
+            exposure_policy_sha256: [0xAAu8; 32],
+            policy_revision: 1,
+            ceremony_expires_utc: now + 120,
+            issued_utc: now,
+            provenance: crate::pairing::auth::PROVENANCE_MANUAL.to_string(),
+        };
+        let bytes = build_signed_receipt(&receipt, &exporter, &ring_i).unwrap();
+        let ctx = ReceiptVerificationContext {
+            id_i,
+            id_r,
+            spki_i: &spki_i,
+            spki_r: &spki_i,
+            offer_i: Offer {
+                profile: PairingProfile::Contact,
+                grant_not_after: None,
+                exposure_policy_sha256: [0xBBu8; 32],
+            },
+            offer_r: Offer {
+                profile: PairingProfile::OwnerDevice,
+                grant_not_after: None,
+                exposure_policy_sha256: [0xCCu8; 32],
+            },
+            created_utc: now,
+            ceremony_expires_utc: now + 120,
+            exporter,
+            transaction_id: txn_id,
+            now_utc: now,
+            current_policy_i: 1,
+            current_policy_r: 1,
+            blocked: false,
+            revoked: false,
+            bilateral: true,
+        };
+        let err = parse_and_verify_receipt(&bytes, &ctx).unwrap_err();
+        assert!(err.to_string().contains("exposure_policy_sha256"));
+    }
 }

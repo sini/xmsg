@@ -63,7 +63,7 @@ jobs:
   pairing-acceptance:
     if: ${{ !inputs.client_build_probe && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: 4
     steps:
@@ -78,6 +78,8 @@ jobs:
           cargo test --locked --features test-hooks --test pairing_ceremony
       - name: Run real two-daemon netns acceptance gate
         run: python3 scripts/pairing-two-daemon-acceptance.py target/debug/xmsg
+      - name: Run PR 4 pairing mutant gate
+        run: python3 scripts/pairing-pr4-mutants.py
 
   msrv:
     runs-on: ubuntu-latest

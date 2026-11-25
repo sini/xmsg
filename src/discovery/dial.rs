@@ -69,8 +69,12 @@ async fn connect(
         return Err(AppError::PeerRejected("discovery policy changed".into()));
     }
     let connector = crate::fed::make_tls_connector_for_policy(chain, key, peer, policy.clone())?;
-    let name =
-        ServerName::try_from(peer.name.clone()).map_err(|e| AppError::Internal(e.to_string()))?;
+    let name = if peer.name.starts_with("xmsg-spki1:") {
+        ServerName::try_from("xmsg-pair.local".to_string())
+            .map_err(|e| AppError::Internal(e.to_string()))?
+    } else {
+        ServerName::try_from(peer.name.clone()).map_err(|e| AppError::Internal(e.to_string()))?
+    };
     let tcp = TcpStream::connect(address)
         .await
         .map_err(|e| AppError::PeerUnreachable(format!("connecting to {}: {e}", peer.name)))?;

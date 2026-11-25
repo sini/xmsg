@@ -605,7 +605,18 @@ pub fn remove_with_marks(
     if let Some(reg) = revocations {
         reg.insert_mark(mark_scope.clone(), revision);
     }
-    match tx.commit() {
+    let commit_res = tx.commit().map_err(StoreError::from);
+    #[cfg(any(test, feature = "test-hooks"))]
+    let commit_res = if commit_res.is_ok()
+        && revocations.is_some_and(|r| {
+            r.inject_commit_io_error
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        }) {
+        Err(StoreError::Invalid("injected post-write COMMIT I/O error"))
+    } else {
+        commit_res
+    };
+    match commit_res {
         Ok(()) => Ok(revision),
         Err(err) => {
             if let Some(reg) = revocations {
@@ -615,7 +626,7 @@ pub fn remove_with_marks(
                 }
                 reg.drop_mark(&mark_scope, revision);
             }
-            Err(err.into())
+            Err(err)
         }
     }
 }
@@ -647,7 +658,18 @@ pub fn block_device_with_marks(
     if let Some(reg) = revocations {
         reg.insert_mark(mark_scope.clone(), revision);
     }
-    match tx.commit() {
+    let commit_res = tx.commit().map_err(StoreError::from);
+    #[cfg(any(test, feature = "test-hooks"))]
+    let commit_res = if commit_res.is_ok()
+        && revocations.is_some_and(|r| {
+            r.inject_commit_io_error
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        }) {
+        Err(StoreError::Invalid("injected post-write COMMIT I/O error"))
+    } else {
+        commit_res
+    };
+    match commit_res {
         Ok(()) => Ok(revision),
         Err(err) => {
             if let Some(reg) = revocations {
@@ -657,7 +679,7 @@ pub fn block_device_with_marks(
                 }
                 reg.drop_mark(&mark_scope, revision);
             }
-            Err(err.into())
+            Err(err)
         }
     }
 }
@@ -921,6 +943,8 @@ struct RevocationInner {
 #[derive(Default)]
 pub struct RevocationRegistry {
     inner: Mutex<RevocationInner>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub inject_commit_io_error: std::sync::atomic::AtomicBool,
 }
 
 impl RevocationRegistry {

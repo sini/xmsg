@@ -329,6 +329,40 @@ assert list_a["installed_revision"] == list_a["committed_revision"] >= 1
 assert list_b["installed_revision"] == list_b["committed_revision"] >= 1
 assert len(list_a["grants"]) == 1 and len(list_b["grants"]) == 1
 
+# Q2-7a & Q2-9 BY EFFECT: B->A send to target 'svc-a' is authorized by A (reaches recipient lookup, not op_denied);
+# 'other' is denied by Q2-9 target enforcement.
+import http.client
+
+def unix_post(sock_path, path, payload):
+    class UnixConn(http.client.HTTPConnection):
+        def connect(self):
+            import socket as _s
+            s = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+            s.connect(sock_path)
+            self.sock = s
+    conn = UnixConn("localhost")
+    conn.request("POST", path, json.dumps(payload), {{"Content-Type": "application/json"}})
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8", "replace")
+    return resp.status, body
+
+st_send_ok, body_send_ok = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "hello-q2-7a"}})
+assert "not allowed" not in body_send_ok.lower() and "op_denied" not in body_send_ok.lower() and "no address" not in body_send_ok.lower() and "unknown peer" not in body_send_ok.lower() and "bad_request" not in body_send_ok.lower(), f"Q2-7a first send B->A failed: {{st_send_ok}} {{body_send_ok}}"
+
+st_send_other, body_send_other = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"other@{{id_a}}", "text": "deny-q2-9"}})
+assert st_send_other >= 400 and ("not allowed" in body_send_other.lower() or "denied" in body_send_other.lower()), f"Q2-9 send to unlisted target 'other' unexpectedly succeeded: {{st_send_other}} {{body_send_other}}"
+
+# Revocation + nothing revives BY EFFECT: block B on A -> B->A send refused; remove + unblock -> still refused.
+subprocess.run([xmsg, "pair", "--http-sock", sock_a, "block", id_b], check=True, capture_output=True)
+st_after_blk, body_after_blk = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "blocked"}})
+assert st_after_blk >= 400, f"revoked send after block unexpectedly succeeded: {{st_after_blk}} {{body_after_blk}}"
+
+grant_a_hex = list_a["grants"][0]["grant_id"]
+subprocess.run([xmsg, "pair", "--http-sock", sock_a, "remove", grant_a_hex], check=True, capture_output=True)
+subprocess.run([xmsg, "pair", "--http-sock", sock_a, "unblock", id_b], check=True, capture_output=True)
+st_after_unblk, body_after_unblk = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "nothing-revives"}})
+assert st_after_unblk >= 400, f"nothing-revives send after remove+unblock unexpectedly succeeded: {{st_after_unblk}} {{body_after_unblk}}"
+
 # Q2-16: block A on B, then unblock fails pairing.unblock_would_restore while grant exists; remove then unblock succeeds
 subprocess.run([xmsg, "pair", "--http-sock", sock_b, "block", id_a], check=True, capture_output=True)
 unblock_fail = subprocess.run([xmsg, "pair", "--http-sock", sock_b, "unblock", id_a], capture_output=True, text=True)
@@ -340,6 +374,7 @@ print("two-daemon-driver:ok")
 """
 
         if use_unpriv:
+            print("isolation:unshare-urn")
             driver_path = root / "driver.py"
             driver_path.write_text(driver)
             script = f"""
@@ -378,6 +413,7 @@ trap 'kill "$srv_a" "$srv_b" "$ns_b_pid" 2>/dev/null || true' EXIT
 """
             subprocess.run(["unshare", "-Urn", "bash", "-c", script], check=True)
         else:
+            print("isolation:sudo-ip-netns")
             user = os.environ.get("USER") or subprocess.check_output(["id", "-un"], text=True).strip()
             suffix = str(os.getpid())
             ns_a, ns_b = f"xmsg-acc-a-{suffix}", f"xmsg-acc-b-{suffix}"
@@ -430,18 +466,39 @@ trap 'kill "$srv_a" "$srv_b" "$ns_b_pid" 2>/dev/null || true' EXIT
                 subprocess.run(["sudo", "ip", "netns", "del", ns_a], capture_output=True)
                 subprocess.run(["sudo", "ip", "netns", "del", ns_b], capture_output=True)
 
-        # Independent verification of ReceiptI and ReceiptR in Node A's store (outside xmsg codec).
+        # Independent verification of ReceiptI, ReceiptR, key 12 (exporter), and key 8 (E digest) in BOTH stores.
         conn_a = sqlite3.connect(db_a)
-        row = conn_a.execute(
-            "SELECT exporter, receipt_local, receipt_remote FROM pairing_grants WHERE provenance='manual_authenticated_oob'"
+        conn_b = sqlite3.connect(db_b)
+        row_a = conn_a.execute(
+            "SELECT exporter, receipt_local, receipt_remote, exposure, issuer, subject FROM pairing_grants WHERE provenance='manual_authenticated_oob'"
         ).fetchone()
-        assert row is not None, "no manual grant stored on Node A"
-        exporter, receipt_local, receipt_remote = row
+        row_b = conn_b.execute(
+            "SELECT exporter, receipt_local, receipt_remote, exposure, issuer, subject FROM pairing_grants WHERE provenance='manual_authenticated_oob'"
+        ).fetchone()
+        assert row_a is not None and row_b is not None, "manual grant missing in store"
+        exp_a, rl_a, rr_a, e_a, iss_a, sub_a = row_a
+        exp_b, rl_b, rr_b, e_b, iss_b, sub_b = row_b
+        assert len(exp_a) == 32 and exp_a == exp_b, "key 12 exporter mismatch between Node A and Node B"
+        assert rl_a == rr_b and rr_a == rl_b, "stored receipts differ across Node A and Node B"
+        assert iss_a == sub_b and sub_a == iss_b, "issuer/subject pin mismatch across Node A and Node B"
+
         # On Node A (responder), receipt_local is ReceiptR (role=1), receipt_remote is ReceiptI (role=0).
-        p_r = verify_cose_sign1_ed25519(receipt_local, exporter, pub_a, expected_role=1)
-        p_i = verify_cose_sign1_ed25519(receipt_remote, exporter, pub_b, expected_role=0)
+        p_r = verify_cose_sign1_ed25519(rl_a, exp_a, pub_a, expected_role=1)
+        p_i = verify_cose_sign1_ed25519(rr_a, exp_b, pub_b, expected_role=0)
         assert p_r[6] == "contact" and p_i[6] == "owner-device", (p_r[6], p_i[6])
+        assert p_r[8] == hashlib.sha256(e_a).digest(), "Q2-10 ReceiptR key 8 != sha256(E_A)"
+        assert p_i[8] == hashlib.sha256(e_b).digest(), "Q2-10 ReceiptI key 8 != sha256(E_B)"
         assert p_r[8] != p_i[8], "asymmetric E digests should differ"
+
+        # Negative control: planted bad receipt must drive the verifier RED.
+        bad_receipt = bytearray(rl_a)
+        bad_receipt[-1] ^= 0xFF
+        bad_failed = False
+        try:
+            verify_cose_sign1_ed25519(bytes(bad_receipt), exp_a, pub_a, expected_role=1)
+        except AssertionError:
+            bad_failed = True
+        assert bad_failed, "planted bad receipt did not fail independent verifier"
         print("independent-receipt-verifier:ok")
         print("pairing-two-daemon-acceptance:PASSED")
 
