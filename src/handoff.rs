@@ -416,6 +416,13 @@ pub async fn handoff_handler(
     Extension(peer): Extension<Arc<AuthenticatedPeer>>,
     Json(req): Json<HandoffRequest>,
 ) -> Result<axum::response::Response, AppError> {
+    let peers_perm = fs.current_peers();
+    fs.authorize_peer_op(
+        &peers_perm,
+        &peer,
+        crate::pairing::auth::Operation::Handoff,
+        &crate::pairing::auth::Resource::default(),
+    )?;
     let me = same_user(&fs, &peer)?;
     let id = req.id.clone();
     let here = crate::surface::listing(&fs.local(), fs.reply_ttl, &me).await?;

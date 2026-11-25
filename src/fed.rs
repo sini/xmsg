@@ -558,6 +558,16 @@ pub struct PeersMap {
     pub discovery: crate::discovery::Config,
     /// The pairing store revision this generation's authority was merged from.
     pub authority_revision: u64,
+    /// This node's own SPKI device ID, when known from credentials or pairing grants.
+    pub own_device_id: Option<crate::pairing::auth::DeviceId>,
+    /// Active, non-removed manual pairing grants merged from the store snapshot.
+    pub manual_grants: Vec<crate::pairing::auth::Grant>,
+    /// Removed grant ID tombstones merged from the store snapshot.
+    pub manual_removed: std::collections::HashSet<crate::pairing::auth::GrantId>,
+    /// Blocked device IDs merged from the store snapshot.
+    pub manual_blocked: std::collections::HashSet<crate::pairing::auth::DeviceId>,
+    /// Shared generation token for §5.4 mark retirement.
+    pub generation_token: Arc<crate::pairing::store::GenerationToken>,
 }
 
 /// This node's own identity, for the peers loader's namespace checks.
@@ -696,8 +706,11 @@ impl PeersMap {
     }
 
     /// The canonical node name of the entry keyed `key`; this is what crosses the wire.
-    pub fn canonical_name(&self, key: &str) -> Option<&str> {
-        self.canonical_by_name.get(key).map(String::as_str)
+    pub fn canonical_name<'a>(&'a self, key: &'a str) -> Option<&'a str> {
+        self.canonical_by_name
+            .get(key)
+            .map(String::as_str)
+            .or_else(|| self.is_manual_peer(key).then_some(key))
     }
 
     /// How this node shows a canonical node name: its local nickname when it has one, the
@@ -1003,9 +1016,75 @@ impl PeersMap {
             .collect()
     }
 
+    pub fn is_manual_peer(&self, name: &str) -> bool {
+        crate::pairing::codec::SpkiDeviceId::parse_device_id_string(name).is_ok()
+            && !self.peers_by_name.contains_key(name)
+    }
+
+    pub fn has_active_manual_grant(
+        &self,
+        device_id: &crate::pairing::auth::DeviceId,
+        now: i64,
+    ) -> bool {
+        let Some(own_id) = self.own_device_id else {
+            return false;
+        };
+        if self.manual_blocked.contains(device_id) {
+            return false;
+        }
+        let hex_pin = hex::encode(device_id);
+        if self
+            .deny
+            .spkis
+            .iter()
+            .any(|p| normalize_pin(p) == hex_pin)
+        {
+            return false;
+        }
+        self.manual_grants.iter().any(|g| {
+            g.issuer == own_id
+                && g.subject == *device_id
+                && g.active
+                && !self.manual_removed.contains(&g.grant_id)
+                && g.not_after.is_none_or(|end| now < end)
+        })
+    }
+
+    /// Synthesizes a dial-only `PeerConfig` for an active manual grant (`xmsg-spki1:...`).
+    /// Never overrides or widens a peers-file entry of the same name or pin, and disappears
+    /// at the next generation after `remove` or `block`.
+    pub fn manual_peer_config(&self, name: &str) -> Option<PeerConfig> {
+        let dev = crate::pairing::codec::SpkiDeviceId::parse_device_id_string(name).ok()?;
+        let hex_pin = hex::encode(dev.0);
+        if self.peers_by_name.contains_key(name) || self.name_by_pin.contains_key(&hex_pin) {
+            return None;
+        }
+        let now = crate::storage::now_epoch_secs();
+        if !self.has_active_manual_grant(&dev.0, now) {
+            return None;
+        }
+        Some(PeerConfig {
+            name: name.to_string(),
+            address: String::new(),
+            pin: Some(hex_pin),
+            ca: None,
+            identities: None,
+            allow: Vec::new(),
+            observe_labels: false,
+            from: None,
+            leaf: false,
+            principals: Vec::new(),
+            targets: None,
+            dial: None,
+        })
+    }
+
     pub fn get_peer_config(&self, name: &str) -> Option<PeerConfig> {
         if let Some(peer) = self.get(name) {
             return Some(peer.clone());
+        }
+        if let Some(manual) = self.manual_peer_config(name) {
+            return Some(manual);
         }
         let hub = self.hub.as_ref()?;
         let crate::node::PatternAliasOwner::Unique(uri) =
@@ -1067,9 +1146,20 @@ impl PeersMap {
         self.peers_by_name.values()
     }
 
-    /// Every pinned entry's pin -> entry key.
+    /// Every pinned entry's pin -> entry key (including active dial-eligible manual grants).
     pub fn pinned_entries(&self) -> HashMap<String, String> {
-        self.name_by_pin.clone()
+        let mut out = self.name_by_pin.clone();
+        let now = crate::storage::now_epoch_secs();
+        for g in &self.manual_grants {
+            if self.has_active_manual_grant(&g.subject, now) {
+                let hex_pin = hex::encode(g.subject);
+                let id_str = crate::pairing::codec::SpkiDeviceId(g.subject).to_device_id_string();
+                if !self.peers_by_name.contains_key(&id_str) {
+                    out.entry(hex_pin).or_insert(id_str);
+                }
+            }
+        }
+        out
     }
 
     pub fn allowed_pins(&self) -> HashMap<String, String> {
@@ -1845,6 +1935,29 @@ impl PeersMap {
             return Ok((peer.clone(), Some(uri)));
         }
 
+        // Manual pairing admission (PR 4, B1): exact Ed25519 SPKI matching an active,
+        // non-removed, unblocked, unexpired manual grant issued by this node.
+        if let Ok(dev_bytes) = hex::decode(&norm_pin) {
+            if let Ok(dev_id) = <[u8; 32]>::try_from(dev_bytes.as_slice()) {
+                let spki_ok = crate::pairing::ceremony::spki_der_from_cert(leaf.as_ref())
+                    .and_then(|spki| crate::pairing::codec::extract_ed25519_pubkey(&spki))
+                    .is_ok();
+                let now = crate::storage::now_epoch_secs();
+                if spki_ok && self.has_active_manual_grant(&dev_id, now) {
+                    let id_str =
+                        crate::pairing::codec::SpkiDeviceId(dev_id).to_device_id_string();
+                    if self.peers_by_name.contains_key(&id_str) {
+                        return Err(AppError::PeerRejected(format!(
+                            "manual device ID '{id_str}' collides with peers-file entry"
+                        )));
+                    }
+                    if let Some(cfg) = self.manual_peer_config(&id_str) {
+                        return Ok((cfg, None));
+                    }
+                }
+            }
+        }
+
         if let Some(ref hub) = self.hub {
             let uris = extract_uri_sans(leaf.as_ref()).unwrap_or_default();
             if uris.len() == 1 {
@@ -2380,6 +2493,24 @@ impl rustls::server::danger::ClientCertVerifier for CombinedClientCertVerifier {
 
         if ca_matches.len() == 1 {
             return Ok(rustls::server::danger::ClientCertVerified::assertion());
+        }
+
+        // Manual pairing admission (PR 4, B1): exact Ed25519 SPKI with an active manual grant
+        // and no peers-file/CA name collision.
+        if let Ok(dev_bytes) = hex::decode(&norm_pin) {
+            if let Ok(dev_id) = <[u8; 32]>::try_from(dev_bytes.as_slice()) {
+                let spki_ok = crate::pairing::ceremony::spki_der_from_cert(end_entity.as_ref())
+                    .and_then(|spki| crate::pairing::codec::extract_ed25519_pubkey(&spki))
+                    .is_ok();
+                let now = crate::storage::now_epoch_secs();
+                let id_str = crate::pairing::codec::SpkiDeviceId(dev_id).to_device_id_string();
+                if spki_ok
+                    && self.peers.has_active_manual_grant(&dev_id, now)
+                    && !self.peers.peers_by_name.contains_key(&id_str)
+                {
+                    return Ok(rustls::server::danger::ClientCertVerified::assertion());
+                }
+            }
         }
 
         if self.peers.hub.is_some() {
@@ -3258,6 +3389,132 @@ pub struct FedState {
 }
 
 impl FedState {
+    /// Single §5 / §5.4 authorization decision point (default DENY) for all inbound peer
+    /// operations (`fed`, `surface`, `handoff`, `observe`, attachments).
+    ///
+    /// Evaluates the fresh `RevocationRegistry` at this permit point (never reusing an earlier
+    /// observation) and `within_own_expiry` at the permit-time clock.
+    pub fn authorize_peer_op(
+        &self,
+        peers: &PeersMap,
+        peer: &AuthenticatedPeer,
+        op: crate::pairing::auth::Operation,
+        resource: &crate::pairing::auth::Resource<'_>,
+    ) -> Result<(), AppError> {
+        let peer_cfg = if peers.is_manual_peer(&peer.name) {
+            None
+        } else {
+            Some(peers.get_authenticated_peer_config(peer)?)
+        };
+        self.authorize_peer_op_inner(peers, &peer.name, &peer.pin, peer_cfg.as_ref(), op, resource)
+    }
+
+    pub fn authorize_peer_config_op(
+        &self,
+        peers: &PeersMap,
+        peer_name: &str,
+        config: &PeerConfig,
+        op: crate::pairing::auth::Operation,
+        resource: &crate::pairing::auth::Resource<'_>,
+    ) -> Result<(), AppError> {
+        let pin = config.pin.as_deref().unwrap_or("");
+        self.authorize_peer_op_inner(peers, peer_name, pin, Some(config), op, resource)
+    }
+
+    fn authorize_peer_op_inner(
+        &self,
+        peers: &PeersMap,
+        peer_name: &str,
+        peer_pin: &str,
+        peer_cfg: Option<&PeerConfig>,
+        op: crate::pairing::auth::Operation,
+        resource: &crate::pairing::auth::Resource<'_>,
+    ) -> Result<(), AppError> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        crate::pairing::service::run_before_permit_hook(self);
+
+        let now = {
+            #[cfg(any(test, feature = "test-hooks"))]
+            {
+                crate::pairing::service::test_now_override(self)
+                    .unwrap_or_else(crate::storage::now_epoch_secs)
+            }
+            #[cfg(not(any(test, feature = "test-hooks")))]
+            {
+                crate::storage::now_epoch_secs()
+            }
+        };
+
+        let revocations = crate::pairing::store::revocations_for_db(&self.db);
+        let peer_dev = crate::pairing::auth::device_id_from_pin(peer_pin);
+        if let Some(dev) = peer_dev {
+            if revocations.has_blocking_mark(&dev, None, peers.authority_revision) {
+                return Err(AppError::OpDenied(
+                    "peer is blocked by a pending revocation".to_string(),
+                ));
+            }
+        }
+
+        if peers.is_manual_peer(peer_name) {
+            let (Some(own_id), Some(dev)) = (peers.own_device_id, peer_dev) else {
+                return Err(AppError::OpDenied(
+                    "manual peer identity unavailable".to_string(),
+                ));
+            };
+            let mut blocked = peers.manual_blocked.clone();
+            for b in crate::pairing::auth::config_blocks(peers) {
+                blocked.insert(b);
+            }
+            let ctx = crate::pairing::auth::Context {
+                now,
+                blocked: &blocked,
+                removed: &peers.manual_removed,
+                config: peers,
+            };
+            let Some(grant) = crate::pairing::auth::authorize(
+                &peers.manual_grants,
+                &own_id,
+                &dev,
+                op,
+                resource,
+                &ctx,
+            ) else {
+                return Err(AppError::OpDenied(format!(
+                    "operation {op:?} not allowed for manual peer '{peer_name}'",
+                )));
+            };
+            if revocations.has_blocking_mark(&dev, Some(&grant.grant_id), peers.authority_revision)
+            {
+                return Err(AppError::OpDenied(
+                    "grant is revoked by a pending mark".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
+        // Legacy / peers-file / CA / hub path: preserve exact existing PeerConfig predicates.
+        let Some(peer_cfg) = peer_cfg else {
+            return Err(AppError::UnknownPeer(peer_name.to_string()));
+        };
+        let preds = crate::pairing::auth::LegacyPredicates::from_peer(peer_cfg);
+        let allowed = match op {
+            crate::pairing::auth::Operation::Send
+            | crate::pairing::auth::Operation::Reply
+            | crate::pairing::auth::Operation::SessionList
+            | crate::pairing::auth::Operation::Forward
+            | crate::pairing::auth::Operation::Relayed
+            | crate::pairing::auth::Operation::Observe => preds.allows(op, resource),
+            // Handoff uses same_user + non-observe-only in handoff.rs for CA/peers-file peers.
+            crate::pairing::auth::Operation::Handoff => !peer_cfg.is_observe_only(),
+        };
+        if !allowed {
+            return Err(AppError::OpDenied(format!(
+                "operation {op:?} not allowed for peer '{peer_name}'",
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn with_discovery_policy<T>(
         &self,
         expected: &Arc<PeersMap>,
@@ -3384,16 +3641,29 @@ async fn fed_send_message_handler(
         )));
     }
 
-    // 1. Check peer config and allow list
-    let peer_cfg = fed_state
-        .current_peers()
-        .get_authenticated_peer_config(&peer)?;
-
-    if !peer_cfg.allow.iter().any(|op| op == "send") {
-        return Err(AppError::OpDenied(
-            "send operation not allowed for peer".to_string(),
-        ));
-    }
+    // 1. Check peer config and allow list via single §5/§5.4 decision point.
+    let init_peers = fed_state.current_peers();
+    let peer_cfg = init_peers.get_authenticated_peer_config(&peer)?;
+    let (target_ref_early, dest_host_early) = match split_peer_ref(&envelope.to.r#ref) {
+        Some((r, h)) if h != fed_state.node_name => (r, Some(h)),
+        Some((r, _)) => (r, None),
+        None => (envelope.to.r#ref.as_str(), None),
+    };
+    let send_op = if envelope.forwarded.is_some() {
+        crate::pairing::auth::Operation::Relayed
+    } else if dest_host_early.is_some() {
+        crate::pairing::auth::Operation::Forward
+    } else {
+        crate::pairing::auth::Operation::Send
+    };
+    let attachment_bytes: u64 = envelope.attachments.iter().map(|a| a.size as u64).sum();
+    let send_res = crate::pairing::auth::Resource {
+        target: Some(target_ref_early),
+        principal: envelope.origin.key().or(Some("anon")),
+        body_bytes: envelope.body.len() as u64,
+        attachment_bytes,
+    };
+    fed_state.authorize_peer_op(&init_peers, &peer, send_op, &send_res)?;
 
     if !peer_cfg.principals.is_empty() {
         let authorized = principal_allowed(&envelope.origin, &peer_cfg.principals);
@@ -3405,18 +3675,6 @@ async fn fed_send_message_handler(
     }
 
     check_received_refs(&fed_state, &envelope.id, &envelope.attachments)?;
-
-    // Relayed messages check: if envelope is forwarded, recipient's entry for the peer must allow "relayed"
-    if envelope.forwarded.is_some()
-        && !peer_cfg
-            .allow
-            .iter()
-            .any(|op| op == "relayed" || op == "relay")
-    {
-        return Err(AppError::OpDenied(
-            "relayed messages not allowed for peer".to_string(),
-        ));
-    }
 
     // 2. Validate to.ref and handle forwarding
     let raw_target_ref = &envelope.to.r#ref;
@@ -3986,15 +4244,21 @@ async fn fed_reply_handler(
         )));
     }
 
-    // 1. Check peer config and allow list
+    // 1. Check peer config and allow list via single §5/§5.4 decision point.
     let peers = fed_state.current_peers();
-    let peer_cfg = peers.get_authenticated_peer_config(&peer)?;
-
-    if !peer_cfg.allow.iter().any(|op| op == "reply") {
-        return Err(AppError::OpDenied(
-            "reply operation not allowed for peer".to_string(),
-        ));
-    }
+    let _peer_cfg = peers.get_authenticated_peer_config(&peer)?;
+    let reply_res = crate::pairing::auth::Resource {
+        target: None,
+        principal: reply.replier.key().or(Some("anon")),
+        body_bytes: reply.text.len() as u64,
+        attachment_bytes: reply.attachments.iter().map(|a| a.size as u64).sum(),
+    };
+    fed_state.authorize_peer_op(
+        &peers,
+        &peer,
+        crate::pairing::auth::Operation::Reply,
+        &reply_res,
+    )?;
 
     check_received_refs(&fed_state, &reply.id, &reply.attachments)?;
 
@@ -4695,16 +4959,16 @@ async fn fed_list_sessions_handler(
     Extension(peer): Extension<Arc<AuthenticatedPeer>>,
     Query(query): Query<FedListQuery>,
 ) -> Result<Response, AppError> {
-    let peer_cfg = fed_state
-        .current_peers()
-        .get_authenticated_peer_config(&peer)?;
+    let list_peers = fed_state.current_peers();
+    let peer_cfg = list_peers.get_authenticated_peer_config(&peer)?;
 
-    // Refused with 403 op_denied unless peer's allow contains "list"
-    if !peer_cfg.allow.iter().any(|op| op == "list") {
-        return Err(AppError::OpDenied(
-            "list operation not allowed for peer".to_string(),
-        ));
-    }
+    // Refused with 403 op_denied unless peer is authorized for SessionList.
+    fed_state.authorize_peer_op(
+        &list_peers,
+        &peer,
+        crate::pairing::auth::Operation::SessionList,
+        &crate::pairing::auth::Resource::default(),
+    )?;
 
     // Source address check
     check_peer_source(&peer_cfg, &peer.remote_ip)?;
@@ -8069,10 +8333,17 @@ impl CredentialReloader {
             );
             return false;
         }
+        let mut merged = merged.clone();
+        merged.generation_token = Arc::new(crate::pairing::store::GenerationToken::new(
+            merged.authority_revision,
+        ));
         *self.peers.lock().unwrap_or_else(|e| e.into_inner()) = Arc::new(merged.clone());
         *self.dynamic_tls.write().unwrap_or_else(|e| e.into_inner()) = Some(dyn_tls);
         if let Some(ref fs) = self.fed_state {
             fs.clear_initial_peers();
+            let revocations = crate::pairing::store::revocations_for_db(&fs.db);
+            revocations.register_token(&merged.generation_token);
+            revocations.gc(merged.authority_revision);
         }
         if let Some(hashes) = hashes {
             *self.file_hashes.lock().unwrap_or_else(|e| e.into_inner()) = hashes;
@@ -8415,12 +8686,18 @@ fn attachment_peer_row(
     let reply = storage::get_reply_by_pushed_id(&db, item)
         .map_err(|e| AppError::Internal(e.to_string()))?
         .is_some();
-    let right = if reply { "send" } else { "reply" };
-    if !config.allow.iter().any(|op| op == right) {
-        return Err(AppError::Denied(format!(
-            "attachment requires {right} permission"
-        )));
-    }
+    let right_op = if reply {
+        crate::pairing::auth::Operation::Send
+    } else {
+        crate::pairing::auth::Operation::Reply
+    };
+    let res = crate::pairing::auth::Resource {
+        target: None,
+        principal: Some("*"),
+        body_bytes: 0,
+        attachment_bytes: 0,
+    };
+    fs.authorize_peer_config_op(&peers, peer, &config, right_op, &res)?;
     Ok(row)
 }
 

@@ -37,6 +37,10 @@ use crate::fed::{CredentialReloader, FedState};
 pub struct PairingRuntime {
     pub service: Arc<PairingService>,
     reloader: Mutex<Option<Weak<CredentialReloader>>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    before_permit_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    test_now: Mutex<Option<i64>>,
 }
 
 impl Default for PairingRuntime {
@@ -44,8 +48,38 @@ impl Default for PairingRuntime {
         Self {
             service: Arc::new(PairingService::new()),
             reloader: Mutex::new(None),
+            #[cfg(any(test, feature = "test-hooks"))]
+            before_permit_hook: Mutex::new(None),
+            #[cfg(any(test, feature = "test-hooks"))]
+            test_now: Mutex::new(None),
         }
     }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_before_permit_hook(
+    fs: &FedState,
+    hook: Option<Arc<dyn Fn() + Send + Sync>>,
+) {
+    *pairing_runtime(fs).before_permit_hook.lock().unwrap() = hook;
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn run_before_permit_hook(fs: &FedState) {
+    let hook = pairing_runtime(fs).before_permit_hook.lock().unwrap().clone();
+    if let Some(h) = hook {
+        h();
+    }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_test_now_override(fs: &FedState, now: Option<i64>) {
+    *pairing_runtime(fs).test_now.lock().unwrap() = now;
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+pub(crate) fn test_now_override(fs: &FedState) -> Option<i64> {
+    *pairing_runtime(fs).test_now.lock().unwrap()
 }
 
 pub fn pairing_runtime(fs: &FedState) -> Arc<PairingRuntime> {
@@ -977,10 +1011,12 @@ impl PairingService {
         }
 
         let now = unix_now_u32() as i64;
+        let revocations = store::revocations_for_db(&fed.db);
         let fed_rm = fed.clone();
         let (committed_rev, remaining) = tokio::task::spawn_blocking(move || {
             let db = fed_rm.db.lock().unwrap_or_else(|e| e.into_inner());
-            let rev = store::remove(&db, &grant_id, now).map_err(Self::map_store_error)?;
+            let rev = store::remove_with_marks(&db, &grant_id, now, Some(&revocations))
+                .map_err(Self::map_store_error)?;
             let grants = store::list_grants_summary(&db).map_err(Self::map_store_error)?;
             Ok::<(u64, Vec<store::StoredGrantSummary>), PairingError>((rev, grants))
         })
@@ -1016,11 +1052,12 @@ impl PairingService {
         let peer_id = SpkiDeviceId::parse_device_id_string(peer_id_str)
             .map_err(|e| PairingError::InvalidDeviceId(e.to_string()))?;
         let now = unix_now_u32() as i64;
+        let revocations = store::revocations_for_db(&fed.db);
         let fed_blk = fed.clone();
         let pid = peer_id.0;
         let committed_rev = tokio::task::spawn_blocking(move || {
             let db = fed_blk.db.lock().unwrap_or_else(|e| e.into_inner());
-            store::block_device(&db, &pid, now)
+            store::block_device_with_marks(&db, &pid, now, Some(&revocations))
         })
         .await
         .map_err(|e| PairingError::Internal(e.to_string()))?

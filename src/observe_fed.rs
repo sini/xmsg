@@ -77,6 +77,15 @@ fn admit(state: &ExportState, request: &Request) -> Result<Admission, AppError> 
     if config.name != peer.name {
         return Err(denied());
     }
+    state
+        .fed
+        .authorize_peer_op(
+            &peers,
+            peer,
+            crate::pairing::auth::Operation::Observe,
+            &crate::pairing::auth::Resource::default(),
+        )
+        .map_err(|_| denied())?;
     if !config.allow.iter().any(|right| right == "observe") {
         return Err(denied());
     }

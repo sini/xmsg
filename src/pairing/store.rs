@@ -8,6 +8,7 @@
 //! store snapshot it was built from, so a publication can refuse an older snapshot.
 
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex, Weak};
 
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -558,7 +559,28 @@ pub fn activate(
 /// reserved it, and cancels any replacement intent depending on it. Returns the committed
 /// authority revision; a repeat commits a new revision with no other change.
 pub fn remove(conn: &Connection, grant_id: &GrantId, now: i64) -> Result<u64, StoreError> {
+    remove_with_marks(conn, grant_id, now, None)
+}
+
+/// Removes one grant while recording an in-memory revocation mark before `COMMIT` (§5.4 item 4).
+pub fn remove_with_marks(
+    conn: &Connection,
+    grant_id: &GrantId,
+    now: i64,
+    revocations: Option<&RevocationRegistry>,
+) -> Result<u64, StoreError> {
     let tx = immediate(conn)?;
+    let subject: Option<DeviceId> = tx
+        .query_row(
+            "SELECT subject FROM pairing_grants WHERE grant_id = ?1",
+            [&grant_id[..]],
+            |r| {
+                let bytes: Vec<u8> = r.get(0)?;
+                Ok(bytes.try_into().ok())
+            },
+        )
+        .optional()?
+        .flatten();
     tx.execute(
         "UPDATE pairing_grants SET active = 0 WHERE grant_id = ?1 AND active = 1",
         [&grant_id[..]],
@@ -576,13 +598,41 @@ pub fn remove(conn: &Connection, grant_id: &GrantId, now: i64) -> Result<u64, St
         params![&grant_id[..], now],
     )?;
     let revision = bump(&tx)?;
-    tx.commit()?;
-    Ok(revision)
+    let mark_scope = MarkScope::Grant {
+        device: subject,
+        grant_id: *grant_id,
+    };
+    if let Some(reg) = revocations {
+        reg.insert_mark(mark_scope.clone(), revision);
+    }
+    match tx.commit() {
+        Ok(()) => Ok(revision),
+        Err(err) => {
+            if let Some(reg) = revocations {
+                let committed = authority_revision(conn).ok().is_some_and(|r| r >= revision);
+                if committed {
+                    return Ok(revision);
+                }
+                reg.drop_mark(&mark_scope, revision);
+            }
+            Err(err.into())
+        }
+    }
 }
 
 /// A durable full-ID block, above every grant and legacy rule. It also cancels the device's
 /// open intents; its grants stay recorded but no longer authorize.
 pub fn block_device(conn: &Connection, device: &DeviceId, now: i64) -> Result<u64, StoreError> {
+    block_device_with_marks(conn, device, now, None)
+}
+
+/// Blocks `device` while recording an in-memory revocation mark before `COMMIT` (§5.4 item 4).
+pub fn block_device_with_marks(
+    conn: &Connection,
+    device: &DeviceId,
+    now: i64,
+    revocations: Option<&RevocationRegistry>,
+) -> Result<u64, StoreError> {
     let tx = immediate(conn)?;
     tx.execute(
         "INSERT OR IGNORE INTO pairing_device_blocks (device_id, blocked_at) VALUES (?1, ?2)",
@@ -593,8 +643,23 @@ pub fn block_device(conn: &Connection, device: &DeviceId, now: i64) -> Result<u6
         [&device[..]],
     )?;
     let revision = bump(&tx)?;
-    tx.commit()?;
-    Ok(revision)
+    let mark_scope = MarkScope::Device(*device);
+    if let Some(reg) = revocations {
+        reg.insert_mark(mark_scope.clone(), revision);
+    }
+    match tx.commit() {
+        Ok(()) => Ok(revision),
+        Err(err) => {
+            if let Some(reg) = revocations {
+                let committed = authority_revision(conn).ok().is_some_and(|r| r >= revision);
+                if committed {
+                    return Ok(revision);
+                }
+                reg.drop_mark(&mark_scope, revision);
+            }
+            Err(err.into())
+        }
+    }
 }
 
 /// Lifts a block only when lifting it provably restores nothing (the interim rule while
@@ -806,7 +871,7 @@ pub fn import_legacy(
 pub fn import_file_policy(
     conn: &Connection,
     own_cert_der: &[u8],
-    peers: &PeersMap,
+    peers: &mut PeersMap,
     now: i64,
 ) -> Result<u64, StoreError> {
     let issuer = crate::fed::spki_sha256_from_der(own_cert_der)
@@ -814,24 +879,176 @@ pub fn import_file_policy(
         .as_deref()
         .and_then(device_id_from_pin)
         .ok_or(StoreError::Invalid("own certificate SPKI"))?;
+    peers.own_device_id = Some(issuer);
     Ok(import_legacy(conn, &issuer, peers, now)?.1)
 }
 
+/// Shared token carried by every `PeersMap` clone of one installed generation (§5.4 item 5).
+#[derive(Debug, Default)]
+pub struct GenerationToken {
+    pub revision: u64,
+}
+
+impl GenerationToken {
+    pub fn new(revision: u64) -> Self {
+        Self { revision }
+    }
+}
+
+/// Scope of an in-memory revocation mark (§5.4 item 4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkScope {
+    Device(DeviceId),
+    Grant {
+        device: Option<DeviceId>,
+        grant_id: GrantId,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct RevocationMark {
+    scope: MarkScope,
+    revision: u64,
+}
+
+#[derive(Default)]
+struct RevocationInner {
+    marks: Vec<RevocationMark>,
+    tokens: Vec<Weak<GenerationToken>>,
+}
+
+/// In-memory revocation marks and weak generation tokens for §5.4 permit-time fencing and GC.
+#[derive(Default)]
+pub struct RevocationRegistry {
+    inner: Mutex<RevocationInner>,
+}
+
+impl RevocationRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert_mark(&self, scope: MarkScope, revision: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.marks.push(RevocationMark { scope, revision });
+    }
+
+    pub fn drop_mark(&self, scope: &MarkScope, revision: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = inner
+            .marks
+            .iter()
+            .position(|m| m.revision == revision && &m.scope == scope)
+        {
+            inner.marks.remove(pos);
+        }
+    }
+
+    pub fn register_token(&self, token: &Arc<GenerationToken>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.tokens.retain(|w| w.strong_count() > 0);
+        inner.tokens.push(Arc::downgrade(token));
+    }
+
+    /// Returns `true` if any active mark covering `device` or `grant_id` has `mark.revision > gen_rev`.
+    pub fn has_blocking_mark(
+        &self,
+        device: &DeviceId,
+        grant_id: Option<&GrantId>,
+        gen_rev: u64,
+    ) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.marks.iter().any(|m| {
+            m.revision > gen_rev
+                && match &m.scope {
+                    MarkScope::Device(d) => d == device,
+                    MarkScope::Grant {
+                        device: d,
+                        grant_id: gid,
+                    } => grant_id == Some(gid) && d.is_none_or(|dev| dev == *device),
+                }
+        })
+    }
+
+    /// Retires marks at `M` once `installed_revision >= M` and every token with `revision < M`
+    /// is dead (§5.4 item 5).
+    pub fn gc(&self, installed_revision: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut min_live_rev: Option<u64> = None;
+        inner.tokens.retain(|w| {
+            if let Some(tok) = w.upgrade() {
+                min_live_rev = Some(min_live_rev.map_or(tok.revision, |m| m.min(tok.revision)));
+                true
+            } else {
+                false
+            }
+        });
+        inner.marks.retain(|m| {
+            if installed_revision < m.revision {
+                return true;
+            }
+            min_live_rev.is_some_and(|min_r| min_r < m.revision)
+        });
+    }
+
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn mark_count(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .marks
+            .len()
+    }
+}
+
+/// Returns the process-wide `RevocationRegistry` bound to `db` (keyed by `Weak<Mutex<Connection>>`).
+pub fn revocations_for_db(db: &Arc<Mutex<Connection>>) -> Arc<RevocationRegistry> {
+    static REGISTRY: std::sync::OnceLock<Mutex<Vec<(Weak<Mutex<Connection>>, Arc<RevocationRegistry>)>>> =
+        std::sync::OnceLock::new();
+    let map = REGISTRY.get_or_init(|| Mutex::new(Vec::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    guard.retain(|(w, _)| w.strong_count() > 0);
+    if let Some((_, reg)) = guard.iter().find(|(w, _)| w.as_ptr() == Arc::as_ptr(db)) {
+        return reg.clone();
+    }
+    let reg = Arc::new(RevocationRegistry::new());
+    guard.push((Arc::downgrade(db), reg.clone()));
+    reg
+}
+
 /// Merges one store snapshot, read in a single read transaction, into a policy generation:
-/// every durable device block joins its `deny.spkis`, so each existing deny check (TLS
-/// verifiers, leaf authority rechecks, discovery publication) enforces it, and the
-/// generation records the snapshot's revision.
+/// every durable device block joins its `deny.spkis`, active manual grants and removed tombstones
+/// are loaded into the generation, and the generation records the snapshot's revision.
 pub fn merge_snapshot(conn: &Connection, peers: &mut PeersMap) -> Result<u64, StoreError> {
     let tx = conn.unchecked_transaction()?;
     let revision = authority_revision(&tx)?;
-    let mut blocked: Vec<String> = blocked_devices(&tx)?.iter().map(hex::encode).collect();
+    let blocked_set = blocked_devices(&tx)?;
+    let removed_set = removed_grants(&tx)?;
+    let manual_grants: Vec<Grant> = tx
+        .prepare(&format!(
+            "SELECT {GRANT_COLUMNS} FROM pairing_grants
+             WHERE provenance = 'manual_authenticated_oob' AND active = 1
+             ORDER BY activated_at, grant_id"
+        ))?
+        .query_map([], grant_from_row)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     tx.commit()?;
+    let mut blocked: Vec<String> = blocked_set.iter().map(hex::encode).collect();
     blocked.sort();
     for pin in blocked {
         if !peers.deny.spkis.contains(&pin) {
             peers.deny.spkis.push(pin);
         }
     }
+    if peers.own_device_id.is_none() {
+        peers.own_device_id = manual_grants.first().map(|g| g.issuer);
+    }
+    peers.manual_blocked = blocked_set;
+    peers.manual_removed = removed_set;
+    peers.manual_grants = manual_grants;
     peers.authority_revision = revision;
     Ok(revision)
 }

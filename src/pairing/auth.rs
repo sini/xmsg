@@ -97,7 +97,7 @@ impl LegacyPredicates {
 
     /// The decision the federation handlers make for this entry today. Source CIDRs (`from`)
     /// are an admission check of their own and stay there.
-    fn allows(&self, op: Operation, resource: &Resource<'_>) -> bool {
+    pub fn allows(&self, op: Operation, resource: &Resource<'_>) -> bool {
         match op {
             // receive_federated_message: `send`, then `principals`, then this entry's `targets`.
             Operation::Send => {
@@ -231,10 +231,16 @@ fn scope_allows(g: &Grant, op: Operation, resource: &Resource<'_>) -> bool {
                 && !exposure.target_selectors.is_empty()
                 && resource
                     .target
-                    .is_none_or(|t| exposure.target_selectors.iter().any(|s| s == t))
-                && resource
-                    .principal
-                    .is_some_and(|p| exposure.principal_selectors.iter().any(|s| s == p))
+                    .is_none_or(|t| exposure.target_selectors.iter().any(|s| s == "*" || s == t))
+                && (op == Operation::SessionList
+                    && resource.principal.is_none()
+                    && exposure.principal_selectors.iter().any(|s| s == "*")
+                    || resource.principal.is_some_and(|p| {
+                        exposure
+                            .principal_selectors
+                            .iter()
+                            .any(|s| s == "*" || s == p)
+                    }))
                 && resource.body_bytes <= u64::from(exposure.max_body_bytes)
                 && resource.attachment_bytes <= u64::from(exposure.max_attachment_bytes)
         }
