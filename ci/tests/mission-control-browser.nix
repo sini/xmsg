@@ -22,7 +22,9 @@
             ''
               set -euo pipefail
               export HOME="$TMPDIR/browser-home"
-              mkdir -p "$HOME" "$out"
+              export XDG_CONFIG_HOME="$TMPDIR/browser-config"
+              export XDG_CACHE_HOME="$TMPDIR/browser-cache"
+              mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$out"
               cd "$src"
               node web/mc-roster/build.mjs --check | tee "$out/bundle-freshness.log"
               node --experimental-strip-types --test tests/mc_roster_unit.mjs | tee "$out/mc-roster-unit.log"

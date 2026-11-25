@@ -6,9 +6,12 @@ import base64
 import hashlib
 import http.server
 import json
+import os
 import secrets
 import socket
 import struct
+import sys
+import tempfile
 import threading
 import urllib.parse
 from pathlib import Path
@@ -456,243 +459,284 @@ def main():
     ws_allowlist = {f"ws://127.0.0.1:{app_srv.server_port}/v1/mission-control/session"}
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                executable_path=args.chromium,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-            )
-            try:
-                # WR-1 positive controls
-                check_positive_controls(browser, origin)
+      with tempfile.TemporaryDirectory(prefix="mc-browser-diag-") as diag_tmp:
+        diag_dir = Path(diag_tmp)
+        stderr_log = diag_dir / "chromium-stderr.log"
+        exit_log = diag_dir / "chromium-exit.log"
+        wrapper = diag_dir / "chromium-wrap.sh"
+        wrapper.write_text(
+            f"#!/bin/sh\n"
+            f"\"{args.chromium}\" \"$@\" 2>\"{stderr_log}\"\n"
+            f"rc=$?\n"
+            f"echo \"chromium exit=$rc\" > \"{exit_log}\"\n"
+            f"exit $rc\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        launch_env = os.environ.copy()
+        launch_env.setdefault("XDG_CONFIG_HOME", str(diag_dir / "xdg-config"))
+        launch_env.setdefault("XDG_CACHE_HOME", str(diag_dir / "xdg-cache"))
+        Path(launch_env["XDG_CONFIG_HOME"]).mkdir(parents=True, exist_ok=True)
+        Path(launch_env["XDG_CACHE_HOME"]).mkdir(parents=True, exist_ok=True)
+        lifecycle_events = []
 
-                # WR-1, WR-2, WR-6, WR-7 under bypass_csp=False and True
-                state.scenario = "auth_ssr_fixture"
-                for bypass in (False, True):
-                    ctx = browser.new_context(bypass_csp=bypass)
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    executable_path=str(wrapper),
+                    env=launch_env,
+                    args=[
+                        "--no-sandbox",
+                        "--no-zygote",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                    ],
+                )
+                browser.on("disconnected", lambda: lifecycle_events.append("browser:disconnected"))
+                try:
+                    # WR-1 positive controls
+                    check_positive_controls(browser, origin)
+
+                    # WR-1, WR-2, WR-6, WR-7 under bypass_csp=False and True
+                    state.scenario = "auth_ssr_fixture"
+                    for bypass in (False, True):
+                        ctx = browser.new_context(bypass_csp=bypass)
+                        try:
+                            page = ctx.new_page()
+                            page.on("crash", lambda: lifecycle_events.append(f"page:crash(bypass={bypass})"))
+                            reqs, ws_urls, page_errors = [], [], []
+                            page.on("request", lambda r: reqs.append(r.url))
+                            page.on("websocket", lambda w: ws_urls.append(w.url))
+                            page.on("pageerror", lambda e: page_errors.append(str(e)))
+                            resp = page.goto(f"{origin}/", wait_until="domcontentloaded")
+                            assert resp.status == 200
+                            assert resp.headers.get("content-security-policy") == CANONICAL_CSP
+                            page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                            assert page.evaluate("window.__pwn === undefined")
+                            assert page.locator("iframe, object, embed, img").count() == 0
+                            assert not page_errors
+                            for u in reqs:
+                                assert u in sub_allowlist, f"off-allowlist request: {u}"
+                            for u in ws_urls:
+                                assert u in ws_allowlist, f"off-allowlist ws: {u}"
+                            hello = state.client_hellos[-1]
+                            assert hello["capabilities"] == ["observe", "activity"]
+                            assert hello["require"] == ["observe"]
+                            rows = page.locator("[data-node='laptop-a'] tbody tr")
+                            assert rows.nth(0).get_attribute("data-endpoint") == "b-input@laptop-a"
+                            assert rows.nth(1).get_attribute("data-endpoint") == "a-perm@laptop-a"
+                            assert rows.nth(2).get_attribute("data-endpoint") == "z-idle@laptop-a"
+                            assert page.locator("[data-node='laptop-stale'] .mc-status-unreachable").count() == 1
+                            assert page.locator("[data-node='old-retained'] button", has_text="Node detail").count() == 0
+                            # WR-6: history_hidden immediate deletion + detail teardown
+                            page.locator("[data-node='laptop-a'] button", has_text="Node detail").click()
+                            page.wait_for_selector("[data-detail-node='laptop-a']", timeout=5000)
+                            manage_btn = page.locator("[data-detail-node='laptop-a'] button", has_text="Manage")
+                            assert manage_btn.is_disabled()
+                            assert manage_btn.evaluate("el => el.disabled") is True
+                            ws_send_text(
+                                state.ws_conns[-1],
+                                json.dumps({"v": 1, "type": "event", "sub": "fleet", "seq": 100, "cursor": "c_mask", "at": 1795000002000,
+                                            "delta": {"kind": "node_status", "node": "laptop-a", "status": "healthy", "delivery": "delayed", "history_hidden": True}}),
+                            )
+                            page.wait_for_timeout(150)
+                            assert page.locator("[data-detail-node='laptop-a']").count() == 0, "detail panel not torn down on mask"
+                            assert page.locator("[data-node='laptop-a'] tbody tr").count() == 0, "masked rows not deleted"
+                        finally:
+                            ctx.close()
+
+                    # WR-4(a) No-JS SSR + WR-4(b) multipart atomic commit
+                    ctx = browser.new_context(java_script_enabled=False)
                     page = ctx.new_page()
-                    reqs, ws_urls, page_errors = [], [], []
-                    page.on("request", lambda r: reqs.append(r.url))
-                    page.on("websocket", lambda w: ws_urls.append(w.url))
-                    page.on("pageerror", lambda e: page_errors.append(str(e)))
-                    resp = page.goto(f"{origin}/", wait_until="domcontentloaded")
-                    assert resp.status == 200
-                    assert resp.headers.get("content-security-policy") == CANONICAL_CSP
-                    page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
-                    assert page.evaluate("window.__pwn === undefined")
-                    assert page.locator("iframe, object, embed, img").count() == 0
-                    assert not page_errors
-                    for u in reqs:
-                        assert u in sub_allowlist, f"off-allowlist request: {u}"
-                    for u in ws_urls:
-                        assert u in ws_allowlist, f"off-allowlist ws: {u}"
-                    hello = state.client_hellos[-1]
-                    assert hello["capabilities"] == ["observe", "activity"]
-                    assert hello["require"] == ["observe"]
-                    rows = page.locator("[data-node='laptop-a'] tbody tr")
-                    assert rows.nth(0).get_attribute("data-endpoint") == "b-input@laptop-a"
-                    assert rows.nth(1).get_attribute("data-endpoint") == "a-perm@laptop-a"
-                    assert rows.nth(2).get_attribute("data-endpoint") == "z-idle@laptop-a"
-                    assert page.locator("[data-node='laptop-stale'] .mc-status-unreachable").count() == 1
-                    assert page.locator("[data-node='old-retained'] button", has_text="Node detail").count() == 0
-                    # WR-6: history_hidden immediate deletion + detail teardown
-                    page.locator("[data-node='laptop-a'] button", has_text="Node detail").click()
-                    page.wait_for_selector("[data-detail-node='laptop-a']", timeout=5000)
-                    manage_btn = page.locator("[data-detail-node='laptop-a'] button", has_text="Manage")
-                    assert manage_btn.is_disabled()
-                    assert manage_btn.evaluate("el => el.disabled") is True
-                    ws_send_text(
-                        state.ws_conns[-1],
-                        json.dumps({"v": 1, "type": "event", "sub": "fleet", "seq": 100, "cursor": "c_mask", "at": 1795000002000,
-                                    "delta": {"kind": "node_status", "node": "laptop-a", "status": "healthy", "delivery": "delayed", "history_hidden": True}}),
-                    )
-                    page.wait_for_timeout(150)
-                    assert page.locator("[data-detail-node='laptop-a']").count() == 0, "detail panel not torn down on mask"
-                    assert page.locator("[data-node='laptop-a'] tbody tr").count() == 0, "masked rows not deleted"
+                    page.goto(f"{origin}/", wait_until="domcontentloaded")
+                    assert page.locator("[data-ssr-node='sentinel-node']").count() == 1
                     ctx.close()
 
-                # WR-4(a) No-JS SSR + WR-4(b) multipart atomic commit
-                ctx = browser.new_context(java_script_enabled=False)
-                page = ctx.new_page()
-                page.goto(f"{origin}/", wait_until="domcontentloaded")
-                assert page.locator("[data-ssr-node='sentinel-node']").count() == 1
-                ctx.close()
-
-                state.scenario = "multipart"
-                ctx = browser.new_context()
-                page = ctx.new_page()
-                page.goto(f"{origin}/", wait_until="domcontentloaded")
-                page.wait_for_timeout(200)
-                assert page.locator("[data-ssr-node='sentinel-node']").count() == 1, "partial part:0 overwrote SSR"
-                assert page.locator("[data-connection-badge='Unknown']").count() == 1
-                ctx.close()
-
-                # WR-5(a): empty, all-loading, all-loading-delayed
-                for scen, expected_badge in [("empty", "Unknown"), ("all-loading", "Unknown"), ("all-loading-delayed", "Delayed")]:
-                    state.scenario = scen
+                    state.scenario = "multipart"
                     ctx = browser.new_context()
                     page = ctx.new_page()
                     page.goto(f"{origin}/", wait_until="domcontentloaded")
-                    if scen == "empty":
-                        page.wait_for_selector(".mc-empty", state="attached", timeout=5000)
-                        assert page.locator(f"[data-connection-badge='{expected_badge}']").count() == 1
-                    else:
-                        page.wait_for_selector("[data-node='load-1']", timeout=5000)
-                        assert page.locator(f"[data-connection-badge='{expected_badge}']").count() == 1
-                        assert "coverage: empty" in (page.locator(".mc-banner").text_content() or "")
+                    page.wait_for_timeout(200)
+                    assert page.locator("[data-ssr-node='sentinel-node']").count() == 1, "partial part:0 overwrote SSR"
+                    assert page.locator("[data-connection-badge='Unknown']").count() == 1
                     ctx.close()
 
-                # WR-5(b),(c),(d),(e),(g): fake clock, 1006 resume+stale, 4401, 4403, 4409, and 302/401/403/503 probes
-                state.scenario = "auth_ssr_fixture"
-                state.ws_upgrade_status = 101
-                state.probe_status = 200
-                state.ws_attempts = 0
-                state.client_frames.clear()
-                ctx = browser.new_context()
-                page = ctx.new_page()
-                page.clock.install()
-                page.goto(f"{origin}/", wait_until="domcontentloaded")
-                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
-                page.wait_for_selector("[data-node='laptop-a']", timeout=5000)
+                    # WR-5(a): empty, all-loading, all-loading-delayed
+                    for scen, expected_badge in [("empty", "Unknown"), ("all-loading", "Unknown"), ("all-loading-delayed", "Delayed")]:
+                        state.scenario = scen
+                        ctx = browser.new_context()
+                        page = ctx.new_page()
+                        page.goto(f"{origin}/", wait_until="domcontentloaded")
+                        if scen == "empty":
+                            page.wait_for_selector(".mc-empty", state="attached", timeout=5000)
+                            assert page.locator(f"[data-connection-badge='{expected_badge}']").count() == 1
+                        else:
+                            page.wait_for_selector("[data-node='load-1']", timeout=5000)
+                            assert page.locator(f"[data-connection-badge='{expected_badge}']").count() == 1
+                            assert "coverage: empty" in (page.locator(".mc-banner").text_content() or "")
+                        ctx.close()
 
-                # WR-5(b): 1006 -> Reconnecting -> lossless cursor resume -> Stale after stale_after_ms (tick does not reset age)
-                state.client_frames.clear()
-                conns_before = len(state.ws_conns)
-                state.ws_conns[-1].shutdown(socket.SHUT_RDWR)
-                state.ws_conns[-1].close()
-                page.wait_for_selector("[data-connection-badge='Reconnecting']", timeout=5000)
-                page.clock.run_for(2500)
-                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
-                assert len(state.ws_conns) == conns_before + 1
-                fleet_resumes = [f for f in state.client_frames if f.get("type") == "subscribe" and f.get("sub") == "fleet"]
-                assert fleet_resumes and fleet_resumes[-1].get("cursor") == "fleet_c1", f"expected cursor resume, got {fleet_resumes}"
-                # tick must not reset node source age; > 2*tick (31s) -> Unknown; >= staleAfterMs (46s) -> Stale
-                ws_send_text(state.ws_conns[-1], json.dumps({"v": 1, "type": "tick", "server_at": 1795000030000}))
-                page.clock.run_for(15000)
-                node_hdr = page.locator("[data-node='laptop-a'] .mc-node-header").text_content() or ""
-                assert "source 0s ago" not in node_hdr, f"tick reset source age: {node_hdr}"
-                page.clock.run_for(16000)
-                page.wait_for_selector("[data-connection-badge='Unknown']", timeout=5000)
-                page.clock.run_for(15000)
-                page.wait_for_selector("[data-connection-badge='Stale']", timeout=5000)
+                    # WR-5(b),(c),(d),(e),(g): fake clock, 1006 resume+stale, 4401, 4403, 4409, and 302/401/403/503 probes
+                    state.scenario = "auth_ssr_fixture"
+                    state.ws_upgrade_status = 101
+                    state.probe_status = 200
+                    state.ws_attempts = 0
+                    state.client_frames.clear()
+                    ctx = browser.new_context()
+                    page = ctx.new_page()
+                    page.clock.install()
+                    page.goto(f"{origin}/", wait_until="domcontentloaded")
+                    page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                    page.wait_for_selector("[data-node='laptop-a']", timeout=5000)
 
-                # Refresh live state before 4401/4403/4409
-                ws_send_text(
-                    state.ws_conns[-1],
-                    json.dumps({"v": 1, "type": "event", "sub": "fleet", "seq": 2, "cursor": "c_live", "at": 1795000062000,
-                                "delta": {"kind": "node_status", "node": "laptop-a", "status": "healthy", "delivery": "delayed", "history_hidden": False}}),
-                )
-                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                    # WR-5(b): 1006 -> Reconnecting -> lossless cursor resume -> Stale after stale_after_ms (tick does not reset age)
+                    state.client_frames.clear()
+                    conns_before = len(state.ws_conns)
+                    state.ws_conns[-1].shutdown(socket.SHUT_RDWR)
+                    state.ws_conns[-1].close()
+                    page.wait_for_selector("[data-connection-badge='Reconnecting']", timeout=5000)
+                    page.clock.run_for(2500)
+                    page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                    assert len(state.ws_conns) == conns_before + 1
+                    fleet_resumes = [f for f in state.client_frames if f.get("type") == "subscribe" and f.get("sub") == "fleet"]
+                    assert fleet_resumes and fleet_resumes[-1].get("cursor") == "fleet_c1", f"expected cursor resume, got {fleet_resumes}"
+                    # tick must not reset node source age; > 2*tick (31s) -> Unknown; >= staleAfterMs (46s) -> Stale
+                    ws_send_text(state.ws_conns[-1], json.dumps({"v": 1, "type": "tick", "server_at": 1795000030000}))
+                    page.clock.run_for(15000)
+                    node_hdr = page.locator("[data-node='laptop-a'] .mc-node-header").text_content() or ""
+                    assert "source 0s ago" not in node_hdr, f"tick reset source age: {node_hdr}"
+                    page.clock.run_for(16000)
+                    page.wait_for_selector("[data-connection-badge='Unknown']", timeout=5000)
+                    page.clock.run_for(15000)
+                    page.wait_for_selector("[data-connection-badge='Stale']", timeout=5000)
 
-                # WR-5(c): 4401 -> one immediate re-admit and cursor resume
-                state.client_frames.clear()
-                conns_before = len(state.ws_conns)
-                ws_send_close(state.ws_conns[-1], 4401, "auth expired")
-                page.wait_for_timeout(150)
-                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
-                assert len(state.ws_conns) == conns_before + 1
-                fleet_4401 = [f for f in state.client_frames if f.get("type") == "subscribe" and f.get("sub") == "fleet"]
-                assert fleet_4401 and fleet_4401[-1].get("cursor") == "c_live", f"4401 must resume cursor, got {fleet_4401}"
+                    # Refresh live state before 4401/4403/4409
+                    ws_send_text(
+                        state.ws_conns[-1],
+                        json.dumps({"v": 1, "type": "event", "sub": "fleet", "seq": 2, "cursor": "c_live", "at": 1795000062000,
+                                    "delta": {"kind": "node_status", "node": "laptop-a", "status": "healthy", "delivery": "delayed", "history_hidden": False}}),
+                    )
+                    page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
 
-                # WR-5(d): 4403 -> state cleared, one re-admit (no cursor), then refused re-admit stops at re-authenticate
-                state.client_frames.clear()
-                conns_before = len(state.ws_conns)
-                ws_send_close(state.ws_conns[-1], 4403, "policy changed")
-                page.wait_for_timeout(150)
-                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
-                assert len(state.ws_conns) == conns_before + 1
-                subs_4403 = [f for f in state.client_frames if f.get("type") == "subscribe"]
-                assert len(subs_4403) >= 2 and all("cursor" not in f for f in subs_4403), f"4403 must clear all cursors, got {subs_4403}"
+                    # WR-5(c): 4401 -> one immediate re-admit and cursor resume
+                    state.client_frames.clear()
+                    conns_before = len(state.ws_conns)
+                    ws_send_close(state.ws_conns[-1], 4401, "auth expired")
+                    page.wait_for_timeout(150)
+                    page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                    assert len(state.ws_conns) == conns_before + 1
+                    fleet_4401 = [f for f in state.client_frames if f.get("type") == "subscribe" and f.get("sub") == "fleet"]
+                    assert fleet_4401 and fleet_4401[-1].get("cursor") == "c_live", f"4401 must resume cursor, got {fleet_4401}"
 
-                # Second 4403 where re-admit upgrade fails -> stops at re-authenticate
-                state.ws_upgrade_status = 403
-                attempts_before = state.ws_attempts
-                ws_send_close(state.ws_conns[-1], 4403, "policy revoked")
-                page.wait_for_selector("a[href='/login']", timeout=5000)
-                page.clock.run_for(5000)
-                assert page.locator("[data-node='laptop-a']").count() == 0
-                assert state.ws_attempts == attempts_before + 1
-                ctx.close()
-                state.ws_upgrade_status = 101
+                    # WR-5(d): 4403 -> state cleared, one re-admit (no cursor), then refused re-admit stops at re-authenticate
+                    state.client_frames.clear()
+                    conns_before = len(state.ws_conns)
+                    ws_send_close(state.ws_conns[-1], 4403, "policy changed")
+                    page.wait_for_timeout(150)
+                    page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                    assert len(state.ws_conns) == conns_before + 1
+                    subs_4403 = [f for f in state.client_frames if f.get("type") == "subscribe"]
+                    assert len(subs_4403) >= 2 and all("cursor" not in f for f in subs_4403), f"4403 must clear all cursors, got {subs_4403}"
 
-                # WR-5(e): 4409 -> client incompatible, 0 retries
-                ctx = browser.new_context()
-                page = ctx.new_page()
-                page.clock.install()
-                page.goto(f"{origin}/", wait_until="domcontentloaded")
-                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
-                prev_attempts = state.ws_attempts
-                ws_send_close(state.ws_conns[-1], 4409, "version mismatch")
-                page.wait_for_selector(".mc-error", state="attached", timeout=5000)
-                page.clock.run_for(5000)
-                assert "client incompatible" in (page.locator(".mc-banner").text_content() or "")
-                assert state.ws_attempts == prev_attempts
-                ctx.close()
+                    # Second 4403 where re-admit upgrade fails -> stops at re-authenticate
+                    state.ws_upgrade_status = 403
+                    attempts_before = state.ws_attempts
+                    ws_send_close(state.ws_conns[-1], 4403, "policy revoked")
+                    page.wait_for_selector("a[href='/login']", timeout=5000)
+                    page.clock.run_for(5000)
+                    assert page.locator("[data-node='laptop-a']").count() == 0
+                    assert state.ws_attempts == attempts_before + 1
+                    ctx.close()
+                    state.ws_upgrade_status = 101
 
-                # WR-5(g): 302, 401, 403 probes stop & clear sentinel; 503 probe resumes backoff
-                for probe_code in (302, 401, 403):
-                    state.ws_upgrade_status = probe_code
-                    state.probe_status = probe_code
+                    # WR-5(e): 4409 -> client incompatible, 0 retries
+                    ctx = browser.new_context()
+                    page = ctx.new_page()
+                    page.clock.install()
+                    page.goto(f"{origin}/", wait_until="domcontentloaded")
+                    page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                    prev_attempts = state.ws_attempts
+                    ws_send_close(state.ws_conns[-1], 4409, "version mismatch")
+                    page.wait_for_selector(".mc-error", state="attached", timeout=5000)
+                    page.clock.run_for(5000)
+                    assert "client incompatible" in (page.locator(".mc-banner").text_content() or "")
+                    assert state.ws_attempts == prev_attempts
+                    ctx.close()
+
+                    # WR-5(g): 302, 401, 403 probes stop & clear sentinel; 503 probe resumes backoff
+                    for probe_code in (302, 401, 403):
+                        state.ws_upgrade_status = probe_code
+                        state.probe_status = probe_code
+                        state.probe_count = 0
+                        state.ws_attempts = 0
+                        ctx = browser.new_context()
+                        page = ctx.new_page()
+                        page.goto(f"{origin}/", wait_until="domcontentloaded")
+                        page.wait_for_selector("a[href='/login']", timeout=5000)
+                        assert state.probe_count == 1, f"probe {probe_code} count={state.probe_count}"
+                        assert state.ws_attempts == 1
+                        assert page.locator("[data-ssr-node='sentinel-node']").count() == 0
+                        ctx.close()
+
+                    state.ws_upgrade_status = 503
+                    state.probe_status = 503
                     state.probe_count = 0
                     state.ws_attempts = 0
                     ctx = browser.new_context()
                     page = ctx.new_page()
+                    page.clock.install()
                     page.goto(f"{origin}/", wait_until="domcontentloaded")
+                    page.wait_for_selector("[data-connection-badge='Reconnecting']", timeout=5000)
+                    assert state.probe_count >= 1
+                    page.clock.run_for(2500)
+                    page.wait_for_timeout(200)
+                    assert state.ws_attempts >= 2, f"503 probe must resume backoff, attempts={state.ws_attempts}"
+                    # Exhaust all 8 reconnect_max_attempts (1 initial + 8 retries = 9 total) -> Stale + manual Reconnect
+                    for _ in range(10):
+                        page.clock.run_for(31000)
+                        page.wait_for_timeout(80)
+                    page.wait_for_selector("[data-connection-badge='Stale']", timeout=5000)
+                    assert page.locator("button:has-text('Reconnect')").count() == 1, "exhausted reconnect must show manual Reconnect button"
+                    assert state.ws_attempts == 9, f"expected 1 initial + 8 reconnect_max_attempts = 9, got {state.ws_attempts}"
+                    ctx.close()
+                    state.ws_upgrade_status = 101
+                    state.probe_status = 200
+
+                    # WR-8a: real cross-site OIDC login/callback/logout with auto-approving IdP
+                    state.scenario = "normal"
+                    state.idp_auto_approve = True
+                    state.login_hits = 0
+                    state.records.clear()
+                    ctx = browser.new_context()
+                    page = ctx.new_page()
+                    page.goto(f"{origin}/", wait_until="domcontentloaded")
+                    assert page.locator("a[href='/login']").count() == 1
+                    assert page.locator("form[action='/logout']").count() == 0
+                    assert state.login_hits == 0
+                    page.locator("a[href='/login']").click()
+                    page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
+                    assert state.login_hits == 1, f"expected 1 /login hit, got {state.login_hits}"
+                    assert len(state.records) == 1, f"expected 1 record, got {len(state.records)}"
+                    # Logout must hold even against auto-approving IdP
+                    page.locator("form[action='/logout'] button").click()
                     page.wait_for_selector("a[href='/login']", timeout=5000)
-                    assert state.probe_count == 1, f"probe {probe_code} count={state.probe_count}"
-                    assert state.ws_attempts == 1
-                    assert page.locator("[data-ssr-node='sentinel-node']").count() == 0
+                    assert state.login_hits == 1, "logout re-triggered /login!"
+                    assert len(state.records) == 1
+                    assert all(r["revoked"] for r in state.records.values())
                     ctx.close()
 
-                state.ws_upgrade_status = 503
-                state.probe_status = 503
-                state.probe_count = 0
-                state.ws_attempts = 0
-                ctx = browser.new_context()
-                page = ctx.new_page()
-                page.clock.install()
-                page.goto(f"{origin}/", wait_until="domcontentloaded")
-                page.wait_for_selector("[data-connection-badge='Reconnecting']", timeout=5000)
-                assert state.probe_count >= 1
-                page.clock.run_for(2500)
-                page.wait_for_timeout(200)
-                assert state.ws_attempts >= 2, f"503 probe must resume backoff, attempts={state.ws_attempts}"
-                # Exhaust all 8 reconnect_max_attempts (1 initial + 8 retries = 9 total) -> Stale + manual Reconnect
-                for _ in range(10):
-                    page.clock.run_for(31000)
-                    page.wait_for_timeout(80)
-                page.wait_for_selector("[data-connection-badge='Stale']", timeout=5000)
-                assert page.locator("button:has-text('Reconnect')").count() == 1, "exhausted reconnect must show manual Reconnect button"
-                assert state.ws_attempts == 9, f"expected 1 initial + 8 reconnect_max_attempts = 9, got {state.ws_attempts}"
-                ctx.close()
-                state.ws_upgrade_status = 101
-                state.probe_status = 200
-
-                # WR-8a: real cross-site OIDC login/callback/logout with auto-approving IdP
-                state.scenario = "normal"
-                state.idp_auto_approve = True
-                state.login_hits = 0
-                state.records.clear()
-                ctx = browser.new_context()
-                page = ctx.new_page()
-                page.goto(f"{origin}/", wait_until="domcontentloaded")
-                assert page.locator("a[href='/login']").count() == 1
-                assert page.locator("form[action='/logout']").count() == 0
-                assert state.login_hits == 0
-                page.locator("a[href='/login']").click()
-                page.wait_for_selector("[data-connection-badge='Delayed']", timeout=5000)
-                assert state.login_hits == 1, f"expected 1 /login hit, got {state.login_hits}"
-                assert len(state.records) == 1, f"expected 1 record, got {len(state.records)}"
-                # Logout must hold even against auto-approving IdP
-                page.locator("form[action='/logout'] button").click()
-                page.wait_for_selector("a[href='/login']", timeout=5000)
-                assert state.login_hits == 1, "logout re-triggered /login!"
-                assert len(state.records) == 1
-                assert all(r["revoked"] for r in state.records.values())
-                ctx.close()
-
-                print("WR-1..WR-8a browser gate PASS")
-            finally:
-                browser.close()
+                    print("WR-1..WR-8a browser gate PASS")
+                finally:
+                    browser.close()
+        except Exception:
+            print("=== Chromium diagnostic dump ===", file=sys.stderr)
+            print("lifecycle_events:", lifecycle_events, file=sys.stderr)
+            if exit_log.exists():
+                print(exit_log.read_text(encoding="utf-8", errors="replace"), file=sys.stderr)
+            if stderr_log.exists():
+                print("--- chromium stderr ---", file=sys.stderr)
+                print(stderr_log.read_text(encoding="utf-8", errors="replace"), file=sys.stderr)
+            raise
     finally:
         app_srv.shutdown()
         idp_srv.shutdown()
