@@ -60,6 +60,15 @@ env:
 # One upstream-Nix column, not gen-harness's three-evaluator matrix: this is not a gen library, so
 # evaluator divergence is not what its CI tests.
 jobs:
+  pairing-netns-probe:
+    if: ${{ !inputs.client_build_probe && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Probe two-namespace veth and TLS 1.3 isolation
+        run: python3 scripts/pairing-netns-probe.py
+
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15
