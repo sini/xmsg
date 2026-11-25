@@ -2,7 +2,11 @@ use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, process::Chi
 static RECEIPT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn configure(command: &mut std::process::Command) {
-    for key in ["XMSG_EXECUTOR_PROOF_CHILDREN", "XMSG_EXECUTOR_PROOF_NONCE"] {
+    for key in [
+        "XMSG_EXECUTOR_PROOF_CHILDREN",
+        "XMSG_EXECUTOR_PROOF_NONCE",
+        "XMSG_EXECUTOR_FD_DIAGNOSTICS",
+    ] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }

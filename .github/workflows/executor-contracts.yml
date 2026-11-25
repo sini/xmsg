@@ -53,3 +53,26 @@ jobs:
           name: executor-contracts-${{ runner.os }}
           path: .artifacts/executor
           if-no-files-found: error
+  temporary-fd-diagnostics:
+    if: github.event_name == 'pull_request' && github.event.pull_request.number == 315
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install diagnostic toolchain
+        run: rustup toolchain install 1.88 --profile minimal
+      - name: Precompile isolated test binary
+        run: cargo +1.88 test --manifest-path extensions/executor/Cargo.toml --locked --lib --no-run
+        timeout-minutes: 10
+      - name: Bounded metadata-only diagnostic controls
+        run: python3 extensions/executor/scripts/fd_diagnostic_run.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: temporary-executor-fd-diagnostics
+          path: .artifacts/executor-fd
+          if-no-files-found: warn

@@ -152,6 +152,8 @@ pub(crate) fn run_until(manifest: ChildManifest, expires: Instant) -> Result<(),
     if Instant::now() >= expires {
         return Err(ErrorCode::DeadlineExpired.into());
     }
+    #[cfg(test)]
+    crate::fd_diagnostics::before_spawn(&mut command);
     let mut backend =
         journal.spawn_native_backend(admission, &manifest.identity, &unix_now, &mut command)?;
     let mut input = backend.stdin.take().ok_or(SupervisorError::Protocol)?;
