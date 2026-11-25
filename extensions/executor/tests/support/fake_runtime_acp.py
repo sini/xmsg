@@ -26,19 +26,29 @@ for descriptor in range(limit):
         identity = {"dev": metadata.st_dev, "ino": metadata.st_ino,
                     "kind": stat.S_IFMT(metadata.st_mode), "fd": descriptor}
         if os.environ.get("XMSG_EXECUTOR_FD_DIAGNOSTICS"):
-            identity["flags"] = fcntl.fcntl(descriptor, fcntl.F_GETFD)
             identity["mode"] = metadata.st_mode
-            peer = socket.socket(fileno=descriptor)
             try:
-                identity["socket_type"] = peer.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
-                identity["family"] = peer.family
-                for key, getter in [("sockname", peer.getsockname), ("peername", peer.getpeername)]:
+                identity["flags"] = fcntl.fcntl(descriptor, fcntl.F_GETFD)
+            except OSError as error:
+                identity["flags_error"] = {"errno": error.errno, "message": str(error)}
+            peer = None
+            try:
+                peer = socket.socket(fileno=descriptor)
+                for key, getter in [
+                    ("socket_type", lambda: peer.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)),
+                    ("family", lambda: peer.family),
+                    ("sockname", lambda: repr(peer.getsockname())),
+                    ("peername", lambda: repr(peer.getpeername())),
+                ]:
                     try:
-                        identity[key] = repr(getter())
+                        identity[key] = getter()
                     except OSError as error:
-                        identity[key] = repr(error)
+                        identity[key + "_error"] = {"errno": error.errno, "message": str(error)}
+            except OSError as error:
+                identity["socket_wrap_error"] = {"errno": error.errno, "message": str(error)}
             finally:
-                peer.detach()
+                if peer is not None:
+                    peer.detach()
         inherited.append(identity)
         if all(identity[key] == expected[key] for key in ("dev", "ino", "kind")):
             matching.append(identity)
