@@ -422,6 +422,10 @@ async fn real_emergency_disable_refuses_next_call_while_adapter_remains_current(
             fixture.adapter_is_current(),
             "adapter drift masked emergency disable"
         );
+        assert!(
+            fixture.caller_is_current(),
+            "caller drift masked emergency disable"
+        );
         let denied = dispatch(&bus, &bound, &call, &mut store).await;
         assert_eq!(
             bus.calls.lock().unwrap().len(),

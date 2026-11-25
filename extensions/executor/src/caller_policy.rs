@@ -381,6 +381,28 @@ impl CallerEligibility {
         Ok((provider, context, reference))
     }
     #[cfg(test)]
+    pub(crate) fn fixture_policy_revision(
+        &mut self,
+        reference: &mut CallerRecordReference,
+        revision: u64,
+    ) -> Result<(), MissingTrustProperty> {
+        self.protected()?;
+        if revision == 0 || !Arc::ptr_eq(&self.provider, &reference.provider) {
+            return Err(MissingTrustProperty::ExactCallerQualification);
+        }
+        let record = self
+            .records
+            .iter_mut()
+            .find(|record| record.id == reference.record.id)
+            .ok_or(MissingTrustProperty::ExactCallerQualification)?;
+        if !Arc::ptr_eq(&record.incarnation, &reference.record.incarnation) {
+            return Err(MissingTrustProperty::ExactCallerQualification);
+        }
+        record.policy_revision = revision;
+        reference.record.policy_revision = revision;
+        Ok(())
+    }
+    #[cfg(test)]
     pub(crate) fn fixture_revoke(
         &mut self,
         reference: &CallerRecordReference,

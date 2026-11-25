@@ -1457,7 +1457,24 @@ fn emergency_disable_blocks_queued_native_output_even_with_current_qualification
         .unwrap();
     f.record.policy_revision = 2;
     let policy = replace_adapter_policy(&f);
-    f.service.journal.lock().unwrap().runtime_policy = Some(policy);
+    {
+        let mut journal = f.service.journal.lock().unwrap();
+        policy
+            .callers
+            .fixture_policy_revision(&journal.db, 2)
+            .unwrap();
+        assert!(
+            policy.callers.require(&journal.db, id, 2, 102).is_ok(),
+            "caller drift masked emergency disable"
+        );
+        assert!(
+            policy
+                .require(&f.configuration.control.defaults[0].resolved, 2, 102, false)
+                .is_ok(),
+            "adapter drift masked emergency disable"
+        );
+        journal.runtime_policy = Some(policy);
+    }
     let (result, wire) = submit(&mut f, id, EPOCH);
     assert!(
         wire.is_empty(),

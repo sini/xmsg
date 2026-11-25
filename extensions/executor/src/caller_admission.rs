@@ -152,6 +152,37 @@ impl CallerAuthority {
         }
     }
     #[cfg(test)]
+    pub(crate) fn fixture_policy_revision(
+        &self,
+        db: &rusqlite::Connection,
+        revision: u64,
+    ) -> Result<(), ErrorCode> {
+        let mut state = self.state.lock().map_err(storage)?;
+        let State {
+            provider,
+            references,
+            ..
+        } = &mut *state;
+        for (id, admission) in references {
+            provider
+                .fixture_policy_revision(&mut admission.reference, revision)
+                .map_err(error)?;
+            let changed = db
+                .execute(
+                    "UPDATE caller_receipts SET receipt=?1 WHERE admission_id=?2",
+                    rusqlite::params![
+                        serde_json::to_string(&admission.receipt()).map_err(storage)?,
+                        id
+                    ],
+                )
+                .map_err(storage)?;
+            if changed != 1 {
+                return Err(ErrorCode::CallerReferenceUnavailable);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(test)]
     pub(crate) fn fixture_expiry_before_admission(&self, expires_at: i64) -> Result<(), ErrorCode> {
         let mut state = self.state.lock().map_err(storage)?;
         if !state.references.is_empty() {

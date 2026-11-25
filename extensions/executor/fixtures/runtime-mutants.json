@@ -328,5 +328,15 @@
     "test_module": "supervisor::tests",
     "test_file": "extensions/executor/src/supervisor_tests.rs",
     "assertion": "short metadata contention lost the same owned runtime"
+  },
+  {
+    "id": "runtime-emergency-disable-ignored",
+    "file": "extensions/executor/src/journal.rs",
+    "needle": "pub(crate) fn runtime_disabled(db: &Connection) -> Result<bool, ErrorCode> {\n    db.query_row(\n        \"SELECT disabled FROM runtime_control WHERE singleton=1\",\n        [],\n        |r| r.get(0),\n    )\n    .map_err(storage)\n}",
+    "replacement": "pub(crate) fn runtime_disabled(db: &Connection) -> Result<bool, ErrorCode> {\n    Ok(false)\n}",
+    "test": "emergency_disable_blocks_queued_native_output_even_with_current_qualification",
+    "test_module": "lifecycle::tests",
+    "test_file": "extensions/executor/src/lifecycle_tests.rs",
+    "assertion": "emergency disable submitted queued native content"
   }
 ]

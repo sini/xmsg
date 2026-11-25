@@ -181,10 +181,31 @@ impl ManagedContentFixture {
             vec![self.record.clone()],
             self.executor.clone(),
         ));
-        self.service.journal.lock().unwrap().runtime_policy = Some(updated.clone());
+        {
+            let mut journal = self.service.journal.lock().unwrap();
+            updated.callers.fixture_policy_revision(&journal.db, 2)?;
+            journal.runtime_policy = Some(updated.clone());
+        }
         self.store
             .fixture_with_mut(|store| store.journal.runtime_policy = Some(updated));
         Ok(())
+    }
+    pub(crate) fn caller_is_current(&self) -> bool {
+        let mut journal = self.service.journal.lock().unwrap();
+        let policy = journal.runtime_policy.clone().unwrap();
+        let tx = journal.db.transaction().unwrap();
+        let revision = crate::journal::config(&tx).unwrap().revision;
+        let id: i64 = tx
+            .query_row(
+                "SELECT admission_id FROM executions WHERE session_id=?1 AND generation=?2",
+                rusqlite::params![
+                    self.binding.session_id(),
+                    i64::try_from(self.binding.generation()).unwrap()
+                ],
+                |row| row.get(0),
+            )
+            .unwrap();
+        policy.callers.require(&tx, id, revision, 103).is_ok()
     }
     pub(crate) fn adapter_is_current(&self) -> bool {
         let mut journal = self.service.journal.lock().unwrap();
