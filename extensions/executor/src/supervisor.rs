@@ -7,6 +7,8 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
@@ -14,8 +16,8 @@ use std::{
         fd::{AsRawFd, RawFd},
         unix::{
             ffi::OsStrExt,
-            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-            net::{UnixListener, UnixStream},
+            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt},
+            net::UnixStream,
             process::CommandExt,
         },
     },
@@ -25,7 +27,7 @@ use std::{
     time::Duration,
 };
 
-const MAX_CONTROL: usize = 16384;
+const MAX_CONTROL: usize = crate::framing::MAX_FRAME_BYTES;
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SupervisorError {
     #[error("backend unavailable")]
@@ -58,7 +60,7 @@ pub(crate) struct OwnerRuntimeConfig {
     namespace_identity: Option<Vec<u8>>,
     private_parent: Option<PathBuf>,
     #[cfg(test)]
-    fixture: Option<FixtureProgram>,
+    pub(crate) fixture: Option<FixtureProgram>,
     #[cfg(test)]
     barrier: Option<FixtureBarrier>,
 }
@@ -151,7 +153,12 @@ impl OwnerRuntimeConfig {
         }
         Ok(())
     }
-    fn program(&self) -> Result<TrustedProgram, SupervisorError> {
+    fn program(
+        &self,
+        service: &ControlService,
+        admission: i64,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+    ) -> Result<TrustedProgram, SupervisorError> {
         #[cfg(test)]
         if let Some(p) = &self.fixture {
             return Ok(TrustedProgram {
@@ -162,13 +169,73 @@ impl OwnerRuntimeConfig {
                     "supervisor::tests::fixture_process_entrypoint".into(),
                     "--nocapture".into(),
                 ],
-                backend: p.backend.clone(),
-                python: p.python.clone(),
+                backend: if let Some(configuration) = &p.acp_configuration {
+                    let policy = service
+                        .journal
+                        .lock()
+                        .map_err(|_| ErrorCode::Storage)?
+                        .runtime_policy
+                        .clone()
+                        .ok_or(SupervisorError::BackendUnavailable)?;
+                    crate::runtime_process::Backend::Acp {
+                        configuration: Box::new(configuration.clone()),
+                        admission_id: admission,
+                        load_native: None,
+                        fixture_records: Some(policy.fixture_records()),
+                    }
+                } else {
+                    crate::runtime_process::Backend::Fixture {
+                        script: p.backend.clone(),
+                        python: p.python.clone(),
+                    }
+                },
                 #[cfg(test)]
                 accept_probe: p.accept_probe.clone(),
+                environment: p
+                    .acp_configuration
+                    .as_ref()
+                    .map(|c| c.launch_environment.snapshot())
+                    .transpose()?,
             });
         }
-        Err(SupervisorError::BackendUnavailable)
+        let journal = service.journal.lock().map_err(|_| ErrorCode::Storage)?;
+        let policy = journal
+            .runtime_policy
+            .clone()
+            .ok_or(SupervisorError::BackendUnavailable)?;
+        drop(journal);
+        let environment = policy.configuration.launch_environment.snapshot()?;
+        let mut journal = service.journal.lock().map_err(|_| ErrorCode::Storage)?;
+        let now = clock()?;
+        let tx = journal
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| ErrorCode::Storage)?;
+        let selected = crate::execution::revalidate_dispatch(&tx, admission, now)?;
+        let configuration = crate::journal::config(&tx)?;
+        policy.require(
+            &selected,
+            configuration.revision,
+            now,
+            crate::journal::runtime_disabled(&tx)?,
+        )?;
+        if policy.configuration.paths.runtime_root.canonicalize()? != self.root {
+            return Err(SupervisorError::Directory);
+        }
+        Ok(TrustedProgram {
+            executable: std::env::current_exe()?,
+            args: vec!["runtime".into()],
+            backend: crate::runtime_process::Backend::Acp {
+                configuration: Box::new(policy.configuration.clone()),
+                admission_id: admission,
+                load_native: None,
+                #[cfg(test)]
+                fixture_records: Some(policy.fixture_records()),
+            },
+            #[cfg(test)]
+            accept_probe: None,
+            environment: Some(environment),
+        })
     }
 }
 fn user_runtime_parent() -> Result<PathBuf, SupervisorError> {
@@ -211,6 +278,7 @@ pub(crate) struct FixtureProgram {
     pub(crate) backend: PathBuf,
     pub(crate) python: PathBuf,
     pub(crate) accept_probe: Option<PathBuf>,
+    pub(crate) acp_configuration: Option<crate::runtime_config::RuntimeConfig>,
 }
 #[cfg(test)]
 #[derive(Clone)]
@@ -221,8 +289,8 @@ pub(crate) struct FixtureBarrier {
 struct TrustedProgram {
     executable: PathBuf,
     args: Vec<String>,
-    backend: PathBuf,
-    python: PathBuf,
+    backend: crate::runtime_process::Backend,
+    environment: Option<Vec<(std::ffi::OsString, std::ffi::OsString)>>,
     #[cfg(test)]
     accept_probe: Option<PathBuf>,
 }
@@ -296,7 +364,7 @@ pub(crate) struct SupervisorEvent {
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
-enum SupervisorRequest {
+pub(crate) enum SupervisorRequest {
     Attach {
         identity: ExecutionIdentity,
     },
@@ -308,29 +376,46 @@ enum SupervisorRequest {
         after: u64,
         max: u16,
     },
+    SubmitNative {
+        identity: ExecutionIdentity,
+        admission_id: i64,
+        transport_epoch: String,
+    },
+    SubmitDecision {
+        identity: ExecutionIdentity,
+        approval_id: String,
+        transport_epoch: String,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ChildManifest {
-    identity: ExecutionIdentity,
-    socket: PathBuf,
-    lock_fd: RawFd,
-    startup_fd: RawFd,
+pub(crate) struct ChildManifest {
+    pub(crate) identity: ExecutionIdentity,
+    pub(crate) socket: PathBuf,
+    pub(crate) lock_fd: RawFd,
+    pub(crate) startup_fd: RawFd,
     #[cfg(test)]
     accept_probe: Option<PathBuf>,
-    max_wall_ms: u64,
-    max_content_bytes: u32,
-    workspace: PathBuf,
-    backend: PathBuf,
-    python: PathBuf,
+    pub(crate) max_wall_ms: u64,
+    pub(crate) max_content_bytes: u32,
+    pub(crate) workspace: PathBuf,
+    pub(crate) backend: crate::runtime_process::Backend,
 }
-struct DeadlineIo<'a, T: AsRawFd> {
+pub(crate) struct DeadlineIo<'a, T: AsRawFd> {
     inner: &'a mut T,
     expires: std::time::Instant,
     original_flags: i32,
+    #[cfg(test)]
+    before_poll: Option<Box<dyn FnOnce() + Send>>,
 }
 impl<'a, T: AsRawFd> DeadlineIo<'a, T> {
-    fn new(inner: &'a mut T, expires: std::time::Instant) -> std::io::Result<Self> {
+    pub(crate) fn set_deadline(&mut self, expires: std::time::Instant) {
+        self.expires = expires;
+    }
+    pub(crate) fn limit_to(&mut self, expires: std::time::Instant) {
+        self.expires = self.expires.min(expires);
+    }
+    pub(crate) fn new(inner: &'a mut T, expires: std::time::Instant) -> std::io::Result<Self> {
         let fd = inner.as_raw_fd();
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
@@ -340,9 +425,19 @@ impl<'a, T: AsRawFd> DeadlineIo<'a, T> {
             inner,
             expires,
             original_flags: flags,
+            #[cfg(test)]
+            before_poll: None,
         })
     }
-    fn ready(&self, event: i16) -> std::io::Result<()> {
+    #[cfg(test)]
+    pub(crate) fn fixture_before_poll(&mut self, callback: impl FnOnce() + Send + 'static) {
+        self.before_poll = Some(Box::new(callback));
+    }
+    fn ready(&mut self, event: i16) -> std::io::Result<()> {
+        #[cfg(test)]
+        if let Some(callback) = self.before_poll.take() {
+            callback();
+        }
         loop {
             let left = self
                 .expires
@@ -416,7 +511,7 @@ impl<T: Write + AsRawFd> Write for DeadlineIo<'_, T> {
         self.inner.flush()
     }
 }
-fn frame_until<T: Serialize>(
+pub(crate) fn frame_until<T: Serialize>(
     stream: &mut UnixStream,
     value: &T,
     expires: std::time::Instant,
@@ -436,11 +531,12 @@ fn frame<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<(), Supervi
         std::time::Instant::now() + Duration::from_secs(3),
     )
 }
-fn read_frame_until<T: serde::de::DeserializeOwned>(
+pub(crate) fn read_frame_until<T: serde::de::DeserializeOwned>(
     stream: &UnixStream,
     expires: std::time::Instant,
 ) -> Result<T, SupervisorError> {
-    let mut copy = stream.try_clone()?;
+    let mut copy =
+        xmsg::client::caller_attribution::with_fd_inheritance_gate(|| stream.try_clone())?;
     let mut data = Vec::new();
     BufReader::new(DeadlineIo::new(&mut copy, expires)?)
         .take((MAX_CONTROL + 1) as u64)
@@ -466,9 +562,9 @@ fn call(
     {
         return Err(SupervisorError::Protocol);
     }
-    let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+    let expires = std::time::Instant::now() + Duration::from_secs(3);
+    let mut stream = xmsg::client::caller_attribution::connect(socket, expires)
+        .map_err(|_| SupervisorError::Unknown)?;
     if crate::unix::peer(&stream)?.uid != xmsg::client::current_uid() {
         return Err(SupervisorError::Protocol);
     }
@@ -481,16 +577,37 @@ fn call(
             identity: expected.clone(),
         }
     };
-    frame(&mut stream, &request)?;
-    let hello: SupervisorHello = read_frame(&stream)?;
+    frame_until(&mut stream, &request, expires)?;
+    let hello: SupervisorHello = read_frame_until(&stream, expires)?;
     if hello.identity != *expected {
         return Err(SupervisorError::Protocol);
     }
     Ok(hello)
 }
+
+pub(crate) fn attach_existing(
+    root: &Path,
+    identity: &ExecutionIdentity,
+) -> Result<SupervisorHello, SupervisorError> {
+    call(
+        &root
+            .join(component(&identity.session_id, identity.generation))
+            .join("supervisor.sock"),
+        identity,
+        false,
+    )
+}
 struct OwnedProcessGroup {
     child: Child,
     startup: UnixStream,
+    bootstrap: Option<ChildManifest>,
+}
+
+fn negative_owned_group(group: i32) -> Result<i32, SupervisorError> {
+    if group <= 1 {
+        return Err(SupervisorError::Unknown);
+    }
+    group.checked_neg().ok_or(SupervisorError::Unknown)
 }
 impl OwnedProcessGroup {
     fn spawn(
@@ -504,7 +621,8 @@ impl OwnedProcessGroup {
         if fs::symlink_metadata(&socket).is_ok() {
             return Err(SupervisorError::Unknown);
         }
-        let (startup, child_startup) = UnixStream::pair()?;
+        let (startup, child_startup) =
+            xmsg::client::caller_attribution::with_fd_inheritance_gate(UnixStream::pair)?;
         startup.set_read_timeout(Some(Duration::from_secs(10)))?;
         let manifest = ChildManifest {
             identity: identity.clone(),
@@ -517,22 +635,49 @@ impl OwnedProcessGroup {
             max_content_bytes: budget.max_content_bytes,
             workspace: workspace.into(),
             backend: program.backend,
-            python: program.python,
         };
         let encoded = serde_json::to_string(&manifest).map_err(|_| SupervisorError::Protocol)?;
+        if encoded.len() + 1 > MAX_CONTROL {
+            return Err(SupervisorError::Protocol);
+        }
         let fds = [lock.file.as_raw_fd(), child_startup.as_raw_fd()];
         let mut command = Command::new(program.executable);
         command
             .args(program.args)
             .env_clear()
             .env("LANG", "C")
-            .env("XMSG_EXECUTOR_FIXTURE_ROLE", "supervisor")
-            .env("XMSG_EXECUTOR_FIXTURE_MANIFEST", encoded)
             .current_dir(workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
+        if let Some(environment) = program.environment {
+            command.env_remove("LANG").envs(environment);
+        }
+        #[cfg(test)]
+        let fixture_entry = command.get_args().any(|arg| arg == "--ignored");
+        #[cfg(not(test))]
+        let fixture_entry = false;
+        #[cfg(test)]
+        if fixture_entry {
+            crate::proof_processes::configure(&mut command);
+            command
+                .stderr(Stdio::inherit())
+                .env("XMSG_EXECUTOR_FIXTURE_ROLE", "supervisor")
+                .env("XMSG_EXECUTOR_FIXTURE_MANIFEST", &encoded);
+        }
+        if !fixture_entry
+            && matches!(
+                manifest.backend,
+                crate::runtime_process::Backend::Acp { .. }
+            )
+        {
+            command
+                .arg("--manifest-fd")
+                .arg(child_startup.as_raw_fd().to_string())
+                .arg("--max-wall-ms")
+                .arg(manifest.max_wall_ms.to_string());
+        }
         unsafe {
             command.pre_exec(move || {
                 for fd in fds {
@@ -544,17 +689,40 @@ impl OwnedProcessGroup {
                 Ok(())
             });
         }
+        let child = xmsg::client::caller_attribution::with_fd_inheritance_gate(|| command.spawn())?;
+        #[cfg(test)]
+        crate::proof_processes::record(&child);
+        drop(child_startup);
+        let bootstrap = match manifest.backend {
+            crate::runtime_process::Backend::Acp { .. } => Some(manifest),
+            #[cfg(test)]
+            crate::runtime_process::Backend::Fixture { .. } => None,
+        };
         Ok(Self {
-            child: command.spawn()?,
+            child,
             startup,
+            bootstrap,
         })
+    }
+    fn begin_bootstrap(&mut self) -> Result<(), SupervisorError> {
+        if let Some(manifest) = self.bootstrap.take() {
+            if let Err(error) = frame_until(
+                &mut self.startup,
+                &manifest,
+                std::time::Instant::now() + Duration::from_secs(2),
+            ) {
+                let _ = self.abort_owned();
+                return Err(error);
+            }
+        }
+        Ok(())
     }
     fn abort_owned(&mut self) -> Result<(), SupervisorError> {
         if self.child.try_wait()?.is_some() {
             return Err(SupervisorError::Unknown);
         }
         let pgid = i32::try_from(self.child.id()).map_err(|_| SupervisorError::Unknown)?;
-        if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
+        if unsafe { libc::kill(negative_owned_group(pgid)?, libc::SIGKILL) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
         self.child.wait()?;
@@ -575,12 +743,20 @@ impl SupervisorController {
         admission_id: i64,
         now: i64,
     ) -> Result<ExecutionObservation, SupervisorError> {
-        let program = self.config.program()?;
+        self.start_admitted_at(service, admission_id, &|| Ok(now))
+    }
+    pub(crate) fn start_admitted_at(
+        &self,
+        service: &ControlService,
+        admission_id: i64,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+    ) -> Result<ExecutionObservation, SupervisorError> {
+        let program = self.config.program(service, admission_id, clock)?;
         let (session, generation) = service
             .journal
             .lock()
             .map_err(|_| ErrorCode::Storage)?
-            .dispatch_identity(admission_id, now)?;
+            .dispatch_identity(admission_id, clock()?)?;
         validate_socket_path(
             &self
                 .config
@@ -610,12 +786,12 @@ impl SupervisorController {
             .journal
             .lock()
             .map_err(|_| ErrorCode::Storage)?
-            .reserve_launch(admission_id, now)?;
-        let workspace = self.prepare_workspace(service, &lease, now)?;
+            .reserve_launch(admission_id, clock()?)?;
+        let workspace = self.prepare_workspace(service, &lease, clock)?;
         let mut journal = service.journal.lock().map_err(|_| ErrorCode::Storage)?;
         #[cfg(test)]
         self.fixture_pause("before_spawn", 0)?;
-        journal.commit_spawn_intent(&lease, now)?;
+        journal.commit_spawn_intent(&lease, clock()?)?;
         let mut group = match OwnedProcessGroup::spawn(
             program,
             &lease.identity,
@@ -631,6 +807,16 @@ impl SupervisorController {
         };
         journal.db.execute("UPDATE executions SET diagnostic_pid=?1 WHERE session_id=?2 AND generation=?3 AND state='spawn_intent'",rusqlite::params![i64::from(group.child.id()),lease.identity.session_id,i64::try_from(lease.identity.generation).map_err(|_|ErrorCode::InvalidConfiguration)?]).map_err(|_|ErrorCode::Storage)?;
         drop(journal);
+        if let Err(error) = group.begin_bootstrap() {
+            service
+                .journal
+                .lock()
+                .map_err(|_| ErrorCode::Storage)?
+                .mark_execution(&lease.identity, false)?;
+            return Err(error);
+        }
+        #[cfg(test)]
+        let startup_wait = std::time::Instant::now();
         let hello: SupervisorHello = match read_frame::<SupervisorHello>(&group.startup) {
             Ok(hello)
                 if hello.identity == lease.identity
@@ -639,7 +825,15 @@ impl SupervisorController {
             {
                 hello
             }
-            _ => {
+            _invalid => {
+                #[cfg(test)]
+                {
+                    let receipt = serde_json::json!({"error":_invalid.as_ref().err().map(|error|format!("{error:?}")),"hello_received":_invalid.is_ok(),"elapsed_ms":startup_wait.elapsed().as_millis()});
+                    let _ = fs::write(
+                        lock.directory.join("startup-error.json"),
+                        serde_json::to_vec(&receipt).unwrap(),
+                    );
+                }
                 let _ = group.abort_owned();
                 service
                     .journal
@@ -659,7 +853,7 @@ impl SupervisorController {
                 &lease.identity,
                 hello.diagnostic_pid,
                 hello.event_cursor,
-                now,
+                clock()?,
             )?;
         Ok(ExecutionObservation {
             identity: lease.identity,
@@ -672,7 +866,7 @@ impl SupervisorController {
         &self,
         service: &ControlService,
         lease: &LaunchLease,
-        now: i64,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
     ) -> Result<PreparedWorkspace, SupervisorError> {
         let stored: Option<String> = service
             .journal
@@ -707,7 +901,7 @@ impl SupervisorController {
             .journal
             .lock()
             .map_err(|_| ErrorCode::Storage)?
-            .validate_reserved(lease, now)?;
+            .validate_reserved(lease, clock()?)?;
         let intended = plan.destination().to_string_lossy().into_owned();
         service
             .journal
@@ -911,15 +1105,16 @@ impl SupervisorController {
 #[path = "supervisor_tests.rs"]
 mod tests;
 
-fn terminate_owned_backend_group(backend: &mut Child) -> Result<(), SupervisorError> {
+pub(crate) fn terminate_owned_backend_group(backend: &mut Child) -> Result<(), SupervisorError> {
     let own = i32::try_from(std::process::id()).map_err(|_| SupervisorError::Unknown)?;
     if unsafe { libc::getpgrp() } != own {
         return Err(SupervisorError::Unknown);
     }
+    let target = negative_owned_group(own)?;
     if unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) } == libc::SIG_ERR {
         return Err(std::io::Error::last_os_error().into());
     }
-    if unsafe { libc::kill(-own, libc::SIGTERM) } != 0 {
+    if unsafe { libc::kill(target, libc::SIGTERM) } != 0 {
         return Err(std::io::Error::last_os_error().into());
     }
     if backend.try_wait()?.is_none() {
@@ -929,7 +1124,7 @@ fn terminate_owned_backend_group(backend: &mut Child) -> Result<(), SupervisorEr
     Ok(())
 }
 
-fn backend_live(backend: &mut Child, output_fd: RawFd) -> Result<bool, SupervisorError> {
+pub(crate) fn backend_live(backend: &mut Child, output_fd: RawFd) -> Result<bool, SupervisorError> {
     if backend.try_wait()?.is_some() {
         return Ok(false);
     }
@@ -944,18 +1139,126 @@ fn backend_live(backend: &mut Child, output_fd: RawFd) -> Result<bool, Superviso
     Ok(pipe.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0)
 }
 fn run_supervisor_process(manifest: ChildManifest) -> Result<(), SupervisorError> {
-    let expires = std::time::Instant::now()
+    run_supervisor_process_at(manifest, std::time::Instant::now())
+}
+
+fn run_supervisor_process_at(
+    manifest: ChildManifest,
+    started: std::time::Instant,
+) -> Result<(), SupervisorError> {
+    let expires = started
         .checked_add(Duration::from_millis(manifest.max_wall_ms))
         .ok_or(SupervisorError::Protocol)?;
+    #[cfg(test)]
+    let diagnostic_path = match &manifest.backend {
+        crate::runtime_process::Backend::Acp {
+            configuration,
+            fixture_records: Some(_),
+            ..
+        } => configuration
+            .programs
+            .first()
+            .and_then(|p| p.arguments.get(1))
+            .map(|trace| PathBuf::from(trace).with_extension("runtime-result")),
+        _ => None,
+    };
     let result = run_supervisor_until(manifest, expires);
-    if unsafe { libc::getpgrp() } == i32::try_from(std::process::id()).unwrap_or(-1) {
-        unsafe {
-            libc::kill(-libc::getpgrp(), libc::SIGKILL);
+    #[cfg(test)]
+    if let Some(destination) = diagnostic_path {
+        let receipt = serde_json::json!({"error":result.as_ref().err().map(|e|format!("{e:?}")),"elapsed_ms":started.elapsed().as_millis(),"pid":std::process::id()});
+        let _ = fs::write(destination, serde_json::to_vec(&receipt).unwrap());
+    }
+    let group = unsafe { libc::getpgrp() };
+    if group == i32::try_from(std::process::id()).unwrap_or(-1) {
+        if let Ok(target) = negative_owned_group(group) {
+            unsafe {
+                libc::kill(target, libc::SIGKILL);
+            }
         }
     }
     result
 }
+
+pub(crate) fn run_inherited(fd: RawFd, max_wall_ms: u64) -> Result<(), SupervisorError> {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    let started = std::time::Instant::now();
+    if fd <= 2 || max_wall_ms == 0 {
+        return Err(SupervisorError::Protocol);
+    }
+    let own = i32::try_from(std::process::id()).map_err(|_| SupervisorError::Unknown)?;
+    let group = unsafe { libc::getpgrp() };
+    if group != own {
+        return Err(SupervisorError::Unknown);
+    }
+    negative_owned_group(group)?;
+    let mut kind: libc::c_int = 0;
+    let mut length = std::mem::size_of_val(&kind) as libc::socklen_t;
+    if unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut kind as *mut libc::c_int).cast(),
+            &mut length,
+        )
+    } != 0
+        || kind != libc::SOCK_STREAM
+    {
+        return Err(SupervisorError::Protocol);
+    }
+    let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut address_length = std::mem::size_of_val(&address) as libc::socklen_t;
+    if unsafe {
+        libc::getpeername(
+            fd,
+            (&mut address as *mut libc::sockaddr_storage).cast(),
+            &mut address_length,
+        )
+    } != 0
+        || i32::from(address.ss_family) != libc::AF_UNIX
+    {
+        return Err(SupervisorError::Protocol);
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    if crate::unix::peer(&stream)?.uid != xmsg::client::current_uid() {
+        return Err(ErrorCode::PeerUid.into());
+    }
+    xmsg::client::caller_attribution::with_fd_inheritance_gate(|| restore_startup_cloexec(fd))?;
+    let deadline = started
+        .checked_add(Duration::from_millis(max_wall_ms))
+        .ok_or(SupervisorError::Protocol)?
+        .min(started + Duration::from_secs(2));
+    let mut manifest: ChildManifest = read_frame_until(&stream, deadline)?;
+    if manifest.startup_fd != fd {
+        return Err(SupervisorError::Protocol);
+    }
+    manifest.max_wall_ms = manifest.max_wall_ms.min(max_wall_ms);
+    if std::time::Instant::now()
+        >= started
+            .checked_add(Duration::from_millis(manifest.max_wall_ms))
+            .ok_or(SupervisorError::Protocol)?
+    {
+        return Err(ErrorCode::DeadlineExpired.into());
+    }
+    let _owned = stream.into_raw_fd();
+    run_supervisor_process_at(manifest, started)
+}
 fn run_supervisor_until(
+    manifest: ChildManifest,
+    expires: std::time::Instant,
+) -> Result<(), SupervisorError> {
+    #[cfg(test)]
+    if matches!(
+        manifest.backend,
+        crate::runtime_process::Backend::Fixture { .. }
+    ) {
+        return run_fixture_supervisor_until(manifest, expires);
+    }
+    crate::runtime_process::run_until(manifest, expires)
+}
+
+#[cfg(test)]
+fn run_fixture_supervisor_until(
     manifest: ChildManifest,
     expires: std::time::Instant,
 ) -> Result<(), SupervisorError> {
@@ -965,8 +1268,11 @@ fn run_supervisor_until(
     private_directory(manifest.socket.parent().ok_or(SupervisorError::Directory)?)?;
     let listener = UnixListener::bind(&manifest.socket)?;
     fs::set_permissions(&manifest.socket, fs::Permissions::from_mode(0o600))?;
-    let mut backend = Command::new(&manifest.python)
-        .arg(&manifest.backend)
+    let crate::runtime_process::Backend::Fixture { python, script } = &manifest.backend else {
+        return Err(SupervisorError::Protocol);
+    };
+    let mut backend = Command::new(python)
+        .arg(script)
         .env_clear()
         .env("LANG", "C")
         .current_dir(&manifest.workspace)
@@ -1097,9 +1403,17 @@ fn run_supervisor_until(
         let expected = match &request {
             SupervisorRequest::Attach { identity }
             | SupervisorRequest::Stop { identity }
-            | SupervisorRequest::ReadEvents { identity, .. } => identity,
+            | SupervisorRequest::ReadEvents { identity, .. }
+            | SupervisorRequest::SubmitNative { identity, .. }
+            | SupervisorRequest::SubmitDecision { identity, .. } => identity,
         };
         if expected != &manifest.identity {
+            continue;
+        }
+        if matches!(
+            request,
+            SupervisorRequest::SubmitNative { .. } | SupervisorRequest::SubmitDecision { .. }
+        ) {
             continue;
         }
         if let SupervisorRequest::ReadEvents { after, max, .. } = request {
@@ -1140,4 +1454,12 @@ fn run_supervisor_until(
         }
         frame_until(&mut stream, &hello, request_deadline)?;
     }
+}
+
+fn restore_startup_cloexec(fd: libc::c_int) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }

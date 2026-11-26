@@ -4,7 +4,7 @@ use crate::{
     framing::MAX_FRAME_BYTES,
     protocol::ControlRequest,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     os::{
@@ -18,9 +18,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-enum WireReply<T: Serialize> {
+pub(crate) enum WireReply<T> {
     Ok { result: T },
     Error { code: ErrorCode },
 }
@@ -118,7 +118,7 @@ pub(crate) fn peer(stream: &UnixStream) -> Result<PeerWitness, ErrorCode> {
         Err(ErrorCode::PeerUid)
     }
 }
-fn line(reader: &mut impl BufRead, limit: usize) -> Result<Vec<u8>, ErrorCode> {
+pub(crate) fn line(reader: &mut impl BufRead, limit: usize) -> Result<Vec<u8>, ErrorCode> {
     let mut bytes = Vec::new();
     reader
         .take((limit + 1) as u64)
@@ -198,6 +198,29 @@ impl ControlService {
             let request: ControlRequest =
                 serde_json::from_slice(&body).map_err(|_| ErrorCode::MalformedFrame)?;
             self.human(peer, &proof, request, now())
+        })();
+        reply(&mut stream, result)
+    }
+
+    pub fn handle_native_human_connection(&self, mut stream: UnixStream) -> Result<(), ErrorCode> {
+        prepare(&stream)?;
+        let peer = peer(&stream)?;
+        let mut reader = BufReader::new(stream.try_clone().map_err(|_| ErrorCode::Storage)?);
+        let proof = match line(&mut reader, 256) {
+            Ok(proof) => proof,
+            Err(code) => return reply::<ControlReply>(&mut stream, Err(code)),
+        };
+        let body = match line(&mut reader, MAX_FRAME_BYTES) {
+            Ok(body) => body,
+            Err(code) => return reply::<ControlReply>(&mut stream, Err(code)),
+        };
+        if let Ok(query) = serde_json::from_slice::<crate::approval::HumanPendingQuery>(&body) {
+            return reply(&mut stream, self.pending_human(peer, &proof, query));
+        }
+        let result = (|| {
+            let call: crate::approval::HumanDecisionCall =
+                serde_json::from_slice(&body).map_err(|_| ErrorCode::MalformedFrame)?;
+            self.native_human(peer, &proof, call)
         })();
         reply(&mut stream, result)
     }

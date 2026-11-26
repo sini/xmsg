@@ -84,6 +84,9 @@ pub(crate) struct CallBinding {
 pub(crate) struct TrustedPrincipal {
     id: String,
     binding: CallBinding,
+    authority_stamp: Option<Box<xmsg::client::caller_attribution::AuthorityStamp>>,
+    attestor_epoch: Option<String>,
+    context_digest: Option<String>,
 }
 mod sealed {
     pub trait Sealed {}
@@ -114,8 +117,29 @@ pub(crate) fn principal(
     Ok(principal)
 }
 impl TrustedPrincipal {
+    #[cfg(test)]
+    pub(crate) fn fixture_without_attestor_context(mut self) -> Self {
+        self.authority_stamp = None;
+        self.attestor_epoch = None;
+        self.context_digest = None;
+        self
+    }
     pub(crate) fn id(&self) -> &str {
         &self.id
+    }
+    pub(crate) fn binding(&self) -> &CallBinding {
+        &self.binding
+    }
+    pub(crate) fn authority_stamp(
+        &self,
+    ) -> Option<&xmsg::client::caller_attribution::AuthorityStamp> {
+        self.authority_stamp.as_deref()
+    }
+    pub(crate) fn attestor_epoch(&self) -> Option<&str> {
+        self.attestor_epoch.as_deref()
+    }
+    pub(crate) fn context_digest(&self) -> Option<&str> {
+        self.context_digest.as_deref()
     }
 }
 
@@ -184,6 +208,16 @@ pub(crate) mod fake {
             Ok(TrustedPrincipal {
                 id: self.principal.clone(),
                 binding,
+                authority_stamp: Some(Box::new(xmsg::client::caller_attribution::AuthorityStamp {
+                    source: "claude".into(),
+                    matched_pid: 44,
+                    matched_start: "fixture-start".into(),
+                    registration_digest: hex::encode(Sha256::digest(self.principal.as_bytes())),
+                    root_generation: None,
+                    child_generation: None,
+                })),
+                attestor_epoch: Some("a".repeat(32)),
+                context_digest: Some("b".repeat(64)),
             })
         }
     }

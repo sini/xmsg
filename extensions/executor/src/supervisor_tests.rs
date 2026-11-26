@@ -16,6 +16,18 @@ const OWNER: &[u8] = b"synthetic-owner-only-proof-0000000000";
 const HUMAN: &[u8] = b"synthetic-human-only-proof-0000000000";
 
 #[test]
+fn owned_group_signal_refuses_all_processes_and_reserved_targets() {
+    for value in [i32::MIN, -1, 0, 1] {
+        assert!(
+            negative_owned_group(value).is_err(),
+            "reserved signal target accepted"
+        );
+    }
+    assert_eq!(negative_owned_group(2).unwrap(), -2);
+    assert_eq!(negative_owned_group(123).unwrap(), -123);
+}
+
+#[test]
 fn long_socket_path_refuses_before_execution_or_workspace_effects() {
     let f = fixture();
     admit(&f);
@@ -174,7 +186,7 @@ fn missing_startup_connection_is_bounded_and_child_is_reaped() {
         .unwrap();
     let pid = child.id() as libc::pid_t;
     {
-        let _child = FixtureDaemon(child);
+        let _child = FixtureDaemon::new(child);
         let failure = accept_fixture(&listener, "forced absent startup").unwrap_err();
         assert_eq!(failure.kind(), std::io::ErrorKind::TimedOut);
         assert!(failure.to_string().contains("forced absent startup"));
@@ -330,6 +342,7 @@ fn fixture() -> Fixture {
             team_id: "team-a".into(),
             profile_id: "safe".into(),
             resolved,
+            lifecycle_verbs: Vec::new(),
         }],
     };
     let service = ControlService::open(
@@ -381,8 +394,1066 @@ fn fake_runtime(f: &Fixture) -> OwnerRuntimeConfig {
         backend: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_acp_process.py"),
         python,
         accept_probe: None,
+        acp_configuration: None,
     });
     runtime
+}
+
+#[test]
+fn real_acp_bootstrap_uses_inherited_lease_and_observed_model_before_brief() {
+    real_acp_fixture(AcpScenario::Bootstrap);
+}
+
+#[test]
+fn codex_native_exec_uses_pinned_path_despite_inherited_override() {
+    real_acp_fixture(AcpScenario::CodexEnvironment);
+}
+
+#[test]
+fn continuous_native_frames_service_attach_and_strict_steer_before_batch_end() {
+    real_acp_fixture(AcpScenario::Fairness);
+}
+
+#[test]
+fn prelaunch_failed_request_is_terminal_and_does_not_block_one_slot_after_restart() {
+    real_acp_fixture(AcpScenario::PrelaunchFailure);
+}
+
+#[test]
+fn qualified_reconnect_attaches_same_live_owned_lease_without_native_session_or_launch() {
+    real_acp_fixture(AcpScenario::Reconnect);
+}
+enum AcpScenario {
+    Bootstrap,
+    CodexEnvironment,
+    Fairness,
+    PrelaunchFailure,
+    Reconnect,
+    WriterShort,
+    WriterHeld,
+    UnsupportedRequest,
+}
+#[test]
+fn unsupported_native_request_gets_bounded_failure_without_human_or_terminal_execution() {
+    real_acp_fixture(AcpScenario::UnsupportedRequest);
+}
+#[test]
+fn short_journal_writer_preserves_owned_runtime_and_reconnect() {
+    real_acp_fixture(AcpScenario::WriterShort);
+}
+#[test]
+fn held_journal_writer_has_bounded_unknown_without_native_replay() {
+    real_acp_fixture(AcpScenario::WriterHeld);
+}
+fn acp_lease_state(root: &Path, identity: &ExecutionIdentity) -> String {
+    let lease = root
+        .join(component(&identity.session_id, identity.generation))
+        .join("execution.lock");
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(lease)
+    {
+        Ok(file) => file,
+        Err(error) => return format!("open:{:?}", error.kind()),
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) }, 0);
+        "free".into()
+    } else {
+        format!("held:{:?}", std::io::Error::last_os_error().kind())
+    }
+}
+fn acp_failure_snapshot(
+    service: &ControlService,
+    trace: &Path,
+    runtime: &Path,
+    identity: &ExecutionIdentity,
+    elapsed: std::time::Duration,
+) -> serde_json::Value {
+    let journal = service.journal.lock().unwrap();
+    let rows = |sql: &str| -> serde_json::Value {
+        let result = (|| -> rusqlite::Result<Vec<String>> {
+            let mut statement = journal.db.prepare(sql)?;
+            let values = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(values)
+        })();
+        match result {
+            Ok(values) => serde_json::json!(values),
+            Err(error) => serde_json::json!({"error":error.to_string()}),
+        }
+    };
+    let raw = fs::read(trace).unwrap_or_default();
+    let methods: Vec<_> = String::from_utf8_lossy(&raw)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .map(|frame| serde_json::json!({"id":frame["id"],"method":frame["method"]}))
+        .collect();
+    let startup_error = fs::read(
+        runtime
+            .join(component(&identity.session_id, identity.generation))
+            .join("startup-error.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+    serde_json::json!({"startup_error":startup_error,"elapsed_ms":elapsed.as_millis(),"unix_now":crate::runtime_process::unix_now().ok(),
+        "lease":acp_lease_state(runtime,identity),"trace_bytes":raw.len(),"trace_methods":methods,
+        "executions":rows("SELECT session_id||':'||generation||':'||state||':'||cursor FROM executions ORDER BY admission_id"),
+        "sessions":rows("SELECT id||':'||generation||':'||state||':'||coalesce(active_turn,'-') FROM sessions ORDER BY id"),
+        "native_operations":rows("SELECT admission_id||':'||state||':'||coalesce(rpc_id,'-') FROM native_operations ORDER BY admission_id"),
+        "bindings":rows("SELECT session_id||':'||generation||':'||json_extract(binding,'$.expires_at') FROM native_bindings ORDER BY session_id")})
+}
+fn real_acp_fixture(scenario: AcpScenario) {
+    let codex_environment = matches!(scenario, AcpScenario::CodexEnvironment);
+    let fairness = matches!(scenario, AcpScenario::Fairness);
+    let prelaunch_failure = matches!(scenario, AcpScenario::PrelaunchFailure);
+    let reconnect = matches!(
+        scenario,
+        AcpScenario::Reconnect | AcpScenario::WriterShort | AcpScenario::WriterHeld
+    );
+    let writer_probe = matches!(scenario, AcpScenario::WriterShort | AcpScenario::WriterHeld);
+    let short_writer = matches!(scenario, AcpScenario::WriterShort);
+    let scenario_started = std::time::Instant::now();
+    let unsupported = matches!(scenario, AcpScenario::UnsupportedRequest);
+    use crate::runtime_config::{
+        PinnedExecutable, ProgramConfig, RuntimeConfig, ServicePaths, WorkspaceConfig,
+    };
+    use sha2::{Digest, Sha256};
+    let f = fixture();
+    let mut runtime = fake_runtime(&f);
+    let python = runtime
+        .fixture
+        .as_ref()
+        .unwrap()
+        .python
+        .canonicalize()
+        .unwrap();
+    let pinned = PinnedExecutable {
+        sha256: hex::encode(Sha256::digest(fs::read(&python).unwrap())),
+        path: python,
+    };
+    let pin = crate::capability::builtin_pins()
+        .unwrap()
+        .pins
+        .remove(usize::from(codex_environment))
+        .pin;
+    let trace = f.dir.path().join("native-wire.jsonl");
+    let barrier_path = f.dir.path().join("prompt-barrier");
+    let barrier = UnixListener::bind(&barrier_path).unwrap();
+    barrier.set_nonblocking(true).unwrap();
+    let buffer_path = f.dir.path().join("buffer-barrier");
+    let buffer_barrier = UnixListener::bind(&buffer_path).unwrap();
+    buffer_barrier.set_nonblocking(true).unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_runtime_acp.py");
+    let mut config = f.config.clone();
+    if reconnect {
+        config.grants.push(Grant {
+            principal: "worker".into(),
+            verb: Verb::Resume,
+            target: GrantTarget::Session {
+                session_id: "session-1".into(),
+                generation: 1,
+            },
+        });
+    }
+    if fairness {
+        config.grants.push(Grant {
+            principal: "worker".into(),
+            verb: Verb::Steer,
+            target: GrantTarget::Session {
+                session_id: "session-1".into(),
+                generation: 1,
+            },
+        });
+    }
+    let native_mode = if codex_environment {
+        "read-only"
+    } else {
+        "default"
+    };
+    if codex_environment {
+        config.profiles[0].harness = Harness::Codex;
+    }
+    let resolved = &mut config.defaults[0].resolved;
+    resolved.harness = pin.harness.clone();
+    resolved.qualification.pin_id = pin.id.clone();
+    resolved.qualification.adapter_version = pin.adapter_version;
+    resolved.qualification.runtime_version = pin.runtime_version;
+    resolved.qualification.native_mode = native_mode.into();
+    let model = resolved.model.clone();
+    let workspace = resolved.workspace.clone();
+    let root = f.dir.path();
+    let mut configuration = RuntimeConfig {
+        bus: None,
+        version: 1,
+        control: config,
+        paths: ServicePaths {
+            journal: root.join("real-acp-journal.db"),
+            lifecycle_socket: root.join("lifecycle"),
+            owner_socket: root.join("owner"),
+            human_socket: root.join("human"),
+            attribution_socket: root.join("attribution"),
+            runtime_root: runtime.root.clone(),
+            owner_credential_file: root.join("owner-proof"),
+            human_credential_file: root.join("human-proof"),
+        },
+        programs: vec![ProgramConfig {
+            pin_id: pin.id,
+            adapter: pinned.clone(),
+            native: pinned.clone(),
+            arguments: vec![
+                script.to_string_lossy().into_owned(),
+                trace.to_string_lossy().into_owned(),
+                barrier_path.to_string_lossy().into_owned(),
+            ],
+            native_mode: native_mode.into(),
+            model,
+            native_model_id: "fake-model".into(),
+        }],
+        workspaces: vec![WorkspaceConfig {
+            repo_id: workspace.repo_identity,
+            repository: root.join("repo"),
+            approved_root: root.join("worktrees"),
+            base_revision: workspace.base_revision,
+            destination_selector: workspace.destination_selector,
+        }],
+        launch_environment: crate::launch_environment::LaunchEnvironment {
+            search_path: vec![std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .find(|directory| directory.join("git").is_file())
+                .unwrap()],
+            account_home: None,
+        },
+    };
+    if writer_probe {
+        configuration.control.defaults[0]
+            .resolved
+            .budget
+            .worker_slots = 1;
+        configuration.programs[0].arguments.extend([
+            "journal-contention".into(),
+            buffer_path.to_string_lossy().into_owned(),
+        ]);
+    }
+    if fairness {
+        configuration.programs[0].arguments.extend([
+            "fairness".into(),
+            buffer_path.to_string_lossy().into_owned(),
+        ]);
+    }
+    if unsupported {
+        configuration.programs[0].arguments.extend([
+            "unsupported".into(),
+            buffer_path.to_string_lossy().into_owned(),
+        ]);
+    }
+    if prelaunch_failure {
+        configuration.control.defaults[0]
+            .resolved
+            .budget
+            .worker_slots = 1;
+        let mut bad = configuration.control.defaults[0].clone();
+        bad.team_id = "bad-team".into();
+        bad.resolved.workspace.repo_identity = "bad-repo".into();
+        configuration.control.defaults.push(bad);
+        let mut bad_workspace = configuration.workspaces[0].clone();
+        bad_workspace.repo_id = "bad-repo".into();
+        bad_workspace.repository = root.join("absent-repository");
+        configuration.workspaces.push(bad_workspace);
+        configuration.control.grants.push(Grant {
+            principal: "worker".into(),
+            verb: Verb::Dispatch,
+            target: GrantTarget::Team {
+                team_id: "bad-team".into(),
+            },
+        });
+        for verb in [Verb::Status, Verb::Result] {
+            configuration.control.grants.push(Grant {
+                principal: "worker".into(),
+                verb,
+                target: GrantTarget::Session {
+                    session_id: "session-1".into(),
+                    generation: 1,
+                },
+            });
+        }
+    }
+    for index in 0..configuration.control.defaults.len() {
+        let digest = configuration
+            .effective_digest(&configuration.control.defaults[index].resolved)
+            .unwrap();
+        configuration.control.defaults[index]
+            .resolved
+            .qualification
+            .effective_config_digest = digest;
+    }
+    let executor = Arc::new(
+        crate::runtime_config::ExecutableArtifact::observe(&std::env::current_exe().unwrap())
+            .unwrap(),
+    );
+    let (host, kernel) = crate::runtime_policy::runtime_envelope().unwrap();
+    let now = crate::runtime_process::unix_now().unwrap();
+    let record = crate::eligibility::AdapterQualification {
+        key: configuration.control.defaults[0]
+            .resolved
+            .qualification
+            .clone(),
+        adapter_sha256: pinned.sha256.clone(),
+        native_sha256: pinned.sha256,
+        executor_sha256: executor.sha256.clone(),
+        capabilities: vec![
+            crate::capability::Capability::StrictSteer,
+            crate::capability::Capability::Reconnect,
+        ],
+        host,
+        uid: xmsg::client::current_uid(),
+        operating_system: std::env::consts::OS.into(),
+        architecture: std::env::consts::ARCH.into(),
+        kernel,
+        policy_revision: 1,
+        expires_at: now + 60,
+        revoked: false,
+    };
+    let mut records = vec![record.clone()];
+    if prelaunch_failure {
+        let mut bad_record = record;
+        bad_record.key = configuration.control.defaults[1]
+            .resolved
+            .qualification
+            .clone();
+        records.push(bad_record);
+    }
+    let mut service = ControlService::open(
+        &configuration.paths.journal,
+        xmsg::client::current_uid(),
+        configuration.control.clone(),
+        ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
+    )
+    .unwrap()
+    .fixture_attributed("worker");
+    service.journal.lock().unwrap().runtime_policy = Some(Arc::new(
+        crate::runtime_policy::RuntimePolicy::fixture(configuration.clone(), records, executor),
+    ));
+    runtime.fixture.as_mut().unwrap().acp_configuration = Some(configuration.clone());
+    let mut repeated_outcome = None;
+    if prelaunch_failure {
+        let mut bad = ControlRequest::dispatch("bad-first".into(), "no process should run".into());
+        bad.target = Some(Target::Team {
+            team_id: "bad-team".into(),
+        });
+        let admitted = service.lifecycle(peer(), bad.clone(), now).unwrap();
+        let old_reply = serde_json::to_value(&admitted).unwrap();
+        assert!(old_reply.get("pre_launch_failure").is_none());
+        assert!(
+            serde_json::from_value::<crate::control::ControlReply>(old_reply)
+                .unwrap()
+                .pre_launch_failure
+                .is_none()
+        );
+        assert!(crate::operator::dispatch_once_inner(
+            &service,
+            &configuration,
+            runtime.fixture.clone()
+        )
+        .is_err());
+        let policy = service.journal.lock().unwrap().runtime_policy.clone();
+        drop(service);
+        service = ControlService::open(
+            &configuration.paths.journal,
+            xmsg::client::current_uid(),
+            configuration.control.clone(),
+            ProvisionedCredentials::from_bytes(OWNER, HUMAN).unwrap(),
+        )
+        .unwrap()
+        .fixture_attributed("worker");
+        service.journal.lock().unwrap().runtime_policy = policy;
+        let reserved = service.journal.lock().unwrap().reserve_launch(1, now);
+        let direct = SupervisorController::new(runtime.clone()).start_admitted_at(
+            &service,
+            1,
+            &crate::runtime_process::unix_now,
+        );
+        let effects: i64 = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            effects, 0,
+            "direct controller reopened a terminal failed admission"
+        );
+        assert!(
+            !trace.exists(),
+            "terminal failed admission reached the native process"
+        );
+        assert!(matches!(reserved, Err(ErrorCode::PreLaunchFailed)));
+        assert!(matches!(
+            direct,
+            Err(SupervisorError::Journal(ErrorCode::PreLaunchFailed))
+        ));
+        repeated_outcome = Some(crate::operator::dispatch_once_inner(
+            &service,
+            &configuration,
+            runtime.fixture.clone(),
+        ));
+        let replay = service.lifecycle(peer(), bad, now).unwrap();
+        assert!(replay.replayed && replay.historical);
+        assert_eq!(
+            replay.pre_launch_failure,
+            Some(crate::control::PreLaunchFailure::Failed {
+                admission_id: 1,
+                code: ErrorCode::InvalidConfiguration,
+                submission: crate::control::PreLaunchSubmission::NotAttempted
+            })
+        );
+        for (id, action) in [
+            (
+                "bad-status",
+                Action::Status(crate::protocol::ReadArgs {
+                    max_events: 1,
+                    max_text_bytes: 1024,
+                }),
+            ),
+            (
+                "bad-result",
+                Action::Result(crate::protocol::ReadArgs {
+                    max_events: 1,
+                    max_text_bytes: 1024,
+                }),
+            ),
+        ] {
+            let reply = service
+                .lifecycle(
+                    peer(),
+                    ControlRequest {
+                        version: 1,
+                        request_id: id.into(),
+                        target: Some(Target::Execution {
+                            session_id: "session-1".into(),
+                            generation: 1,
+                        }),
+                        action,
+                        deadline: None,
+                    },
+                    now,
+                )
+                .unwrap();
+            assert_eq!(reply.pre_launch_failure, replay.pre_launch_failure);
+            if let Some(status) = reply.status {
+                assert_eq!(status.source, crate::protocol::ObservationSource::Journal);
+                assert_eq!(status.state, crate::protocol::SessionState::Unknown);
+            }
+            if let Some(result) = reply.result {
+                assert_eq!(result.outcome, crate::protocol::Outcome::Failed);
+                assert_eq!(result.provenance, "journal");
+                assert!(result.artifact_refs.is_empty());
+            }
+        }
+    }
+    let mut good = ControlRequest::dispatch("real-acp".into(), "only fake brief".into());
+    if prelaunch_failure {
+        good.target = Some(Target::Team {
+            team_id: "team-a".into(),
+        });
+    }
+    service.lifecycle(peer(), good, now).unwrap();
+    let controller = SupervisorController::new(runtime.clone());
+    let started = if prelaunch_failure {
+        crate::operator::dispatch_once_inner(&service, &configuration, runtime.fixture.clone())
+            .map_err(SupervisorError::from)
+            .map(|r| r.expect("valid second admission never progressed"))
+    } else {
+        controller.start_admitted_at(&service, 1, &crate::runtime_process::unix_now)
+    };
+    if prelaunch_failure {
+        let executions: i64 = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM executions WHERE admission_id=4",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            executions, 1,
+            "terminal failed admission starved the valid single-slot request after restart"
+        );
+        assert!(
+            repeated_outcome.unwrap().unwrap().is_none(),
+            "failed prelaunch admission was selected again after restart"
+        );
+    }
+    let bootstrap_diagnostic = if started.is_err() || !trace.with_extension("fd-proof").is_file() {
+        let session = if prelaunch_failure {
+            "session-4"
+        } else {
+            "session-1"
+        };
+        let identity = service
+            .journal
+            .lock()
+            .unwrap()
+            .execution(session, 1)
+            .unwrap()
+            .map(|row| row.identity);
+        let snapshot = identity.as_ref().map(|identity| {
+            acp_failure_snapshot(
+                &service,
+                &trace,
+                &runtime.root,
+                identity,
+                scenario_started.elapsed(),
+            )
+        });
+        let read = |extension: &str| -> String {
+            String::from_utf8_lossy(&fs::read(trace.with_extension(extension)).unwrap_or_default())
+                .chars()
+                .take(65536)
+                .collect()
+        };
+        let startup = match &started {
+            Ok(observed) => {
+                serde_json::json!({"state":observed.state,"session":observed.identity.session_id,"generation":observed.identity.generation})
+            }
+            Err(error) => serde_json::json!({"error":format!("{error:?}")}),
+        };
+        let diagnostic = serde_json::json!({"startup":startup,"snapshot":snapshot,"child_result":read("runtime-result"),"native_stderr":read("native-stderr"),"fd_expected":read("fd-expected"),"native_env":read("native-env")});
+        if let Some(receipt) = std::env::var_os("XMSG_EXECUTOR_PROOF_CHILDREN") {
+            let _ = fs::write(
+                PathBuf::from(receipt).with_extension("fixture-failure.json"),
+                serde_json::to_vec_pretty(&diagnostic).unwrap(),
+            );
+        }
+        Some(diagnostic)
+    } else {
+        None
+    };
+    assert!(
+        started.is_ok(),
+        "native bootstrap refused before descriptor proof: {bootstrap_diagnostic:?}"
+    );
+    assert!(
+        trace.with_extension("fd-proof").is_file(),
+        "native bootstrap produced no descriptor proof: {bootstrap_diagnostic:?}"
+    );
+    let started = started.unwrap();
+    let proof: serde_json::Value =
+        serde_json::from_slice(&fs::read(trace.with_extension("fd-proof")).unwrap()).unwrap();
+    assert_eq!(
+        proof["matching_startup_sockets"],
+        serde_json::json!([]),
+        "native child inherited the broker startup socket identity"
+    );
+    assert_eq!(
+        proof["inherited_sockets"],
+        serde_json::json!([]),
+        "native child inherited an unowned socket"
+    );
+    let expected_pin = &configuration.programs[0].native.path;
+    let pin_env: serde_json::Value =
+        serde_json::from_slice(&fs::read(trace.with_extension("native-env")).unwrap()).unwrap();
+    if codex_environment {
+        assert_eq!(
+            pin_env["CODEX_PATH"],
+            expected_pin.to_string_lossy().as_ref(),
+            "native Codex executable did not use the exact pin"
+        );
+        assert!(pin_env["CLAUDE_CODE_EXECUTABLE"].is_null());
+    } else {
+        assert_eq!(
+            pin_env["CLAUDE_CODE_EXECUTABLE"],
+            expected_pin.to_string_lossy().as_ref(),
+            "native Claude executable pin was absent or inherited"
+        );
+        assert!(pin_env["CODEX_PATH"].is_null());
+    }
+    if prelaunch_failure {
+        let mut journal = service.journal.lock().unwrap();
+        journal
+            .fail_before_launch(4, ErrorCode::Storage, now)
+            .unwrap();
+        assert!(
+            crate::execution::pre_launch_failure(&journal.db, &started.identity.session_id)
+                .unwrap()
+                .is_none(),
+            "post-spawn execution was reclassified as prelaunch failure"
+        );
+        let failures: i64 = journal
+            .db
+            .query_row("SELECT COUNT(*) FROM pre_launch_failures", [], |r| r.get(0))
+            .unwrap();
+        let audits: i64 = journal
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM audit WHERE event='pre_launch_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let executions: i64 = journal
+            .db
+            .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((failures,audits,executions),(1,1,1),"bad admission was retried or valid single-slot execution did not progress exactly once");
+        assert_eq!(started.identity.session_id, "session-4");
+    }
+    assert_eq!(started.state, ExecutionState::Running);
+    assert_eq!(
+        acp_lease_state(&runtime.root, &started.identity),
+        "held:WouldBlock",
+        "intended supervisor execution lease did not survive native exec"
+    );
+    let prompt_result = accept_fixture(&barrier, "real ACP prompt effect");
+    assert!(
+        prompt_result.is_ok(),
+        "first prompt failed: {:?}; snapshot={}",
+        prompt_result.as_ref().err(),
+        acp_failure_snapshot(
+            &service,
+            &trace,
+            &runtime.root,
+            &started.identity,
+            scenario_started.elapsed()
+        )
+    );
+    let mut prompt = prompt_result.unwrap();
+    let mut reached = [0];
+    prompt.read_exact(&mut reached).unwrap();
+    assert_eq!(reached, [b'P']);
+    if writer_probe {
+        let before = acp_failure_snapshot(
+            &service,
+            &trace,
+            &runtime.root,
+            &started.identity,
+            scenario_started.elapsed(),
+        );
+        let writer = rusqlite::Connection::open(&configuration.paths.journal).unwrap();
+        writer
+            .busy_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        fs::write(trace.with_extension("writer-armed"), b"armed").unwrap();
+        let mut observed =
+            accept_fixture(&buffer_barrier, "actual metadata Busy observation").unwrap();
+        let mut notice = [0];
+        observed.read_exact(&mut notice).unwrap();
+        assert_eq!(notice, [b'B']);
+        assert_eq!(
+            acp_lease_state(&runtime.root, &started.identity),
+            "held:WouldBlock"
+        );
+        let before_methods: Vec<serde_json::Value> = fs::read_to_string(&trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect();
+        assert_eq!(
+            before_methods
+                .iter()
+                .filter(|frame| frame["method"] == "session/prompt")
+                .count(),
+            1
+        );
+        let held_started = std::time::Instant::now();
+        if short_writer {
+            writer.execute_batch("ROLLBACK").unwrap();
+        }
+        observed.write_all(b"R").unwrap();
+        if !short_writer {
+            let probe = attach_existing(&runtime.root, &started.identity);
+            assert!(
+                probe.is_err(),
+                "unverifiable held writer published a known owned execution"
+            );
+            let wait = std::time::Instant::now() + Duration::from_secs(3);
+            while acp_lease_state(&runtime.root, &started.identity) == "held:WouldBlock"
+                && std::time::Instant::now() < wait
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(acp_lease_state(&runtime.root,&started.identity),"free","held writer did not terminate the owned supervisor within the existing authority budget");
+            assert!(held_started.elapsed() < Duration::from_secs(3));
+            writer.execute_batch("ROLLBACK").unwrap();
+            let health = rusqlite::Connection::open(&configuration.paths.journal).unwrap();
+            health.busy_timeout(Duration::ZERO).unwrap();
+            health.execute_batch("BEGIN EXCLUSIVE; ROLLBACK").unwrap();
+        }
+        let request = ControlRequest {
+            version: 1,
+            request_id: "writer-probe-reconnect".into(),
+            target: Some(Target::Execution {
+                session_id: started.identity.session_id.clone(),
+                generation: 1,
+            }),
+            action: Action::Resume(crate::protocol::ResumeArgs {
+                kind: crate::protocol::ResumeKind::Reconnect,
+            }),
+            deadline: None,
+        };
+        service.lifecycle(peer(), request.clone(), now).unwrap();
+        crate::resume::process_one(&service, &configuration, &crate::runtime_process::unix_now)
+            .unwrap();
+        let report = service
+            .lifecycle(peer(), request, now)
+            .unwrap()
+            .reconnect
+            .unwrap();
+        let executions: i64 = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row("SELECT COUNT(*) FROM executions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            executions, 1,
+            "metadata contention launched an implicit replacement"
+        );
+        assert_eq!(report.generation, started.identity.generation);
+        if short_writer {
+            assert_eq!(report.state,crate::protocol::ReconnectState::SameOwnedExecution,
+                "short metadata contention lost the same owned runtime: report={report:?}; before={before}; after={}",
+                acp_failure_snapshot(&service,&trace,&runtime.root,&started.identity,scenario_started.elapsed()));
+            assert_eq!(
+                report.source,
+                crate::protocol::ObservationSource::Supervisor
+            );
+            assert_eq!(
+                acp_lease_state(&runtime.root, &started.identity),
+                "held:WouldBlock"
+            );
+        } else {
+            assert_eq!(report.state, crate::protocol::ReconnectState::Unknown);
+            let observation = controller
+                .reconcile(&service, &started.identity.session_id, 1, now)
+                .unwrap();
+            assert_eq!(observation.state, ExecutionState::Unknown);
+            let journal = service.journal.lock().unwrap();
+            let state: String = journal
+                .db
+                .query_row(
+                    "SELECT state FROM sessions WHERE id=?1",
+                    [&started.identity.session_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                state, "unknown",
+                "unknown execution did not retain its quota state"
+            );
+            let count: i64 = journal
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions WHERE state NOT IN('ended','failed')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "unknown execution freed its quota without owned absence proof"
+            );
+            drop(journal);
+            let blocked = service.lifecycle(
+                peer(),
+                ControlRequest::dispatch(
+                    "after-unknown-writer".into(),
+                    "must not replace unknown execution".into(),
+                ),
+                now,
+            );
+            let blocked = blocked.unwrap();
+            assert!(matches!(blocked.receipt.authorization, crate::protocol::Authorization::Denied { ref code }
+                if code == &ErrorCode::ResourceLimit.to_string()),
+                "unknown execution allowed a replacement admission without owned absence proof: {blocked:?}");
+            assert_eq!(
+                blocked.receipt.admission,
+                crate::protocol::Admission::NotAdmitted
+            );
+            assert!(blocked.dispatch.is_none());
+        }
+        let after_methods: Vec<serde_json::Value> = fs::read_to_string(&trace)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect();
+        assert_eq!(
+            after_methods, before_methods,
+            "metadata contention replayed native input or emitted another effect"
+        );
+    }
+
+    if reconnect && !writer_probe {
+        let before = fs::read_to_string(&trace).unwrap();
+        let request = ControlRequest {
+            version: 1,
+            request_id: "reconnect-live".into(),
+            target: Some(Target::Execution {
+                session_id: started.identity.session_id.clone(),
+                generation: 1,
+            }),
+            action: Action::Resume(crate::protocol::ResumeArgs {
+                kind: crate::protocol::ResumeKind::Reconnect,
+            }),
+            deadline: None,
+        };
+        let admitted = service.lifecycle(peer(), request.clone(), now).unwrap();
+        assert!(matches!(
+            admitted.receipt.authorization,
+            crate::protocol::Authorization::Allowed { .. }
+        ));
+        crate::resume::process_one(&service, &configuration, &crate::runtime_process::unix_now)
+            .unwrap();
+        let after = fs::read_to_string(&trace).unwrap();
+        let journal = service.journal.lock().unwrap();
+        let executions: i64 = journal
+            .db
+            .query_row("SELECT COUNT(*) FROM executions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "same-lease reconnect emitted a native command or initialized a new session"
+        );
+        assert_eq!(executions, 1, "reconnect launched a replacement execution");
+        drop(journal);
+        let replay = service.lifecycle(peer(), request, now).unwrap();
+        assert!(replay.replayed && replay.historical);
+        let report = replay.reconnect.unwrap();
+        assert_eq!(
+            report.state,
+            crate::protocol::ReconnectState::SameOwnedExecution,
+            "reconnect report={report:?}; snapshot={}",
+            acp_failure_snapshot(
+                &service,
+                &trace,
+                &runtime.root,
+                &started.identity,
+                scenario_started.elapsed()
+            )
+        );
+        assert_eq!(report.generation, 1);
+        assert_eq!(
+            report.source,
+            crate::protocol::ObservationSource::Supervisor
+        );
+        let held = crate::lifecycle::binding(
+            &service.journal.lock().unwrap().db,
+            &started.identity.session_id,
+            1,
+        )
+        .unwrap();
+        assert_eq!(report.transport_epoch, held.transport_epoch);
+        assert_eq!(report.native_session_id, held.native_session_id);
+    }
+    let frames: Vec<serde_json::Value> = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let methods: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| frame["method"].as_str())
+        .collect();
+    assert_eq!(
+        &methods[..4],
+        &[
+            "initialize",
+            "session/new",
+            "session/set_mode",
+            "session/set_config_option"
+        ]
+    );
+    assert_eq!(methods[4], "session/prompt");
+    assert_eq!(
+        frames[1]["params"]["mcpServers"],
+        serde_json::json!([]),
+        "absent owner bus configuration created a content service"
+    );
+    assert_eq!(frames[4]["params"]["prompt"][0]["text"], "only fake brief");
+    if short_writer || !writer_probe {
+        prompt.write_all(b"R").unwrap();
+    }
+    if unsupported {
+        let mut denied =
+            accept_fixture(&buffer_barrier, "actual native method-not-found response").unwrap();
+        let mut notice = [0];
+        denied.read_exact(&mut notice).unwrap();
+        assert_eq!(notice, [b'D']);
+        let (pending, decisions): (i64, i64) = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM native_pending),(SELECT COUNT(*) FROM decisions)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (pending, decisions),
+            (0, 0),
+            "unsupported native method became human review"
+        );
+        let trace = fs::read_to_string(&trace).unwrap();
+        let response: serde_json::Value = trace
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|frame| frame["id"] == 900)
+            .unwrap();
+        assert_eq!(response["error"]["code"], -32601);
+        assert!(response.get("result").is_none());
+    }
+    if fairness {
+        let mut buffered = accept_fixture(&buffer_barrier, "buffered native fairness").unwrap();
+        let mut notice = [0];
+        buffered.read_exact(&mut notice).unwrap();
+        assert_eq!(notice, [b'B']);
+        let (turn, binding) = {
+            let journal = service.journal.lock().unwrap();
+            let turn: String = journal
+                .db
+                .query_row(
+                    "SELECT active_turn FROM sessions WHERE id='session-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (
+                turn,
+                crate::lifecycle::binding(&journal.db, "session-1", 1).unwrap(),
+            )
+        };
+        service
+            .lifecycle(
+                peer(),
+                ControlRequest {
+                    version: 1,
+                    request_id: "fair-steer".into(),
+                    target: Some(Target::Turn {
+                        session_id: "session-1".into(),
+                        generation: 1,
+                        turn_id: turn,
+                    }),
+                    action: Action::Steer(crate::protocol::SteerArgs {
+                        text: "strict fake steer".into(),
+                    }),
+                    deadline: None,
+                },
+                now,
+            )
+            .unwrap();
+        let admission: i64 = service
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT id FROM admissions WHERE request_id='fair-steer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let socket = controller
+            .config
+            .root
+            .join(component("session-1", 1))
+            .join("supervisor.sock");
+        let mut steer = blocking_fixture_stream(UnixStream::connect(&socket).unwrap()).unwrap();
+        frame(
+            &mut steer,
+            &SupervisorRequest::SubmitNative {
+                identity: started.identity.clone(),
+                admission_id: admission,
+                transport_epoch: binding.transport_epoch,
+            },
+        )
+        .unwrap();
+        let mut attach = blocking_fixture_stream(UnixStream::connect(&socket).unwrap()).unwrap();
+        frame(
+            &mut attach,
+            &SupervisorRequest::Attach {
+                identity: started.identity.clone(),
+            },
+        )
+        .unwrap();
+        buffered.write_all(b"R").unwrap();
+        let submitted: SupervisorHello = read_frame(&steer).unwrap();
+        let attached: SupervisorHello = read_frame(&attach).unwrap();
+        let mut notices = Vec::new();
+        for _ in 0..3 {
+            let mut end =
+                accept_fixture(&buffer_barrier, "native batch and strict steer receipts").unwrap();
+            end.read_exact(&mut notice).unwrap();
+            notices.push(notice[0]);
+        }
+        notices.sort();
+        assert_eq!(notices, vec![b'E', b'I', b'S']);
+        let journal = service.journal.lock().unwrap();
+        let end_cursor: i64 = journal
+            .db
+            .query_row(
+                "SELECT cursor FROM execution_events WHERE event LIKE '%batch-end%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let status: String = journal
+            .db
+            .query_row(
+                "SELECT state FROM native_operations WHERE admission_id=?1",
+                [admission],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            submitted.event_cursor < end_cursor as u64,
+            "strict steer was delayed until the native batch-end marker was processed"
+        );
+        assert!(
+            attached.event_cursor < end_cursor as u64,
+            "attach was delayed until the native batch-end marker was processed"
+        );
+        assert_eq!(
+            status, "injected",
+            "strict steer reply was not recorded after its actual observation barrier"
+        );
+        drop(journal);
+        let wire = fs::read_to_string(&trace).unwrap();
+        let steering: serde_json::Value = wire
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|f| f["method"] == "_session/steering")
+            .unwrap();
+        assert_eq!(steering["params"]["prompt"][0]["text"], "strict fake steer");
+        assert_eq!(
+            steering["params"]["_meta"]["steering"]["idleBehavior"],
+            "promptRequired"
+        );
+    }
+    service
+        .admin(
+            peer(),
+            OWNER,
+            crate::control::AdminCommand::DisableRuntime {
+                request_id: "disable-fake".into(),
+                expected_revision: 1,
+            },
+            now,
+        )
+        .unwrap();
+    let stopped = controller
+        .reconcile(&service, &started.identity.session_id, 1, now)
+        .unwrap();
+    assert_ne!(stopped.state, ExecutionState::Running);
 }
 fn stop(f: &Fixture, controller: &SupervisorController) -> ExecutionObservation {
     f.service
@@ -463,6 +1534,7 @@ fn spawn_broker(f: &Fixture, point: &str, backend: Option<PathBuf>) -> (FixtureD
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
+    crate::proof_processes::configure(&mut command);
     unsafe {
         command.pre_exec(move || {
             let flags = libc::fcntl(fd, libc::F_GETFD);
@@ -472,7 +1544,7 @@ fn spawn_broker(f: &Fixture, point: &str, backend: Option<PathBuf>) -> (FixtureD
             Ok(())
         });
     }
-    let broker = FixtureDaemon(command.spawn().unwrap());
+    let broker = FixtureDaemon::new(command.spawn().unwrap());
     drop(child);
     (broker, parent)
 }
@@ -511,7 +1583,27 @@ fn fixture_process_entrypoint() {
             .unwrap();
         writeln!(starts, "{}", std::process::id()).unwrap();
         starts.sync_all().unwrap();
-        run_supervisor_process(manifest).unwrap();
+        if matches!(
+            manifest.backend,
+            crate::runtime_process::Backend::Acp { .. }
+        ) {
+            let crate::runtime_process::Backend::Acp { configuration, .. } = &manifest.backend
+            else {
+                unreachable!()
+            };
+            let trace = PathBuf::from(&configuration.programs[0].arguments[1]);
+            let held = unsafe { std::os::fd::BorrowedFd::borrow_raw(manifest.startup_fd) }
+                .try_clone_to_owned()
+                .unwrap();
+            let metadata = File::from(held).metadata().unwrap();
+            fs::write(trace.with_extension("fd-expected"), serde_json::to_vec(&serde_json::json!({"dev":metadata.dev(), "ino":metadata.ino(), "kind":metadata.mode() & 0o170000, "fd":manifest.startup_fd})).unwrap()).unwrap();
+            // Only this isolated test child receives the hostile ambient overrides.
+            std::env::set_var("CODEX_PATH", "/nonexistent/ambient-codex");
+            std::env::set_var("CLAUDE_CODE_EXECUTABLE", "/nonexistent/ambient-claude");
+            run_inherited(manifest.startup_fd, manifest.max_wall_ms).unwrap();
+        } else {
+            run_supervisor_process(manifest).unwrap();
+        }
     } else if role == "broker" {
         let data: BrokerFixture =
             serde_json::from_str(&std::env::var("XMSG_EXECUTOR_BROKER_FIXTURE").unwrap()).unwrap();
@@ -536,6 +1628,7 @@ fn fixture_process_entrypoint() {
             backend: data.backend,
             python: data.python,
             accept_probe: None,
+            acp_configuration: None,
         });
         runtime.barrier = Some(FixtureBarrier {
             point: data.point,
@@ -770,6 +1863,7 @@ fn real_sender(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    crate::proof_processes::configure(&mut command);
     unsafe {
         command.pre_exec(move || {
             let f = libc::fcntl(fd, libc::F_GETFD);
@@ -781,13 +1875,19 @@ fn real_sender(
     }
     // The result follows registration and all sends, rather than one supervisor RPC.
     let expires = std::time::Instant::now() + Duration::from_secs(30);
-    let sender = FixtureDaemon(command.spawn().unwrap());
+    let sender = FixtureDaemon::new(command.spawn().unwrap());
     drop(child);
     drop(data);
     let ids = read_frame_until(&parent, expires).unwrap();
     (sender, parent, ids)
 }
 struct FixtureDaemon(Child);
+impl FixtureDaemon {
+    fn new(child: Child) -> Self {
+        crate::proof_processes::record(&child);
+        Self(child)
+    }
+}
 impl std::ops::Deref for FixtureDaemon {
     type Target = Child;
     fn deref(&self) -> &Child {
@@ -977,7 +2077,7 @@ async fn real_bus_sender_commits_control_looking_content_without_authority() {
         daemon_uid: xmsg::client::current_uid(),
     };
     let executable = std::env::current_exe().unwrap();
-    let mut daemon = FixtureDaemon(
+    let mut daemon = FixtureDaemon::new(
         Command::new(fixture_daemon_binary())
             .env_clear()
             .env("HOME", f.dir.path())
@@ -1233,6 +2333,7 @@ fn missing_supervisor_stays_unknown_consumes_slot_and_never_kills_diagnostic_pid
         .spawn()
         .unwrap();
     let pid = bystander.id();
+    crate::proof_processes::record(&bystander);
     f.service
         .journal
         .lock()
@@ -1975,4 +3076,26 @@ fn held_backend_exit_is_observed_before_attach_can_publish_running() {
         .unwrap();
     assert_eq!(state, "unknown", "dead backend published running state");
     assert_eq!(result.state, ExecutionState::Unknown);
+}
+
+#[test]
+fn owned_startup_socket_is_cloexec_immediately_before_any_spawn() {
+    let (owned, _peer) = UnixStream::pair().unwrap();
+    let fd = owned.as_raw_fd();
+    xmsg::client::caller_attribution::with_fd_inheritance_gate(|| {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+            0
+        );
+        super::restore_startup_cloexec(fd).unwrap();
+        let restored = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(
+            restored >= 0 && restored & libc::FD_CLOEXEC != 0,
+            "owned startup socket was not close-on-exec immediately after restoration"
+        );
+        Ok(())
+    })
+    .unwrap();
 }

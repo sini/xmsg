@@ -63,8 +63,17 @@
               export XMSG_EXECUTOR_FIXTURE_PYTHON="${pkgs.python3}/bin/python3"
               "$XMSG_EXECUTOR_FIXTURE_DAEMON" --version
               "$XMSG_EXECUTOR_FIXTURE_PYTHON" --version
-              cargoWithProfile test --manifest-path extensions/executor/Cargo.toml --locked -- --list > executor-list.log
-              cargoWithProfile test --manifest-path extensions/executor/Cargo.toml --locked -- --test-threads=1 2>&1 | tee executor-tests.log
+              run_captured() {
+                local capture_base="$1"
+                shift
+                local capture_status=0
+                "$@" > "$capture_base.log" 2> "$capture_base.stderr.log" || capture_status=$?
+                cat "$capture_base.log"
+                cat "$capture_base.stderr.log" >&2
+                return "$capture_status"
+              }
+              run_captured executor-list cargoWithProfile test --manifest-path extensions/executor/Cargo.toml --locked -- --list
+              run_captured executor-tests cargoWithProfile test --manifest-path extensions/executor/Cargo.toml --locked -- --test-threads=1
               python3 extensions/executor/scripts/census.py --self-test
               python3 extensions/executor/scripts/census.py \
                 --inventory extensions/executor/fixtures/test-inventory.json \
@@ -78,7 +87,7 @@
             '';
             installPhase = ''
               mkdir -p "$out"
-              cp executor-list.log executor-tests.log executor-census.json "$out/"
+              cp executor-list.log executor-list.stderr.log executor-tests.log executor-tests.stderr.log executor-census.json "$out/"
             '';
           };
     };

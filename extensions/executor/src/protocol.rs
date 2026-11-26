@@ -649,3 +649,21 @@ pub struct StatusReport {
     pub observed_at: i64,
     pub source: ObservationSource,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconnectState {
+    SameOwnedExecution,
+    Unknown,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReconnectReport {
+    pub session_id: String,
+    pub generation: u64,
+    pub native_session_id: String,
+    pub transport_epoch: String,
+    pub state: ReconnectState,
+    pub observed_at: i64,
+    pub source: ObservationSource,
+}

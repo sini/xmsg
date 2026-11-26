@@ -16,6 +16,17 @@ type PendingRecord = (String, i64, String, String, String, i64, String, bool);
 
 pub(crate) struct Journal {
     pub(crate) db: Connection,
+    pub(crate) runtime_policy: Option<std::sync::Arc<crate::runtime_policy::RuntimePolicy>>,
+}
+pub(crate) fn metadata_error(error: rusqlite::Error) -> ErrorCode {
+    if matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    ) {
+        ErrorCode::JournalBusy
+    } else {
+        ErrorCode::Storage
+    }
 }
 fn sql_u64(value: u64) -> Result<i64, ErrorCode> {
     i64::try_from(value).map_err(|_| ErrorCode::InvalidConfiguration)
@@ -34,6 +45,36 @@ fn fingerprint(principal: &str, input: &str, resolved: &str) -> String {
     )))
 }
 impl Journal {
+    pub(crate) fn open_existing(path: &Path) -> Result<Self, ErrorCode> {
+        use std::os::unix::fs::MetadataExt;
+        let path = crate::unix::private_parent(path, xmsg::client::current_uid())?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(storage)?;
+        if !metadata.is_file()
+            || metadata.uid() != xmsg::client::current_uid()
+            || metadata.mode() & 0o7777 != 0o600
+        {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        let db = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(metadata_error)?;
+        db.busy_timeout(std::time::Duration::ZERO)
+            .map_err(storage)?;
+        let after = std::fs::symlink_metadata(&path).map_err(storage)?;
+        if after.dev() != metadata.dev() || after.ino() != metadata.ino() {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_operations')",[],|r|r.get(0)).map_err(metadata_error)?;
+        if !exists {
+            return Err(ErrorCode::InvalidConfiguration);
+        }
+        Ok(Self {
+            db,
+            runtime_policy: None,
+        })
+    }
     pub(crate) fn open(path: &Path, configuration: &OwnerConfig) -> Result<Self, ErrorCode> {
         let db = Connection::open_with_flags(
             path,
@@ -51,6 +92,10 @@ impl Journal {
           CREATE TABLE IF NOT EXISTS decisions(approval_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,session_id TEXT NOT NULL,generation INTEGER NOT NULL,turn_id TEXT NOT NULL,decision TEXT NOT NULL,payload TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,principal TEXT,request_id TEXT NOT NULL,event TEXT NOT NULL,at INTEGER NOT NULL);
           CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,generation INTEGER NOT NULL,turn_id TEXT NOT NULL,operation_digest TEXT NOT NULL,policy_revision TEXT NOT NULL,expires_at INTEGER NOT NULL,option_id TEXT NOT NULL,consumed INTEGER NOT NULL DEFAULT 0);").map_err(storage)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS runtime_control(singleton INTEGER PRIMARY KEY CHECK(singleton=1),disabled INTEGER NOT NULL CHECK(disabled IN(0,1))); INSERT OR IGNORE INTO runtime_control VALUES(1,0);").map_err(storage)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS caller_receipts(admission_id INTEGER PRIMARY KEY,receipt TEXT NOT NULL); CREATE TABLE IF NOT EXISTS caller_revocations(record_id TEXT NOT NULL,record_revision INTEGER NOT NULL,revoked_at INTEGER NOT NULL,PRIMARY KEY(record_id,record_revision));").map_err(storage)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS owner_record_requests(request_id TEXT PRIMARY KEY,input_digest TEXT NOT NULL,response_revision INTEGER NOT NULL);").map_err(storage)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS session_delegations(principal TEXT NOT NULL,session_id TEXT NOT NULL,generation INTEGER NOT NULL,verb TEXT NOT NULL,team_id TEXT NOT NULL,profile_id TEXT NOT NULL,policy_revision INTEGER NOT NULL,dispatch_admission INTEGER NOT NULL,PRIMARY KEY(principal,session_id,generation,verb));").map_err(storage)?;
         db.execute(
             "INSERT OR IGNORE INTO configuration VALUES(1,?1,?2)",
             params![
@@ -60,7 +105,13 @@ impl Journal {
         )
         .map_err(storage)?;
         crate::execution::initialize(&db)?;
-        Ok(Self { db })
+        crate::lifecycle::initialize(&db)?;
+        crate::content_delivery::initialize(&db)?;
+        crate::approval::initialize(&db)?;
+        Ok(Self {
+            db,
+            runtime_policy: None,
+        })
     }
     pub(crate) fn admit(
         &mut self,
@@ -69,7 +120,7 @@ impl Journal {
         request: &ControlRequest,
         now: i64,
     ) -> Result<ControlReply, ErrorCode> {
-        self.admit_clock(principal, input, request, &|| Ok(now))
+        self.admit_clock(principal, input, request, &|| Ok(now), None)
     }
     pub(crate) fn admit_bound(
         &mut self,
@@ -79,12 +130,67 @@ impl Journal {
         clock: &dyn Fn() -> i64,
         deadline: std::time::Instant,
     ) -> Result<ControlReply, ErrorCode> {
-        self.admit_clock(principal, input, request, &|| {
-            if std::time::Instant::now() >= deadline {
-                return Err(ErrorCode::DeadlineExpired);
-            }
-            Ok(clock())
-        })
+        self.admit_clock(
+            principal,
+            input,
+            request,
+            &|| {
+                if std::time::Instant::now() >= deadline {
+                    return Err(ErrorCode::DeadlineExpired);
+                }
+                Ok(clock())
+            },
+            None,
+        )
+    }
+    pub(crate) fn admit_attested(
+        &mut self,
+        principal: &crate::auth::TrustedPrincipal,
+        input: &str,
+        request: &ControlRequest,
+        now: i64,
+    ) -> Result<ControlReply, ErrorCode> {
+        if self.runtime_policy.is_none() {
+            return self.admit(principal.id(), input, request, now);
+        }
+        self.admit_clock(
+            principal.id(),
+            input,
+            request,
+            &|| Ok(now),
+            Some(
+                crate::caller_policy::TrustedCallerContext::from_attestation(principal)
+                    .map_err(|_| ErrorCode::CallerScopeUnproven),
+            ),
+        )
+    }
+    pub(crate) fn admit_attested_bound(
+        &mut self,
+        principal: &crate::auth::TrustedPrincipal,
+        input: &str,
+        request: &ControlRequest,
+        clock: &dyn Fn() -> i64,
+        deadline: std::time::Instant,
+    ) -> Result<ControlReply, ErrorCode> {
+        if self.runtime_policy.is_none() {
+            return self.admit_bound(principal.id(), input, request, clock, deadline);
+        }
+        self.admit_clock(
+            principal.id(),
+            input,
+            request,
+            &|| {
+                if std::time::Instant::now() >= deadline {
+                    Err(ErrorCode::DeadlineExpired)
+                } else {
+                    Ok(clock())
+                }
+            },
+            Some(
+                crate::caller_policy::TrustedCallerContext::from_attestation(principal)
+                    .map_err(|_| ErrorCode::CallerScopeUnproven),
+            ),
+        )
     }
     fn admit_clock(
         &mut self,
@@ -92,7 +198,9 @@ impl Journal {
         input: &str,
         request: &ControlRequest,
         clock: &dyn Fn() -> Result<i64, ErrorCode>,
+        caller: Option<Result<crate::caller_policy::TrustedCallerContext, ErrorCode>>,
     ) -> Result<ControlReply, ErrorCode> {
+        let runtime_policy = self.runtime_policy.clone();
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -110,16 +218,69 @@ impl Journal {
             return Ok(reply);
         }
         let configuration = config(&tx)?;
-        let outcome = admit_new(&tx, &configuration, principal, request, now);
+        let mut caller_admission = None;
+        let outcome = admit_new(
+            &tx,
+            &configuration,
+            principal,
+            request,
+            now,
+            runtime_policy.is_some(),
+        )
+        .and_then(|(target, resolved)| {
+            if let Some(policy) = &runtime_policy {
+                if !matches!(
+                    request.action,
+                    Action::Status(_) | Action::Result(_) | Action::Stop(_)
+                ) {
+                    let mut selected = if matches!(request.action, Action::Dispatch(_)) {
+                        serde_json::from_str(&resolved).map_err(storage)?
+                    } else {
+                        resolved_for_target(&tx, &target)?
+                    };
+                    crate::lifecycle::require_action_capability(request, &mut selected)?;
+                    policy.require_at(
+                        &selected,
+                        configuration.revision,
+                        clock,
+                        runtime_disabled(&tx)?,
+                    )?;
+                    let context = caller
+                        .as_ref()
+                        .ok_or(ErrorCode::CallerScopeUnproven)?
+                        .as_ref()
+                        .map_err(|code| *code)?
+                        .clone();
+                    caller_admission = Some(policy.callers.qualify(
+                        &tx,
+                        context,
+                        configuration.revision,
+                        clock()?,
+                    )?);
+                    let at = clock()?;
+                    if request.deadline.is_some_and(|deadline| deadline <= at) {
+                        return Err(ErrorCode::DeadlineExpired);
+                    }
+                }
+            }
+            Ok((target, resolved))
+        });
         let (target, resolved, denial) = match outcome {
             Ok((target, resolved)) => (Some(target), resolved, None),
             Err(code) => (request.target.clone(), String::new(), Some(code)),
         };
         let mut dispatch = None;
+        let mut caller_id = None;
         let admission = if denial.is_none() {
             let target = target.as_ref().ok_or(ErrorCode::UnknownTarget)?;
             tx.execute("INSERT INTO admissions(principal,request_id,verb,target,policy_revision,payload,resolved) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![principal,request.request_id,serde_json::to_string(&request.action.verb()).map_err(storage)?,serde_json::to_string(target).map_err(storage)?,sql_u64(configuration.revision)?,serde_json::to_string(request).map_err(storage)?,resolved]).map_err(storage)?;
             let id = tx.last_insert_rowid();
+            if caller_admission.is_some() {
+                caller_id = Some(id);
+            }
+            if matches!(request.action, Action::Interrupt(_)) {
+                crate::approval::cancel_turn(&tx, target)?;
+            }
             let generation = match target {
                 Target::Execution { generation, .. } | Target::Turn { generation, .. } => {
                     *generation
@@ -143,9 +304,25 @@ impl Journal {
                     params![session_id, id],
                 )
                 .map_err(storage)?;
+                for verb in &template.lifecycle_verbs {
+                    tx.execute(
+                        "INSERT INTO session_delegations VALUES(?1,?2,1,?3,?4,?5,?6,?7)",
+                        params![
+                            principal,
+                            session_id,
+                            serde_json::to_string(verb).map_err(storage)?,
+                            template.team_id,
+                            template.profile_id,
+                            sql_u64(configuration.revision)?,
+                            id,
+                        ],
+                    )
+                    .map_err(storage)?;
+                }
                 dispatch = Some(AdmittedDispatch {
                     session_id,
                     resolved: serde_json::from_str(&resolved).map_err(storage)?,
+                    delegated_verbs: template.lifecycle_verbs.clone(),
                 });
             }
             Admission::Durable {
@@ -170,6 +347,35 @@ impl Journal {
             submission: Submission::NotAttempted,
             observed_effect: ObservedEffect::NotObserved,
         };
+        let pre_launch_failure = if matches!(request.action, Action::Status(_) | Action::Result(_))
+        {
+            match &receipt.target {
+                Some(Target::Execution { session_id, .. } | Target::Turn { session_id, .. }) => {
+                    crate::execution::pre_launch_failure(&tx, session_id)?
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let reports = if denial.is_none()
+            && matches!(request.action, Action::Status(_) | Action::Result(_))
+        {
+            Some(crate::execution::journal_reports(
+                &tx,
+                receipt.target.as_ref().ok_or(ErrorCode::UnknownTarget)?,
+                clock()?,
+            )?)
+        } else {
+            None
+        };
+        let (status, result) = match reports {
+            Some((status, result)) => (
+                matches!(request.action, Action::Status(_)).then_some(status),
+                matches!(request.action, Action::Result(_)).then_some(result),
+            ),
+            None => (None, None),
+        };
         let reply = ControlReply {
             request_id: request.request_id.clone(),
             replayed: false,
@@ -177,6 +383,10 @@ impl Journal {
             receipt,
             dispatch,
             decision: None,
+            pre_launch_failure,
+            status,
+            result,
+            reconnect: None,
         };
         tx.execute(
             "INSERT INTO requests VALUES(?1,?2,?3,?4,?5)",
@@ -200,7 +410,26 @@ impl Journal {
             },
             now,
         )?;
-        tx.commit().map_err(storage)?;
+        if let (Some(id), Some(caller)) = (caller_id, caller_admission) {
+            tx.execute(
+                "INSERT INTO caller_receipts VALUES(?1,?2)",
+                params![
+                    id,
+                    serde_json::to_string(&caller.receipt()).map_err(storage)?
+                ],
+            )
+            .map_err(storage)?;
+            let policy = runtime_policy
+                .as_deref()
+                .ok_or(ErrorCode::CallerReferenceUnavailable)?;
+            policy.callers.bind(id, caller)?;
+            if let Err(error) = tx.commit() {
+                policy.callers.discard(id);
+                return Err(storage(error));
+            }
+        } else {
+            tx.commit().map_err(storage)?;
+        }
         Ok(reply)
     }
     pub(crate) fn admin(&mut self, command: AdminCommand, now: i64) -> Result<u64, ErrorCode> {
@@ -209,8 +438,21 @@ impl Journal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         let mut configuration = config(&tx)?;
+        let record_command = matches!(command, AdminCommand::RevokeCallerQualification { .. });
+        let command_digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(&command).map_err(storage)?,
+        ));
         let (id, expected) = match &command {
-            AdminCommand::ReplacePolicy {
+            AdminCommand::RevokeCallerQualification {
+                request_id,
+                expected_revision,
+                ..
+            }
+            | AdminCommand::DisableRuntime {
+                request_id,
+                expected_revision,
+            }
+            | AdminCommand::ReplacePolicy {
                 request_id,
                 expected_revision,
                 ..
@@ -221,10 +463,56 @@ impl Journal {
                 ..
             } => (request_id.clone(), *expected_revision),
         };
+        if record_command {
+            let prior:Option<(String,i64)>=tx.query_row("SELECT input_digest,response_revision FROM owner_record_requests WHERE request_id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
+            if let Some((digest, revision)) = prior {
+                if digest != command_digest {
+                    return Err(ErrorCode::RequestConflict);
+                }
+                tx.commit().map_err(storage)?;
+                return u64::try_from(revision).map_err(storage);
+            }
+        }
         if expected != configuration.revision {
             return Err(ErrorCode::RequestConflict);
         }
         match command {
+            AdminCommand::RevokeCallerQualification {
+                record_id,
+                record_revision,
+                ..
+            } => {
+                if id.is_empty()
+                    || id.len() > 128
+                    || id.chars().any(char::is_control)
+                    || record_id.is_empty()
+                    || record_id.len() > 128
+                    || record_id.chars().any(char::is_control)
+                    || record_revision == 0
+                {
+                    return Err(ErrorCode::MalformedFrame);
+                }
+                tx.execute(
+                    "INSERT OR IGNORE INTO caller_revocations VALUES(?1,?2,?3)",
+                    params![record_id, sql_u64(record_revision)?, now],
+                )
+                .map_err(storage)?;
+                tx.execute(
+                    "INSERT INTO owner_record_requests VALUES(?1,?2,?3)",
+                    params![id, command_digest, sql_u64(configuration.revision)?],
+                )
+                .map_err(storage)?;
+            }
+            AdminCommand::DisableRuntime { .. } => {
+                crate::approval::disable_pending(&tx)?;
+                tx.execute(
+                    "UPDATE runtime_control SET disabled=1 WHERE singleton=1",
+                    [],
+                )
+                .map_err(storage)?;
+                audit(&tx, "owner-admin", &id, "runtime_disabled", now)?;
+                configuration.revision += 1;
+            }
             AdminCommand::ReplacePolicy {
                 configuration: new, ..
             } => {
@@ -257,7 +545,17 @@ impl Journal {
             ],
         )
         .map_err(storage)?;
-        audit(&tx, "owner-admin", &id, "policy_changed", now)?;
+        audit(
+            &tx,
+            "owner-admin",
+            &id,
+            if record_command {
+                "caller_record_revoked"
+            } else {
+                "policy_changed"
+            },
+            now,
+        )?;
         tx.commit().map_err(storage)?;
         Ok(configuration.revision)
     }
@@ -266,12 +564,30 @@ impl Journal {
         request: ControlRequest,
         now: i64,
     ) -> Result<ControlReply, ErrorCode> {
+        self.human_with_confirmation(request, now, None)
+    }
+    pub(crate) fn human_with_confirmation(
+        &mut self,
+        request: ControlRequest,
+        now: i64,
+        confirmation: Option<crate::approval::HumanConfirmation>,
+    ) -> Result<ControlReply, ErrorCode> {
+        self.human_at(request, confirmation, &|| Ok(now))
+    }
+    pub(crate) fn human_at(
+        &mut self,
+        request: ControlRequest,
+        confirmation: Option<crate::approval::HumanConfirmation>,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+    ) -> Result<ControlReply, ErrorCode> {
         request.validate().map_err(|_| ErrorCode::MalformedFrame)?;
         let input = input_digest(&request)?;
+        let runtime_policy = self.runtime_policy.clone();
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
+        let now = clock()?;
         if let Some(reply) = replay(&tx, "human-channel", &request.request_id, &input)? {
             audit(
                 &tx,
@@ -286,6 +602,9 @@ impl Journal {
         let Action::Approve(args) = &request.action else {
             return Err(ErrorCode::HumanRequired);
         };
+        if runtime_disabled(&tx)? {
+            return Err(ErrorCode::ProfileDenied);
+        }
         let Some(Target::Turn {
             session_id,
             generation,
@@ -306,6 +625,14 @@ impl Journal {
             return Err(ErrorCode::StaleTurn);
         }
         profile(&configuration, &current.2)?;
+        let native = crate::approval::prepare_confirmation(
+            &tx,
+            &request,
+            confirmation.as_ref(),
+            clock,
+            runtime_policy.as_deref(),
+            crate::approval::DecisionPhase::Human,
+        )?;
         let pending:Option<PendingRecord>=tx.query_row("SELECT session_id,generation,turn_id,operation_digest,policy_revision,expires_at,option_id,consumed FROM approvals WHERE id=?1",[&args.approval_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).optional().map_err(storage)?;
         let p = pending.ok_or(ErrorCode::PendingMismatch)?;
         if p.7 {
@@ -322,11 +649,31 @@ impl Journal {
         {
             return Err(ErrorCode::PendingMismatch);
         }
+        let at = clock()?;
+        if request.deadline.is_some_and(|deadline| deadline <= at) || args.expires_at <= at {
+            return Err(ErrorCode::DeadlineExpired);
+        }
+        if native {
+            crate::approval::prepare_confirmation(
+                &tx,
+                &request,
+                confirmation.as_ref(),
+                clock,
+                runtime_policy.as_deref(),
+                crate::approval::DecisionPhase::Human,
+            )?;
+        }
         tx.execute(
             "UPDATE approvals SET consumed=1 WHERE id=?1",
             [&args.approval_id],
         )
         .map_err(storage)?;
+        if native {
+            let changed=tx.execute("UPDATE native_pending SET state='decision_recorded' WHERE approval_id=?1 AND state='pending'",[&args.approval_id]).map_err(storage)?;
+            if changed != 1 {
+                return Err(ErrorCode::AlreadyConsumed);
+            }
+        }
         tx.execute(
             "INSERT INTO decisions VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![
@@ -336,7 +683,15 @@ impl Journal {
                 sql_u64(*generation)?,
                 turn_id,
                 serde_json::to_string(&args.decision).map_err(storage)?,
-                serde_json::to_string(&request).map_err(storage)?
+                if native {
+                    serde_json::to_string(&crate::approval::HumanDecisionCall {
+                        request: request.clone(),
+                        confirmation: confirmation.clone().ok_or(ErrorCode::HumanRequired)?,
+                    })
+                    .map_err(storage)?
+                } else {
+                    serde_json::to_string(&request).map_err(storage)?
+                }
             ],
         )
         .map_err(storage)?;
@@ -346,6 +701,10 @@ impl Journal {
             historical: false,
             dispatch: None,
             decision: Some(args.clone()),
+            pre_launch_failure: None,
+            status: None,
+            result: None,
+            reconnect: None,
             receipt: OperationReceipt {
                 request_id: request.request_id.clone(),
                 target: request.target.clone(),
@@ -374,13 +733,102 @@ impl Journal {
             &tx,
             "human-channel",
             &request.request_id,
-            "fake_pending_decision_consumed",
-            now,
+            if native {
+                "native_pending_decision_consumed"
+            } else {
+                "fake_pending_decision_consumed"
+            },
+            at,
         )?;
         tx.commit().map_err(storage)?;
         Ok(reply)
     }
 }
+pub(crate) fn runtime_disabled(db: &Connection) -> Result<bool, ErrorCode> {
+    db.query_row(
+        "SELECT disabled FROM runtime_control WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(storage)
+}
+
+pub(crate) fn resolved_for_target(
+    db: &Connection,
+    target: &Target,
+) -> Result<crate::capability::ResolvedDispatch, ErrorCode> {
+    let session = match target {
+        Target::Session { session_id }
+        | Target::Execution { session_id, .. }
+        | Target::Turn { session_id, .. } => session_id,
+        _ => return Err(ErrorCode::UnknownTarget),
+    };
+    let raw: String = db.query_row("SELECT resolved FROM admissions WHERE session_id=?1 AND verb='\"dispatch\"' ORDER BY id DESC LIMIT 1", [session], |r| r.get(0))
+        .optional().map_err(storage)?.ok_or(ErrorCode::UnknownTarget)?;
+    serde_json::from_str(&raw).map_err(storage)
+}
+
+pub(crate) fn has_current_grant(
+    tx: &Transaction<'_>,
+    configuration: &OwnerConfig,
+    principal: &str,
+    verb: crate::protocol::Verb,
+    target: &Target,
+) -> Result<bool, ErrorCode> {
+    if configuration
+        .grants
+        .iter()
+        .any(|g| g.principal == principal && g.verb == verb && g.target.matches(target))
+    {
+        return Ok(true);
+    }
+    let (session_id, generation) = match target {
+        Target::Execution {
+            session_id,
+            generation,
+        }
+        | Target::Turn {
+            session_id,
+            generation,
+            ..
+        } => (session_id, *generation),
+        _ => return Ok(false),
+    };
+    let mut query = tx.prepare("SELECT d.principal,d.generation,d.team_id,d.profile_id FROM session_delegations d JOIN sessions s ON s.id=d.session_id WHERE d.session_id=?1 AND d.verb=?2 AND s.team_id=d.team_id AND s.profile_id=d.profile_id").map_err(storage)?;
+    let rows = query
+        .query_map(
+            params![session_id, serde_json::to_string(&verb).map_err(storage)?],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .map_err(storage)?;
+    for row in rows {
+        let (holder, delegated_generation, team, profile) = row.map_err(storage)?;
+        if holder == principal
+            && delegated_generation == sql_u64(generation)?
+            && configuration.grants.iter().any(|g| {
+                g.principal == holder
+                    && g.verb == crate::protocol::Verb::Dispatch
+                    && g.target.matches(&Target::Team {
+                        team_id: team.clone(),
+                    })
+            })
+            && configuration.defaults.iter().any(|d| {
+                d.team_id == team && d.profile_id == profile && d.lifecycle_verbs.contains(&verb)
+            })
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn config(tx: &Transaction<'_>) -> Result<OwnerConfig, ErrorCode> {
     let body: String = tx
         .query_row(
@@ -412,6 +860,14 @@ fn replay(
                 return Err(ErrorCode::RequestConflict);
             }
             let mut reply: ControlReply = serde_json::from_str(&body).map_err(storage)?;
+            let reconnect:Option<String>=tx.query_row("SELECT n.command FROM admissions a JOIN native_operations n ON n.admission_id=a.id WHERE a.principal=?1 AND a.request_id=?2 AND a.verb='\"resume\"' AND n.state IN('reconnected','reconnect_unknown')",params![principal,id],|r|r.get(0)).optional().map_err(storage)?;
+            if let Some(raw) = reconnect {
+                reply.reconnect = Some(serde_json::from_str(&raw).map_err(storage)?);
+            }
+            if let Some(dispatch) = &reply.dispatch {
+                reply.pre_launch_failure =
+                    crate::execution::pre_launch_failure(tx, &dispatch.session_id)?;
+            }
             reply.replayed = true;
             reply.historical = true;
             Ok(Some(reply))
@@ -464,12 +920,13 @@ pub(crate) fn profile<'a>(
     }
     Ok(p)
 }
-fn admit_new(
+pub(crate) fn admit_new(
     tx: &Transaction<'_>,
     config: &OwnerConfig,
     principal: &str,
     request: &ControlRequest,
     now: i64,
+    runtime_capabilities: bool,
 ) -> Result<(Target, String), ErrorCode> {
     if request.deadline.is_some_and(|d| d <= now) {
         return Err(ErrorCode::DeadlineExpired);
@@ -526,8 +983,9 @@ fn admit_new(
         {
             return Err(ErrorCode::InvalidConfiguration);
         }
-        if !args.requested.required_capabilities.is_empty()
-            || !d.resolved.required_capabilities.is_empty()
+        if !runtime_capabilities
+            && (!args.requested.required_capabilities.is_empty()
+                || !d.resolved.required_capabilities.is_empty())
         {
             return Err(ErrorCode::NotSupported);
         }
@@ -540,12 +998,17 @@ fn admit_new(
             return Err(ErrorCode::ResourceLimit);
         }
         let mut resolved = d.resolved.clone();
+        for capability in &args.requested.required_capabilities {
+            if !resolved.required_capabilities.contains(capability) {
+                resolved.required_capabilities.push(capability.clone());
+            }
+        }
         if let Some(budget) = &args.requested.budget {
             resolved.budget = budget.clone();
         }
         let live: i64 = tx
             .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE state!='ended'",
+                "SELECT COUNT(*) FROM sessions WHERE state NOT IN('ended','failed')",
                 [],
                 |r| r.get(0),
             )
@@ -596,10 +1059,15 @@ fn admit_new(
             String::new(),
         )
     };
-    if !config.grants.iter().any(|g| {
-        g.principal == principal && g.verb == request.action.verb() && g.target.matches(&target)
-    }) {
+    if !has_current_grant(tx, config, principal, request.action.verb(), &target)? {
         return Err(ErrorCode::GrantDenied);
+    }
+    if !matches!(
+        request.action,
+        Action::Status(_) | Action::Result(_) | Action::Stop(_)
+    ) && runtime_disabled(tx)?
+    {
+        return Err(ErrorCode::ProfileDenied);
     }
     Ok((target, resolved))
 }

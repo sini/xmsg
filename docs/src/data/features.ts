@@ -44,22 +44,26 @@ export const FEATURES: Record<string, FeatureEntry> = {
 	},
 	'teams.supervisor': {
 		id: 'teams.supervisor',
-		title: 'Fake-backend executor supervisor and workspace library',
+		title: 'Default-off executor supervisor and workspace mechanism',
 		owner: 'sini',
 		evidence: [
 			{ path: 'extensions/executor/src/supervisor.rs', anchor: 'pub(crate) struct SupervisorController' },
 			{ path: 'extensions/executor/src/workspace.rs', anchor: 'pub struct OwnerWorkspaceBinding' },
+			{ path: 'extensions/executor/src/runtime_process.rs', anchor: 'pub(crate) fn run_until' },
 		],
 		plannedSince: '2026-11-20',
-		note: 'No installed launcher or real harness qualification.',
+		note: 'Optional entrypoint and content mechanism; empty qualification, no real harness or pilot qualified.',
 	},
 	'teams.control-journal': {
 		id: 'teams.control-journal',
-		title: 'Fail-closed executor control journal library',
+		title: 'Default-deny executor lifecycle and human decision journal',
 		owner: 'sini',
-		evidence: [{ path: 'extensions/executor/src/control.rs', anchor: 'pub struct ControlService' }],
+		evidence: [
+			{ path: 'extensions/executor/src/control.rs', anchor: 'pub struct ControlService' },
+			{ path: 'extensions/executor/src/approval.rs', anchor: 'pub struct HumanDecisionCall' },
+		],
 		plannedSince: '2026-11-20',
-		note: 'Production lifecycle attribution unavailable; success paths are test-only, not a runtime executor.',
+		note: 'Human-only mechanism; caller and adapter qualification remain empty/default-deny.',
 	},
 	'fleet-observer.activity-export': {
 		id: 'fleet-observer.activity-export',
@@ -114,11 +118,15 @@ export const FEATURES: Record<string, FeatureEntry> = {
 	},
 	'teams.executor-contracts': {
 		id: 'teams.executor-contracts',
-		title: 'Executor contracts and fake ACP test harness',
+		title: 'Optional executor CLI, contracts and fake ACP controls',
 		owner: 'sini',
-		evidence: [{ path: 'extensions/executor/src/protocol.rs', anchor: 'pub struct ControlRequest' }],
+		evidence: [
+			{ path: 'extensions/executor/src/protocol.rs', anchor: 'pub struct ControlRequest' },
+			{ path: 'extensions/executor/src/operator.rs', anchor: 'pub fn run(' },
+			{ path: 'extensions/executor/src/runtime_config.rs', anchor: 'pub struct RuntimeConfig' },
+		],
 		plannedSince: '2026-11-20',
-		note: 'Internal library only; no launcher, endpoint or real harness qualification.',
+		note: 'Default-off optional mechanism; no configuration flag enables qualification or a real pilot.',
 	},
 	'teams.local-parity': {
 		id: 'teams.local-parity',
@@ -126,7 +134,7 @@ export const FEATURES: Record<string, FeatureEntry> = {
 		owner: 'sini',
 		evidence: [],
 		plannedSince: '2026-11-20',
-		note: 'Planned runtime; contracts and fake fixtures do not launch or qualify a harness.',
+		note: 'Real mixed-harness parity remains unqualified; mechanism and fake fixtures are not a native pilot.',
 	},
 	'session-locator.cli': {
 		id: 'session-locator.cli',

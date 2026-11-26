@@ -8,6 +8,8 @@ use crate::{
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
+pub(crate) const SUPERVISOR_PROTOCOL_VERSION: u16 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionIdentity {
@@ -58,9 +60,172 @@ pub(crate) fn initialize(db: &rusqlite::Connection) -> Result<(), ErrorCode> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS executions(session_id TEXT NOT NULL,generation INTEGER NOT NULL,admission_id INTEGER NOT NULL UNIQUE,identity TEXT NOT NULL,service_id TEXT NOT NULL,state TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,diagnostic_pid INTEGER,workspace TEXT,PRIMARY KEY(session_id,generation));
       CREATE TABLE IF NOT EXISTS execution_effects(admission_id INTEGER PRIMARY KEY,operation TEXT NOT NULL,identity TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS execution_content(session_id TEXT NOT NULL,generation INTEGER NOT NULL,message_id TEXT NOT NULL,record TEXT NOT NULL,bytes INTEGER NOT NULL,PRIMARY KEY(session_id,generation,message_id));
-      CREATE TABLE IF NOT EXISTS execution_events(session_id TEXT NOT NULL,generation INTEGER NOT NULL,cursor INTEGER NOT NULL,event TEXT NOT NULL,PRIMARY KEY(session_id,generation,cursor));").map_err(storage)
+      CREATE TABLE IF NOT EXISTS execution_events(session_id TEXT NOT NULL,generation INTEGER NOT NULL,cursor INTEGER NOT NULL,event TEXT NOT NULL,PRIMARY KEY(session_id,generation,cursor));
+      CREATE TABLE IF NOT EXISTS pre_launch_failures(admission_id INTEGER PRIMARY KEY,code TEXT NOT NULL,observed_at INTEGER NOT NULL);").map_err(storage)
+}
+
+impl Journal {
+    pub(crate) fn fail_before_launch(
+        &mut self,
+        admission: i64,
+        code: ErrorCode,
+        now: i64,
+    ) -> Result<(), ErrorCode> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let eligible:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM admissions a WHERE a.id=?1 AND a.verb='\"dispatch\"' AND NOT EXISTS(SELECT 1 FROM executions e WHERE e.admission_id=a.id))",[admission],|r|r.get(0)).map_err(storage)?;
+        if eligible {
+            let changed = tx
+                .execute(
+                    "INSERT OR IGNORE INTO pre_launch_failures VALUES(?1,?2,?3)",
+                    params![
+                        admission,
+                        serde_json::to_string(&code).map_err(storage)?,
+                        now
+                    ],
+                )
+                .map_err(storage)?;
+            if changed == 1 {
+                tx.execute("INSERT INTO audit(principal,request_id,event,at) SELECT principal,request_id,'pre_launch_failed',?2 FROM admissions WHERE id=?1",params![admission,now]).map_err(storage)?;
+                tx.execute("UPDATE sessions SET state='failed' WHERE id=(SELECT session_id FROM admissions WHERE id=?1)",[admission]).map_err(storage)?;
+            }
+        }
+        tx.commit().map_err(storage)
+    }
+}
+
+pub(crate) fn pre_launch_failure(
+    db: &rusqlite::Connection,
+    session: &str,
+) -> Result<Option<crate::control::PreLaunchFailure>, ErrorCode> {
+    let row:Option<(i64,String)>=db.query_row("SELECT f.admission_id,f.code FROM pre_launch_failures f JOIN admissions a ON a.id=f.admission_id WHERE a.session_id=?1",[session],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
+    row.map(|(admission_id, code)| {
+        Ok(crate::control::PreLaunchFailure::Failed {
+            admission_id,
+            code: serde_json::from_str(&code).map_err(storage)?,
+            submission: crate::control::PreLaunchSubmission::NotAttempted,
+        })
+    })
+    .transpose()
+}
+
+pub(crate) fn journal_reports(
+    db: &rusqlite::Connection,
+    target: &Target,
+    now: i64,
+) -> Result<
+    (
+        crate::protocol::StatusReport,
+        crate::protocol::NormalizedResult,
+    ),
+    ErrorCode,
+> {
+    use crate::protocol::{
+        NormalizedResult, ObservationSource, Outcome, SessionState, StatusReport,
+    };
+    let session = match target {
+        Target::Session { session_id }
+        | Target::Execution { session_id, .. }
+        | Target::Turn { session_id, .. } => session_id,
+        _ => return Err(ErrorCode::UnknownTarget),
+    };
+    let (generation, turn, state): (i64, Option<String>, String) = db
+        .query_row(
+            "SELECT generation,active_turn,state FROM sessions WHERE id=?1",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(storage)?
+        .ok_or(ErrorCode::UnknownTarget)?;
+    let generation = u64::try_from(generation).map_err(storage)?;
+    let (status, outcome, summary, remaining) = match state.as_str() {
+        "admitted" | "reserved" | "spawn_intent" => (
+            SessionState::Starting,
+            Outcome::Working,
+            "journal records a starting intent",
+            "await qualified native execution",
+        ),
+        "foreground" | "working" => (
+            SessionState::Working,
+            Outcome::Working,
+            "journal records an active native turn",
+            "verify task outcome and artifacts",
+        ),
+        "needs_human" => (
+            SessionState::NeedsHuman,
+            Outcome::NeedsHuman,
+            "journal records a native request awaiting human review",
+            "check current request eligibility before review",
+        ),
+        "background" => (
+            SessionState::Background,
+            Outcome::Working,
+            "native turn ended; task completion remains unverified",
+            "verify task outcome and artifacts",
+        ),
+        "failed" => (
+            SessionState::Unknown,
+            Outcome::Failed,
+            "journal records a terminal pre-launch failure",
+            "resolve configuration before a deliberately new request",
+        ),
+        "ended" | "stopped" => (
+            SessionState::Stopped,
+            Outcome::Unknown,
+            "journal is terminal; task outcome remains unverified",
+            "verify final outcome and artifacts",
+        ),
+        _ => (
+            SessionState::Unknown,
+            Outcome::Unknown,
+            "execution effect is unknown",
+            "reconcile the owned execution without replacement launch",
+        ),
+    };
+    let resolved: Option<String> = db
+        .query_row(
+            "SELECT resolved FROM admissions WHERE session_id=?1 AND verb='\"dispatch\"'",
+            [session],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    let base = resolved
+        .map(|raw| {
+            serde_json::from_str::<ResolvedDispatch>(&raw)
+                .map(|r| r.workspace.base_revision)
+                .map_err(storage)
+        })
+        .transpose()?;
+    Ok((
+        StatusReport {
+            session_id: session.clone(),
+            generation,
+            turn_id: turn.clone(),
+            state: status,
+            observed_at: now,
+            source: ObservationSource::Journal,
+        },
+        NormalizedResult {
+            session_id: session.clone(),
+            generation,
+            turn_id: turn,
+            outcome,
+            summary: summary.into(),
+            evidence_refs: vec![format!("journal:session:{session}:generation:{generation}")],
+            artifact_refs: vec![],
+            base_revision: base,
+            result_revision: None,
+            remaining_work: vec![remaining.into()],
+            provenance: "journal".into(),
+        },
+    ))
 }
 struct DispatchRecord {
+    admission_id: i64,
     principal: String,
     request: ControlRequest,
     resolved: ResolvedDispatch,
@@ -68,6 +233,16 @@ struct DispatchRecord {
     generation: u64,
 }
 fn dispatch(tx: &Transaction<'_>, id: i64) -> Result<DispatchRecord, ErrorCode> {
+    let failed: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pre_launch_failures WHERE admission_id=?1)",
+            [id],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    if failed {
+        return Err(ErrorCode::PreLaunchFailed);
+    }
     let row:Option<(String,String,String,String)>=tx.query_row("SELECT principal,payload,resolved,session_id FROM admissions WHERE id=?1 AND verb='\"dispatch\"'",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(storage)?;
     let (principal, payload, resolved, session_id) = row.ok_or(ErrorCode::UnknownTarget)?;
     let generation: i64 = tx
@@ -78,6 +253,7 @@ fn dispatch(tx: &Transaction<'_>, id: i64) -> Result<DispatchRecord, ErrorCode> 
         )
         .map_err(storage)?;
     Ok(DispatchRecord {
+        admission_id: id,
         principal,
         request: serde_json::from_str(&payload).map_err(storage)?,
         resolved: serde_json::from_str(&resolved).map_err(storage)?,
@@ -117,7 +293,13 @@ fn authorize(tx: &Transaction<'_>, record: &DispatchRecord, now: i64) -> Result<
         .ok_or(ErrorCode::ProfileDenied)?;
     let mut permitted = current.resolved.clone();
     permitted.budget = record.resolved.budget.clone();
+    permitted.required_capabilities = record.resolved.required_capabilities.clone();
     if permitted != record.resolved
+        || !current
+            .resolved
+            .required_capabilities
+            .iter()
+            .all(|c| record.resolved.required_capabilities.contains(c))
         || record.resolved.budget.worker_slots > current.resolved.budget.worker_slots
         || record.resolved.budget.reviewer_slots > current.resolved.budget.reviewer_slots
         || record.resolved.budget.max_wall_ms > current.resolved.budget.max_wall_ms
@@ -133,7 +315,7 @@ fn authorize(tx: &Transaction<'_>, record: &DispatchRecord, now: i64) -> Result<
     }
     let slots: i64 = tx
         .query_row(
-            "SELECT COUNT(*) FROM sessions WHERE state!='ended'",
+            "SELECT COUNT(*) FROM sessions WHERE state NOT IN('ended','failed')",
             [],
             |r| r.get(0),
         )
@@ -143,7 +325,113 @@ fn authorize(tx: &Transaction<'_>, record: &DispatchRecord, now: i64) -> Result<
     }
     Ok(cfg.revision)
 }
+
+fn require_launch_eligibility(
+    policy: Option<&crate::runtime_policy::RuntimePolicy>,
+    tx: &Transaction<'_>,
+    record: &DispatchRecord,
+    revision: u64,
+    now: i64,
+) -> Result<(), ErrorCode> {
+    if let Some(policy) = policy {
+        policy.require(
+            &record.resolved,
+            revision,
+            now,
+            journal::runtime_disabled(tx)?,
+        )?;
+        policy
+            .callers
+            .require(tx, record.admission_id, revision, now)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn revalidate_dispatch(
+    tx: &Transaction<'_>,
+    admission_id: i64,
+    now: i64,
+) -> Result<ResolvedDispatch, ErrorCode> {
+    let record = dispatch(tx, admission_id)?;
+    authorize(tx, &record, now)?;
+    Ok(record.resolved)
+}
 impl Journal {
+    pub(crate) fn spawn_native_backend(
+        &mut self,
+        admission: i64,
+        identity: &ExecutionIdentity,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+        command: &mut std::process::Command,
+    ) -> Result<std::process::Child, ErrorCode> {
+        let policy = self.runtime_policy.clone().ok_or(ErrorCode::NotSupported)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM executions WHERE admission_id=?1 AND identity=?2 AND state='spawn_intent')",params![admission,serde_json::to_string(identity).map_err(storage)?],|r|r.get(0)).map_err(storage)?;
+        if !valid {
+            return Err(ErrorCode::RequestConflict);
+        }
+        let row = dispatch(&tx, admission)?;
+        let revision = authorize(&tx, &row, clock()?)?;
+        if revision != identity.policy_revision {
+            return Err(ErrorCode::RequestConflict);
+        }
+        policy.require_at(
+            &row.resolved,
+            revision,
+            clock,
+            journal::runtime_disabled(&tx)?,
+        )?;
+        policy.callers.require(&tx, admission, revision, clock()?)?;
+        let mut child =
+            xmsg::client::caller_attribution::with_fd_inheritance_gate(|| command.spawn())
+                .map_err(storage)?;
+        if tx.commit().is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ErrorCode::Storage);
+        }
+        Ok(child)
+    }
+    pub(crate) fn write_bootstrap_frame(
+        &mut self,
+        admission: i64,
+        identity: &ExecutionIdentity,
+        clock: &dyn Fn() -> Result<i64, ErrorCode>,
+        frame: &crate::framing::Frame,
+        writer: &mut crate::supervisor::DeadlineIo<'_, impl std::io::Write + std::os::fd::AsRawFd>,
+    ) -> Result<(), ErrorCode> {
+        writer.limit_to(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        let policy = self.runtime_policy.clone().ok_or(ErrorCode::NotSupported)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let current:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM executions WHERE admission_id=?1 AND identity=?2 AND state='spawn_intent')",params![admission,serde_json::to_string(identity).map_err(storage)?],|r|r.get(0)).map_err(storage)?;
+        if !current {
+            return Err(ErrorCode::RequestConflict);
+        }
+        let row = dispatch(&tx, admission)?;
+        let revision = authorize(&tx, &row, clock()?)?;
+        if revision != identity.policy_revision {
+            return Err(ErrorCode::RequestConflict);
+        }
+        policy.require_at(
+            &row.resolved,
+            revision,
+            clock,
+            journal::runtime_disabled(&tx)?,
+        )?;
+        policy.callers.require(&tx, admission, revision, clock()?)?;
+        let at = clock()?;
+        if row.request.deadline.is_some_and(|d| d <= at) {
+            return Err(ErrorCode::DeadlineExpired);
+        }
+        crate::framing::write_frame(writer, frame).map_err(|_| ErrorCode::Storage)?;
+        tx.commit().map_err(storage)
+    }
     pub(crate) fn dispatch_identity(
         &mut self,
         id: i64,
@@ -155,12 +443,14 @@ impl Journal {
         Ok((row.session_id, row.generation))
     }
     pub(crate) fn reserve_launch(&mut self, id: i64, now: i64) -> Result<LaunchLease, ErrorCode> {
+        let policy = self.runtime_policy.clone();
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         let row = dispatch(&tx, id)?;
         let revision = authorize(&tx, &row, now)?;
+        require_launch_eligibility(policy.as_deref(), &tx, &row, revision, now)?;
         let existing: Option<(String, String, String)> = tx
             .query_row(
                 "SELECT identity,service_id,state FROM executions WHERE admission_id=?1",
@@ -189,7 +479,7 @@ impl Journal {
                     generation: row.generation,
                     launch_nonce: hex::encode(nonce()?),
                     policy_revision: revision,
-                    protocol_version: 1,
+                    protocol_version: SUPERVISOR_PROTOCOL_VERSION,
                     build_version: env!("CARGO_PKG_VERSION").into(),
                 },
                 nonce()?,
@@ -209,12 +499,14 @@ impl Journal {
         lease: &LaunchLease,
         now: i64,
     ) -> Result<(), ErrorCode> {
+        let policy = self.runtime_policy.clone();
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         let row = dispatch(&tx, lease.admission_id)?;
         let revision = authorize(&tx, &row, now)?;
+        require_launch_eligibility(policy.as_deref(), &tx, &row, revision, now)?;
         if row.session_id != lease.identity.session_id
             || row.generation != lease.identity.generation
             || revision != lease.identity.policy_revision
@@ -308,7 +600,7 @@ impl Journal {
         .transpose()
     }
     pub(crate) fn proxy_binding(&self, id: &ExecutionIdentity) -> Result<ProxyBinding, ErrorCode> {
-        let (service,resolved):(String,String)=self.db.query_row("SELECT e.service_id,a.resolved FROM executions e JOIN admissions a ON a.id=e.admission_id WHERE e.session_id=?1 AND e.generation=?2 AND e.identity=?3 AND e.state='running'",params![id.session_id,integer(id.generation)?,serde_json::to_string(id).map_err(storage)?],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?.ok_or(ErrorCode::StaleGeneration)?;
+        let (service,resolved):(String,String)=self.db.query_row("SELECT e.service_id,a.resolved FROM executions e JOIN admissions a ON a.id=e.admission_id WHERE e.session_id=?1 AND e.generation=?2 AND e.identity=?3 AND e.state='running'",params![id.session_id,integer(id.generation)?,serde_json::to_string(id).map_err(storage)?],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(journal::metadata_error)?.ok_or(ErrorCode::StaleGeneration)?;
         let resolved: ResolvedDispatch = serde_json::from_str(&resolved).map_err(storage)?;
         ProxyBinding::new(
             id.session_id.clone(),
@@ -329,7 +621,17 @@ impl ContentStore for &crate::control::ControlService {
         content: &ContentRecord,
     ) -> Result<CommitOutcome, MembershipError> {
         let mut journal = self.journal.lock().map_err(|_| MembershipError::Storage)?;
-        let tx = journal
+        journal.commit(binding, content)
+    }
+}
+
+impl ContentStore for Journal {
+    fn commit(
+        &mut self,
+        binding: &ProxyBinding,
+        content: &ContentRecord,
+    ) -> Result<CommitOutcome, MembershipError> {
+        let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| MembershipError::Storage)?;
@@ -367,17 +669,53 @@ impl ContentStore for &crate::control::ControlService {
 }
 
 impl Journal {
+    pub(crate) fn validate_bootstrap(
+        &mut self,
+        admission: i64,
+        identity: &ExecutionIdentity,
+        workspace: &std::path::Path,
+        now: i64,
+    ) -> Result<ResolvedDispatch, ErrorCode> {
+        let policy = self.runtime_policy.clone().ok_or(ErrorCode::NotSupported)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage)?;
+        let raw:Option<String>=tx.query_row("SELECT workspace FROM executions WHERE admission_id=?1 AND identity=?2 AND state='spawn_intent'",params![admission,serde_json::to_string(identity).map_err(storage)?],|r|r.get(0)).optional().map_err(storage)?.ok_or(ErrorCode::UnknownTarget)?;
+        let stored: crate::workspace::OwnedWorkspaceIdentity =
+            serde_json::from_str(&raw.ok_or(ErrorCode::UnknownTarget)?).map_err(storage)?;
+        if stored.path() != workspace || identity.protocol_version != SUPERVISOR_PROTOCOL_VERSION {
+            return Err(ErrorCode::RequestConflict);
+        }
+        let selected = revalidate_dispatch(&tx, admission, now)?;
+        let configuration = journal::config(&tx)?;
+        if configuration.revision != identity.policy_revision {
+            return Err(ErrorCode::RequestConflict);
+        }
+        policy
+            .callers
+            .require(&tx, admission, configuration.revision, now)?;
+        policy.require(
+            &selected,
+            configuration.revision,
+            now,
+            journal::runtime_disabled(&tx)?,
+        )?;
+        Ok(selected)
+    }
     pub(crate) fn validate_reserved(
         &mut self,
         lease: &LaunchLease,
         now: i64,
     ) -> Result<(), ErrorCode> {
+        let policy = self.runtime_policy.clone();
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
         let row = dispatch(&tx, lease.admission_id)?;
         let rev = authorize(&tx, &row, now)?;
+        require_launch_eligibility(policy.as_deref(), &tx, &row, rev, now)?;
         if row.session_id != lease.identity.session_id
             || row.generation != lease.identity.generation
             || rev != lease.identity.policy_revision
@@ -431,11 +769,7 @@ impl Journal {
             .map_err(storage)?;
         let cfg = journal::config(&tx)?;
         journal::profile(&cfg, &profile_id.ok_or(ErrorCode::StaleGeneration)?)?;
-        if !cfg
-            .grants
-            .iter()
-            .any(|g| g.principal == principal && g.verb == Verb::Stop && g.target.matches(&target))
-        {
+        if !journal::has_current_grant(&tx, &cfg, &principal, Verb::Stop, &target)? {
             return Err(ErrorCode::GrantDenied);
         }
         let identity:String=tx.query_row("SELECT identity FROM executions WHERE session_id=?1 AND generation=?2 AND state IN('running','unknown','spawn_intent')",params![session_id,integer(*generation)?],|r|r.get(0)).optional().map_err(storage)?.ok_or(ErrorCode::UnknownTarget)?;
@@ -454,7 +788,17 @@ impl Journal {
         &mut self,
         id: &ExecutionIdentity,
     ) -> Result<bool, ErrorCode> {
-        let tx = self.db.transaction().map_err(storage)?;
+        let tx = self.db.transaction().map_err(journal::metadata_error)?;
+        let disabled: bool = tx
+            .query_row(
+                "SELECT disabled FROM runtime_control WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(journal::metadata_error)?;
+        if disabled {
+            return Ok(true);
+        }
         let cfg = journal::config(&tx)?;
         let profile: Option<String> = tx
             .query_row(

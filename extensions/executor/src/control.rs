@@ -16,6 +16,18 @@ use std::{
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
+    #[error("caller_scope_unproven")]
+    CallerScopeUnproven,
+    #[error("caller_policy_store_unproven")]
+    CallerPolicyStoreUnproven,
+    #[error("caller_artifact_unproven")]
+    CallerArtifactUnproven,
+    #[error("caller_qualification_unavailable")]
+    CallerQualificationUnavailable,
+    #[error("caller_reference_unavailable")]
+    CallerReferenceUnavailable,
+    #[error("pre_launch_failed")]
+    PreLaunchFailed,
     #[error("peer_uid")]
     PeerUid,
     #[error("attestation_unavailable")]
@@ -34,6 +46,14 @@ pub enum ErrorCode {
     DeadlineExpired,
     #[error("profile_denied")]
     ProfileDenied,
+    #[error("native_descriptor_inventory_unavailable")]
+    NativeDescriptorInventoryUnavailable,
+    #[error("native_descriptor_limit_unsupported")]
+    NativeDescriptorLimitUnsupported,
+    #[error("native_descriptor_outside_limit")]
+    NativeDescriptorOutsideLimit,
+    #[error("journal_busy")]
+    JournalBusy,
     #[error("invalid_configuration")]
     InvalidConfiguration,
     #[error("unknown_target")]
@@ -73,6 +93,8 @@ pub struct DispatchTemplate {
     pub team_id: String,
     pub profile_id: String,
     pub resolved: ResolvedDispatch,
+    #[serde(default)]
+    pub lifecycle_verbs: Vec<crate::protocol::Verb>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +121,21 @@ impl OwnerConfig {
             }
         }
         for d in &self.defaults {
+            for (index, verb) in d.lifecycle_verbs.iter().enumerate() {
+                if !matches!(
+                    verb,
+                    crate::protocol::Verb::Send
+                        | crate::protocol::Verb::Steer
+                        | crate::protocol::Verb::Interrupt
+                        | crate::protocol::Verb::Resume
+                        | crate::protocol::Verb::Stop
+                        | crate::protocol::Verb::Status
+                        | crate::protocol::Verb::Result
+                ) || d.lifecycle_verbs[..index].contains(verb)
+                {
+                    return Err(ErrorCode::InvalidConfiguration);
+                }
+            }
             let p = self
                 .profiles
                 .iter()
@@ -126,6 +163,16 @@ mod tests;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AdminCommand {
+    RevokeCallerQualification {
+        request_id: String,
+        expected_revision: u64,
+        record_id: String,
+        record_revision: u64,
+    },
+    DisableRuntime {
+        request_id: String,
+        expected_revision: u64,
+    },
     ReplacePolicy {
         request_id: String,
         expected_revision: u64,
@@ -146,6 +193,30 @@ pub struct ControlReply {
     pub receipt: OperationReceipt,
     pub dispatch: Option<AdmittedDispatch>,
     pub decision: Option<crate::protocol::ApproveArgs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_launch_failure: Option<PreLaunchFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::protocol::StatusReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<crate::protocol::NormalizedResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect: Option<crate::protocol::ReconnectReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PreLaunchFailure {
+    Failed {
+        admission_id: i64,
+        code: ErrorCode,
+        submission: PreLaunchSubmission,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreLaunchSubmission {
+    NotAttempted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +224,8 @@ pub struct ControlReply {
 pub struct AdmittedDispatch {
     pub session_id: String,
     pub resolved: ResolvedDispatch,
+    #[serde(default)]
+    pub delegated_verbs: Vec<crate::protocol::Verb>,
 }
 
 pub struct ControlService {
@@ -188,12 +261,35 @@ impl WallClock for SystemClock {
     }
 }
 impl ControlService {
+    /// Adds the reviewed runtime admission fence without enabling an unqualified tuple.
+    pub fn with_runtime_configuration(
+        self,
+        configuration: crate::runtime_config::RuntimeConfig,
+    ) -> Result<Self, ErrorCode> {
+        let policy = crate::runtime_policy::RuntimePolicy::reviewed(configuration)?;
+        self.journal
+            .lock()
+            .map_err(|_| ErrorCode::Storage)?
+            .runtime_policy = Some(std::sync::Arc::new(policy));
+        Ok(self)
+    }
     #[cfg(test)]
     pub(crate) fn fixture_attributed(mut self, principal: &str) -> Self {
         self.attestor = Box::new(auth::fake::FakeAttestor {
             principal: principal.into(),
             wrong_binding: false,
         });
+        self
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_time(mut self, at: i64) -> Self {
+        struct Fixed(i64);
+        impl WallClock for Fixed {
+            fn now(&self) -> i64 {
+                self.0
+            }
+        }
+        self.clock = Box::new(Fixed(at));
         self
     }
     #[cfg(test)]
@@ -317,8 +413,8 @@ impl ControlService {
             .busy_timeout(std::time::Duration::ZERO)
             .map_err(|_| ErrorCode::Storage)?;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            journal.admit_bound(
-                principal.id(),
+            journal.admit_attested_bound(
+                &principal,
                 &input,
                 &call.request,
                 &|| self.clock.now(),
@@ -349,12 +445,10 @@ impl ControlService {
             input_digest: input.clone(),
         };
         let principal = auth::principal(self.attestor.as_ref(), &binding, self.uid)?;
-        self.journal.lock().map_err(|_| ErrorCode::Storage)?.admit(
-            principal.id(),
-            &input,
-            &request,
-            now,
-        )
+        self.journal
+            .lock()
+            .map_err(|_| ErrorCode::Storage)?
+            .admit_attested(&principal, &input, &request, now)
     }
     pub(crate) fn admin(
         &self,
@@ -363,12 +457,7 @@ impl ControlService {
         command: AdminCommand,
         now: i64,
     ) -> Result<u64, ErrorCode> {
-        if peer.uid != self.uid {
-            return Err(ErrorCode::PeerUid);
-        }
-        if !self.credentials.verify(credential, CredentialRole::Owner) {
-            return Err(ErrorCode::CredentialDenied);
-        }
+        self.authorize_role(peer, credential, CredentialRole::Owner)?;
         self.journal
             .lock()
             .map_err(|_| ErrorCode::Storage)?
@@ -381,16 +470,63 @@ impl ControlService {
         request: ControlRequest,
         now: i64,
     ) -> Result<ControlReply, ErrorCode> {
-        if peer.uid != self.uid {
-            return Err(ErrorCode::PeerUid);
-        }
-        if !self.credentials.verify(credential, CredentialRole::Human) {
-            return Err(ErrorCode::CredentialDenied);
-        }
+        self.authorize_role(peer, credential, CredentialRole::Human)?;
         self.journal
             .lock()
             .map_err(|_| ErrorCode::Storage)?
             .human(request, now)
+    }
+
+    fn authorize_role(
+        &self,
+        peer: PeerWitness,
+        credential: &[u8],
+        role: CredentialRole,
+    ) -> Result<(), ErrorCode> {
+        if peer.uid != self.uid {
+            return Err(ErrorCode::PeerUid);
+        }
+        if !self.credentials.verify(credential, role) {
+            return Err(ErrorCode::CredentialDenied);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn native_human(
+        &self,
+        peer: PeerWitness,
+        credential: &[u8],
+        call: crate::approval::HumanDecisionCall,
+    ) -> Result<ControlReply, ErrorCode> {
+        self.authorize_role(peer, credential, CredentialRole::Human)?;
+        let mut journal = self.journal.lock().map_err(|_| ErrorCode::Storage)?;
+        journal.human_at(call.request, Some(call.confirmation), &|| {
+            let at = self.clock.now();
+            if at <= 0 {
+                Err(ErrorCode::DeadlineExpired)
+            } else {
+                Ok(at)
+            }
+        })
+    }
+    pub(crate) fn pending_human(
+        &self,
+        peer: PeerWitness,
+        credential: &[u8],
+        query: crate::approval::HumanPendingQuery,
+    ) -> Result<Option<crate::approval::NativePending>, ErrorCode> {
+        self.authorize_role(peer, credential, CredentialRole::Human)?;
+        self.journal
+            .lock()
+            .map_err(|_| ErrorCode::Storage)?
+            .pending_human(&query, &|| {
+                let at = self.clock.now();
+                if at <= 0 {
+                    Err(ErrorCode::DeadlineExpired)
+                } else {
+                    Ok(at)
+                }
+            })
     }
 }
 
