@@ -815,6 +815,8 @@ impl SupervisorController {
                 .mark_execution(&lease.identity, false)?;
             return Err(error);
         }
+        #[cfg(test)]
+        let startup_wait = std::time::Instant::now();
         let hello: SupervisorHello = match read_frame::<SupervisorHello>(&group.startup) {
             Ok(hello)
                 if hello.identity == lease.identity
@@ -823,7 +825,15 @@ impl SupervisorController {
             {
                 hello
             }
-            _ => {
+            _invalid => {
+                #[cfg(test)]
+                {
+                    let receipt = serde_json::json!({"error":_invalid.as_ref().err().map(|error|format!("{error:?}")),"hello_received":_invalid.is_ok(),"elapsed_ms":startup_wait.elapsed().as_millis()});
+                    let _ = fs::write(
+                        lock.directory.join("startup-error.json"),
+                        serde_json::to_vec(&receipt).unwrap(),
+                    );
+                }
                 let _ = group.abort_owned();
                 service
                     .journal

@@ -184,3 +184,137 @@ jobs:
           name: executor-runtime-completion
           path: ${{ runner.temp }}/executor-runtime-completion.json
           if-no-files-found: warn
+  # TEMP PR315 restoration diagnosis; remove before READY.
+  hol-restoration-sequence:
+    needs: runtime-source-completion
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 8
+      SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Install the same declared toolchain
+        run: rustup toolchain install 1.88 --profile minimal
+      - name: Repeat the unchanged strict-wire then HOL RED and restored GREEN sequence
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt="$RUNNER_TEMP/executor-hol-sequence"
+          temporary=$(mktemp -d /tmp/xmsg-hol-sequence.XXXXXX)
+          mkdir -p "$receipt/cargo" "$temporary/home" "$temporary/tmp"
+          clean=(env -i "PATH=$PATH" "HOME=$temporary/home" "TMPDIR=$temporary/tmp"
+            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" "RUSTUP_TOOLCHAIN=1.88"
+            "CARGO_HOME=$receipt/cargo" "CARGO_BUILD_JOBS=8" "CI=true"
+            "RUNNER_TRACKING_ID=${RUNNER_TRACKING_ID:-}")
+          "${clean[@]}" cargo fetch --locked
+          "${clean[@]}" cargo fetch --locked --manifest-path extensions/executor/Cargo.toml
+          "${clean[@]}" CARGO_NET_OFFLINE=true XMSG_BUILD_REVISION="$SOURCE_HEAD" \
+            CARGO_TARGET_DIR="$receipt/target-daemon" cargo build --locked -j4 \
+            --no-default-features --features daemon --bin xmsg --message-format=json \
+            > "$receipt/daemon-build.jsonl" 2> "$receipt/daemon-build.stderr"
+          "${clean[@]}" CARGO_NET_OFFLINE=true CI_EXPECTED_HEAD="$SOURCE_HEAD" \
+            CI_SEQUENCE_RECEIPT="$receipt" python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+          import sys
+          import time
+          root = Path.cwd()
+          receipt = Path(os.environ['CI_SEQUENCE_RECEIPT'])
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          assert head == os.environ['CI_EXPECTED_HEAD']
+          assert not subprocess.check_output(['git', 'status', '--porcelain'])
+          assert not any(key.startswith(('GITHUB', 'ACTIONS')) or 'TOKEN' in key or key.endswith('API_KEY') for key in os.environ)
+          digest = lambda data: hashlib.sha256(data).hexdigest()
+          manifest = root / 'extensions/executor/fixtures/runtime-mutants.json'
+          runner = root / 'extensions/executor/scripts/control_faults.py'
+          cases = json.loads(manifest.read_bytes())
+          selected = ['runtime-strict-steer-wire-method', 'runtime-terminal-prelaunch-exclusion']
+          assert [case['id'] for case in cases if case['id'] in selected] == selected
+          compiler = [json.loads(line) for line in (receipt / 'daemon-build.jsonl').read_text().splitlines() if line.startswith('{')]
+          artifacts = [row for row in compiler if row.get('reason') == 'compiler-artifact' and row.get('executable') and row.get('target', {}).get('kind') == ['bin'] and row['target']['name'] == 'xmsg']
+          assert len(artifacts) == 1 and artifacts[0]['profile']['test'] is False and 'daemon' in artifacts[0]['features'] and 'test-hooks' not in artifacts[0]['features']
+          daemon = Path(artifacts[0]['executable']).resolve(strict=True)
+          python = Path(sys.executable).resolve(strict=True)
+          environment = {**os.environ, 'XMSG_EXECUTOR_FIXTURE_DAEMON': str(daemon),
+                         'XMSG_EXECUTOR_FIXTURE_DAEMON_SHA256': digest(daemon.read_bytes()),
+                         'XMSG_EXECUTOR_FIXTURE_PYTHON': str(python)}
+          metadata = {'status': 'running', 'head': head, 'planned_iterations': 20, 'cases': selected,
+                      'layout': 'unchanged reviewed runner; distinct RED/GREEN source and target directories',
+                      'manifest_sha256': digest(manifest.read_bytes()), 'runner_sha256': digest(runner.read_bytes()),
+                      'daemon_sha256': environment['XMSG_EXECUTOR_FIXTURE_DAEMON_SHA256'],
+                      'python_sha256': digest(python.read_bytes()), 'environment_keys': sorted(environment),
+                      'rust': subprocess.check_output(['rustc', '--version'], text=True).strip(),
+                      'cargo': subprocess.check_output(['cargo', '--version'], text=True).strip(),
+                      'python': sys.version, 'platform': list(os.uname()), 'cpus': sorted(os.sched_getaffinity(0)),
+                      'iterations': [], 'diagnosis_only_not_clearance': True}
+          def persist():
+              temporary = receipt / 'sequence-summary.tmp'
+              temporary.write_text(json.dumps(metadata, indent=2) + '\n')
+              temporary.replace(receipt / 'sequence-summary.json')
+          persist()
+          for iteration in range(1, 21):
+              output = receipt / ('iteration-%03d' % iteration)
+              output.mkdir()
+              evidence = output / 'proof'
+              print('HOL restoration sequence iteration', iteration, 'of 20', flush=True)
+              record = {'iteration': iteration, 'status': 'running', 'started_at': time.time()}
+              metadata['iterations'].append(record)
+              persist()
+              command = [str(python), str(runner), '--manifest', str(manifest), '--evidence', str(evidence)]
+              for name in selected:
+                  command.extend(['--case', name])
+              try:
+                  with (output / 'controller.stdout').open('wb') as stdout, (output / 'controller.stderr').open('wb') as stderr:
+                      subprocess.run(command, env=environment, stdout=stdout, stderr=stderr, check=True)
+                  result = json.loads((evidence / 'results.json').read_bytes())
+                  assert result['status'] == 'passed' and result['head'] == head and len(result['arms']) == 4
+                  assert all(result['controls'].values()) and len(result['controls']) == 11
+                  record.update(status='passed', completed_at=time.time(), ledger_sha256=digest((evidence / 'results.json').read_bytes()))
+                  print('HOL restoration sequence iteration', iteration, 'passed', flush=True)
+              except BaseException as failure:
+                  record.update(status='failed', error=type(failure).__name__ + ': ' + str(failure))
+                  metadata['status'] = 'failed'
+                  print('HOL restoration sequence iteration', iteration, 'failed', file=sys.stderr, flush=True)
+                  ledger = evidence / 'results.json'
+                  if ledger.is_file():
+                      result = json.loads(ledger.read_bytes())
+                      arm = result['arms'][-1]
+                      record['failed_arm'] = {key: arm.get(key) for key in ['case', 'phase', 'nonce', 'exit', 'failure', 'artifact_sha256', 'compiler_json_sha256', 'compiler_fresh']}
+                      variant = evidence / 'variants' / (arm['case'] + '-' + arm['phase'])
+                      candidates = [Path(arm['artifact'])] if arm.get('artifact') else []
+                      candidates += [variant / 'source' / name for name in ['extensions/executor/Cargo.toml', 'extensions/executor/src/execution.rs', 'extensions/executor/src/supervisor.rs', 'extensions/executor/src/supervisor_tests.rs', 'extensions/executor/tests/support/fake_runtime_acp.py']]
+                      stats = []
+                      for candidate in candidates:
+                          if candidate.is_file() and not candidate.is_symlink() and candidate.resolve().is_relative_to(evidence.resolve()):
+                              info = candidate.stat()
+                              stats.append({'file': str(candidate), 'size': info.st_size, 'mtime_ns': info.st_mtime_ns,
+                                            'ctime_ns': info.st_ctime_ns, 'mode': stat.S_IMODE(info.st_mode),
+                                            'sha256': digest(candidate.read_bytes())})
+                      (output / 'failed-artifact-source-stats.json').write_text(json.dumps(stats, indent=2) + '\n')
+                  persist()
+                  raise
+              persist()
+          metadata['status'] = 'no_recurrence_not_clearance'
+          persist()
+          assert not subprocess.check_output(['git', 'status', '--porcelain'])
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: executor-hol-sequence
+          path: |
+            ${{ runner.temp }}/executor-hol-sequence/sequence-summary.json
+            ${{ runner.temp }}/executor-hol-sequence/daemon-build.jsonl
+            ${{ runner.temp }}/executor-hol-sequence/daemon-build.stderr
+            ${{ runner.temp }}/executor-hol-sequence/iteration-*
+            !${{ runner.temp }}/executor-hol-sequence/iteration-*/proof/variants/**
+          if-no-files-found: warn

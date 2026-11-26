@@ -492,7 +492,14 @@ fn acp_failure_snapshot(
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .map(|frame| serde_json::json!({"id":frame["id"],"method":frame["method"]}))
         .collect();
-    serde_json::json!({"elapsed_ms":elapsed.as_millis(),"unix_now":crate::runtime_process::unix_now().ok(),
+    let startup_error = fs::read(
+        runtime
+            .join(component(&identity.session_id, identity.generation))
+            .join("startup-error.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+    serde_json::json!({"startup_error":startup_error,"elapsed_ms":elapsed.as_millis(),"unix_now":crate::runtime_process::unix_now().ok(),
         "lease":acp_lease_state(runtime,identity),"trace_bytes":raw.len(),"trace_methods":methods,
         "executions":rows("SELECT session_id||':'||generation||':'||state||':'||cursor FROM executions ORDER BY admission_id"),
         "sessions":rows("SELECT id||':'||generation||':'||state||':'||coalesce(active_turn,'-') FROM sessions ORDER BY id"),
@@ -883,7 +890,7 @@ fn real_acp_fixture(scenario: AcpScenario) {
             "failed prelaunch admission was selected again after restart"
         );
     }
-    if !trace.with_extension("fd-proof").is_file() {
+    let bootstrap_diagnostic = if started.is_err() || !trace.with_extension("fd-proof").is_file() {
         let session = if prelaunch_failure {
             "session-4"
         } else {
@@ -917,15 +924,26 @@ fn real_acp_fixture(scenario: AcpScenario) {
             }
             Err(error) => serde_json::json!({"error":format!("{error:?}")}),
         };
-        let diagnostic = serde_json::json!({"startup":startup,"snapshot":snapshot,"child_result":read("runtime-result"),"native_stderr":read("native-stderr"),"fd_expected":read("fd-expected"),"fd_proof":read("fd-proof"),"native_env":read("native-env")});
+        let diagnostic = serde_json::json!({"startup":startup,"snapshot":snapshot,"child_result":read("runtime-result"),"native_stderr":read("native-stderr"),"fd_expected":read("fd-expected"),"native_env":read("native-env")});
         if let Some(receipt) = std::env::var_os("XMSG_EXECUTOR_PROOF_CHILDREN") {
             let _ = fs::write(
                 PathBuf::from(receipt).with_extension("fixture-failure.json"),
                 serde_json::to_vec_pretty(&diagnostic).unwrap(),
             );
         }
-        panic!("native bootstrap produced no descriptor proof: {diagnostic}");
-    }
+        Some(diagnostic)
+    } else {
+        None
+    };
+    assert!(
+        started.is_ok(),
+        "native bootstrap refused before descriptor proof: {bootstrap_diagnostic:?}"
+    );
+    assert!(
+        trace.with_extension("fd-proof").is_file(),
+        "native bootstrap produced no descriptor proof: {bootstrap_diagnostic:?}"
+    );
+    let started = started.unwrap();
     let proof: serde_json::Value =
         serde_json::from_slice(&fs::read(trace.with_extension("fd-proof")).unwrap()).unwrap();
     assert_eq!(
@@ -956,7 +974,6 @@ fn real_acp_fixture(scenario: AcpScenario) {
         );
         assert!(pin_env["CODEX_PATH"].is_null());
     }
-    let started = started.unwrap();
     if prelaunch_failure {
         let mut journal = service.journal.lock().unwrap();
         journal
