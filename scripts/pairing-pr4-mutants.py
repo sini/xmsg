@@ -549,6 +549,42 @@ CASES = [
         int_test("n30_and_n11_pending_block_mark_denies_legacy_peer_send_and_observe"),
         False,
     ),
+    # 60. G2/N19-remove: remove_with_marks inserts mark after COMMIT
+    (
+        "n19-remove-insert-mark-after-commit",
+        "src/pairing/store.rs",
+        '    let mark_scope = MarkScope::Grant {\n        device: subject,\n        grant_id: *grant_id,\n    };\n    if let Some(reg) = revocations {\n        reg.insert_mark(mark_scope.clone(), revision);\n        #[cfg(any(test, feature = "test-hooks"))]\n        if let Some(cb) = reg\n            .before_commit_hook\n            .lock()\n            .unwrap_or_else(|e| e.into_inner())\n            .as_ref()\n            .cloned()\n        {\n            cb();\n        }\n    }',
+        '    let mark_scope = MarkScope::Grant {\n        device: subject,\n        grant_id: *grant_id,\n    };\n    if let Some(reg) = revocations {\n        #[cfg(any(test, feature = "test-hooks"))]\n        if let Some(cb) = reg\n            .before_commit_hook\n            .lock()\n            .unwrap_or_else(|e| e.into_inner())\n            .as_ref()\n            .cloned()\n        {\n            cb();\n        }\n        reg.insert_mark(mark_scope.clone(), revision);\n    }',
+        int_test("safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission"),
+        False,
+    ),
+    # 61. G2/N20-remove: remove_with_marks ambiguous COMMIT never treats committed revision as Ok
+    (
+        "n20-remove-ambiguous-commit-never-returns-ok",
+        "src/pairing/store.rs",
+        "                    Ok(r) if r >= revision => return Ok(revision),\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// A durable full-ID block",
+        "                    Ok(r) if false && r >= revision => return Ok(revision),\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// A durable full-ID block",
+        int_test("safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission"),
+        False,
+    ),
+    # 62. G2/Q2-7g-remove: remove_with_marks drops mark on commit error
+    (
+        "q2-7g-remove-drop-mark-on-commit-error",
+        "src/pairing/store.rs",
+        "                    Ok(r) if r >= revision => return Ok(revision),\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// A durable full-ID block",
+        "                    Ok(r) if false && r >= revision => {\n                        let _ = r;\n                        return Ok(revision);\n                    }\n                    Ok(_) | Err(_) => reg.drop_mark(&mark_scope, revision),\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// A durable full-ID block",
+        int_test("safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission"),
+        False,
+    ),
+    # 63. G3/Q2-7g-block: block_device_with_marks returns Ok(rev) but drops mark
+    (
+        "q2-7g-block-returns-ok-but-drops-mark",
+        "src/pairing/store.rs",
+        "                    Ok(r) if r >= revision => return Ok(revision),\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// Lifts a block",
+        "                    Ok(r) if r >= revision => {\n                        reg.drop_mark(&mark_scope, revision);\n                        return Ok(revision);\n                    }\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// Lifts a block",
+        int_test("safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission"),
+        False,
+    ),
 ]
 
 

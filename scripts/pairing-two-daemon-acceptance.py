@@ -334,6 +334,19 @@ assert len(list_a["grants"]) == 1 and len(list_b["grants"]) == 1
 # 'other' is denied by Q2-9 target enforcement.
 import http.client
 
+def unix_get(sock_path, path):
+    class UnixConn(http.client.HTTPConnection):
+        def connect(self):
+            import socket as _s
+            s = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+            s.connect(sock_path)
+            self.sock = s
+    conn = UnixConn("localhost")
+    conn.request("GET", path)
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8", "replace")
+    return resp.status, body
+
 def unix_post(sock_path, path, payload):
     class UnixConn(http.client.HTTPConnection):
         def connect(self):
@@ -384,23 +397,44 @@ svc_thread.join(timeout=10)
 assert not svc_errs, f"svc-a recipient error: {{svc_errs}}"
 assert st_send_ok in (200, 202), f"Q2-7a first send B->A failed: {{st_send_ok}} {{body_send_ok}}"
 send_ok_json = json.loads(body_send_ok)
-assert send_ok_json.get("outcome") in ("queued", "delivered") and send_ok_json.get("message_id"), f"Q2-7a first send unexpected response: {{send_ok_json}}"
+msg_id_ok = send_ok_json.get("message_id")
+assert send_ok_json.get("outcome") in ("queued", "delivered") and msg_id_ok, f"Q2-7a first send unexpected response: {{send_ok_json}}"
+reply_seen = False
+for _ in range(40):
+    st_get, body_get = unix_get(sock_a, f"/v1/messages/{{msg_id_ok}}")
+    if st_get == 200 and "pong-from-svc-a" in body_get:
+        reply_seen = True
+        break
+    time.sleep(0.05)
+assert reply_seen, f"Q2-7a svc-a reply 'pong-from-svc-a' not recorded on node A for {{msg_id_ok}}: {{st_get}} {{body_get}}"
 
 st_send_other, body_send_other = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"other@{{id_a}}", "text": "deny-q2-9"}})
 assert st_send_other == 403 and json.loads(body_send_other).get("error") == "denied", f"Q2-9 send to unlisted target 'other' unexpectedly succeeded: {{st_send_other}} {{body_send_other}}"
 
-# Revocation + nothing revives BY EFFECT: block B on A -> installed_revision == committed_revision and B->A send refused; remove + unblock -> still refused.
+# Revocation + nothing revives BY EFFECT: block B on A -> installed_revision == committed_revision, A is live & logs TLS rejection of B, and B->A send refused.
+log_a_off1 = Path(log_a).stat().st_size
 blk_proc = subprocess.run([xmsg, "pair", "--http-sock", sock_a, "block", id_b], check=True, capture_output=True, text=True)
 blk_json = json.loads(blk_proc.stdout)
 assert blk_json.get("committed") is True and blk_json.get("installed_revision") == blk_json.get("committed_revision"), f"pair block did not publish committed revision: {{blk_json}}"
+list_after_blk = json.loads(subprocess.check_output([xmsg, "pair", "--http-sock", sock_a, "list", "--json"], text=True))
+assert any(b.get("peer_id") == id_b for b in list_after_blk.get("blocks", [])), f"pair list missing block for {{id_b}}: {{list_after_blk}}"
 st_after_blk, body_after_blk = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "blocked"}})
 assert st_after_blk in (403, 503) and json.loads(body_after_blk).get("error") in ("denied", "peer_unreachable"), f"revoked send after block unexpected result: {{st_after_blk}} {{body_after_blk}}"
+assert unix_get(sock_a, "/healthz")[0] == 200, "node A /healthz liveness check failed after block"
+time.sleep(0.1)
+log_delta1 = Path(log_a).read_bytes()[log_a_off1:].decode("utf-8", "replace").lower()
+assert ("certificate" in log_delta1 or "handshake" in log_delta1 or "denied" in log_delta1 or "failed to resolve peer" in log_delta1), f"node A log did not record active rejection of blocked B (liveness/authority): {{log_delta1!r}}"
 
 grant_a_hex = list_a["grants"][0]["grant_id"]
 subprocess.run([xmsg, "pair", "--http-sock", sock_a, "remove", grant_a_hex], check=True, capture_output=True)
 subprocess.run([xmsg, "pair", "--http-sock", sock_a, "unblock", id_b], check=True, capture_output=True)
+log_a_off2 = Path(log_a).stat().st_size
 st_after_unblk, body_after_unblk = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "nothing-revives"}})
 assert st_after_unblk in (403, 503) and json.loads(body_after_unblk).get("error") in ("denied", "peer_unreachable"), f"nothing-revives send after remove+unblock unexpected result: {{st_after_unblk}} {{body_after_unblk}}"
+assert unix_get(sock_a, "/healthz")[0] == 200, "node A /healthz liveness check failed after remove+unblock"
+time.sleep(0.1)
+log_delta2 = Path(log_a).read_bytes()[log_a_off2:].decode("utf-8", "replace").lower()
+assert ("certificate" in log_delta2 or "handshake" in log_delta2 or "denied" in log_delta2 or "failed to resolve peer" in log_delta2), f"node A log did not record active rejection after remove+unblock: {{log_delta2!r}}"
 
 # Q2-16: block A on B, then unblock fails pairing.unblock_would_restore while grant exists; remove then unblock succeeds
 subprocess.run([xmsg, "pair", "--http-sock", sock_b, "block", id_a], check=True, capture_output=True)
@@ -433,7 +467,7 @@ nsenter -t "$ns_b_pid" -n --no-fork ip link set lo up
 nsenter -t "$ns_b_pid" -n --no-fork ip addr add 10.201.1.2/24 dev veth-b
 nsenter -t "$ns_b_pid" -n --no-fork ip link set veth-b up
 
-HOME={shlex.quote(str(home_a))} XDG_RUNTIME_DIR={shlex.quote(str(run_a))} {shlex.quote(str(xmsg_bin))} serve \\
+HOME={shlex.quote(str(home_a))} XDG_RUNTIME_DIR={shlex.quote(str(run_a))} RUST_LOG=info,xmsg::fed=debug {shlex.quote(str(xmsg_bin))} serve \\
   --http-sock {shlex.quote(str(sock_a))} --register-sock {shlex.quote(str(run_a / "register.sock"))} --sessions-dir {shlex.quote(str(sess_a))} \\
   --db-path {shlex.quote(str(db_a))} --fed-listen 10.201.1.1:7788 \\
   --fed-cert {shlex.quote(str(cert_a))} --fed-key {shlex.quote(str(key_a))} \\
@@ -475,7 +509,7 @@ trap 'kill "$srv_a" "$srv_b" "$ns_b_pid" 2>/dev/null || true' EXIT
                 srv_a = subprocess.Popen(
                     [
                         "sudo", "ip", "netns", "exec", ns_a, "sudo", "-u", user,
-                        "env", f"HOME={home_a}", f"XDG_RUNTIME_DIR={run_a}",
+                        "env", f"HOME={home_a}", f"XDG_RUNTIME_DIR={run_a}", "RUST_LOG=info,xmsg::fed=debug",
                         str(xmsg_bin), "serve",
                         "--http-sock", str(sock_a), "--register-sock", str(run_a / "register.sock"),
                         "--sessions-dir", str(sess_a),

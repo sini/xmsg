@@ -916,7 +916,10 @@ fn safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission() {
         "R4: mark must be dropped when read-back confirms revision did not advance"
     );
 
-    // 3. R4 branch B: ambiguous COMMIT whose read-back fails keeps the mark fail-closed.
+    // 3. R4 branch B (block): ambiguous COMMIT whose read-back fails keeps the mark fail-closed (fresh device).
+    let (_, _, peer_r4_blk_str) = gen_ed25519_identity();
+    let peer_r4_blk = SpkiDeviceId::parse_device_id_string(&peer_r4_blk_str).unwrap().0;
+    assert!(!reg.has_blocking_mark(&peer_r4_blk, None, rev_before_blk));
     reg.inject_precommit_abort
         .store(true, std::sync::atomic::Ordering::SeqCst);
     reg.inject_rev_read_error
@@ -925,25 +928,70 @@ fn safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission() {
         let db = fed.db.lock().unwrap();
         assert!(xmsg::pairing::store::block_device_with_marks(
             &db,
-            &peer_b_id,
+            &peer_r4_blk,
             xmsg::storage::now_epoch_secs(),
             Some(&reg),
         )
         .is_err());
     }
     assert!(
-        reg.has_blocking_mark(&peer_b_id, None, rev_before_blk),
+        reg.has_blocking_mark(&peer_r4_blk, None, rev_before_blk),
         "R4: ambiguous COMMIT with failed read-back must keep mark on block"
     );
 
-    // Same R4 read-back-failure check on remove_with_marks.
-    let g_r4 = seed_manual_grant(
+    // G2: Isolate remove_with_marks cases on fresh devices with no prior block mark.
+    // G2-1 (N19-remove): remove_with_marks inserts mark BEFORE COMMIT.
+    let (_, _, peer_n19_rm_str) = gen_ed25519_identity();
+    let peer_n19_rm = SpkiDeviceId::parse_device_id_string(&peer_n19_rm_str).unwrap().0;
+    let g_n19_rm = seed_manual_grant(
         &fed,
-        peer_b_id,
+        peer_n19_rm,
         PairingProfile::Contact,
         vec!["svc-a".into()],
         None,
     );
+    assert!(!reg.has_blocking_mark(&peer_n19_rm, Some(&g_n19_rm), rev_before_blk));
+    let reg_rm_hook = reg.clone();
+    let seen_rm_before_commit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen_rm_clone = seen_rm_before_commit.clone();
+    *reg.before_commit_hook.lock().unwrap() = Some(Arc::new(move || {
+        if reg_rm_hook.has_blocking_mark(&peer_n19_rm, Some(&g_n19_rm), rev_before_blk) {
+            seen_rm_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }));
+    reg.inject_precommit_abort
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    {
+        let db = fed.db.lock().unwrap();
+        assert!(xmsg::pairing::store::remove_with_marks(
+            &db,
+            &g_n19_rm,
+            xmsg::storage::now_epoch_secs(),
+            Some(&reg),
+        )
+        .is_err());
+    }
+    *reg.before_commit_hook.lock().unwrap() = None;
+    assert!(
+        seen_rm_before_commit.load(std::sync::atomic::Ordering::SeqCst),
+        "G2/N19-remove: remove_with_marks must insert mark before COMMIT"
+    );
+    assert!(
+        !reg.has_blocking_mark(&peer_n19_rm, Some(&g_n19_rm), rev_before_blk),
+        "G2/R4-remove: mark must be dropped when read-back confirms revision did not advance"
+    );
+
+    // G2-2 (R4-remove): ambiguous COMMIT with failed read-back keeps mark on remove (fresh device).
+    let (_, _, peer_r4_rm_str) = gen_ed25519_identity();
+    let peer_r4_rm = SpkiDeviceId::parse_device_id_string(&peer_r4_rm_str).unwrap().0;
+    let g_r4_rm = seed_manual_grant(
+        &fed,
+        peer_r4_rm,
+        PairingProfile::Contact,
+        vec!["svc-a".into()],
+        None,
+    );
+    assert!(!reg.has_blocking_mark(&peer_r4_rm, Some(&g_r4_rm), rev_before_blk));
     reg.inject_precommit_abort
         .store(true, std::sync::atomic::Ordering::SeqCst);
     reg.inject_rev_read_error
@@ -952,31 +1000,65 @@ fn safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission() {
         let db = fed.db.lock().unwrap();
         assert!(xmsg::pairing::store::remove_with_marks(
             &db,
-            &g_r4,
+            &g_r4_rm,
             xmsg::storage::now_epoch_secs(),
             Some(&reg),
         )
         .is_err());
     }
     assert!(
-        reg.has_blocking_mark(&peer_b_id, Some(&g_r4), rev_before_blk),
-        "R4: ambiguous COMMIT with failed read-back must keep mark on remove"
+        reg.has_blocking_mark(&peer_r4_rm, Some(&g_r4_rm), rev_before_blk),
+        "G2/R4-remove: ambiguous COMMIT with failed read-back must keep mark on remove"
     );
 
-    // Q2-7g: ambiguous I/O error at COMMIT after durable write keeps mark and returns Ok(rev).
+    // G2-3 (N20-remove & Q2-7g-remove): ambiguous I/O error at COMMIT after durable write on remove returns Ok(rev) and keeps mark (fresh device).
+    let (_, _, peer_q27g_rm_str) = gen_ed25519_identity();
+    let peer_q27g_rm = SpkiDeviceId::parse_device_id_string(&peer_q27g_rm_str).unwrap().0;
+    let g_q27g_rm = seed_manual_grant(
+        &fed,
+        peer_q27g_rm,
+        PairingProfile::Contact,
+        vec!["svc-a".into()],
+        None,
+    );
+    assert!(!reg.has_blocking_mark(&peer_q27g_rm, Some(&g_q27g_rm), rev_before_blk));
+    reg.inject_commit_io_error
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let rm_rev = {
+        let db = fed.db.lock().unwrap();
+        xmsg::pairing::store::remove_with_marks(
+            &db,
+            &g_q27g_rm,
+            xmsg::storage::now_epoch_secs(),
+            Some(&reg),
+        )
+        .unwrap()
+    };
+    assert!(
+        reg.has_blocking_mark(&peer_q27g_rm, Some(&g_q27g_rm), rm_rev - 1),
+        "G2/Q2-7g-remove: committed ambiguous remove must keep mark and return Ok(rev)"
+    );
+
+    // G3 (Q2-7g-block): ambiguous I/O error at COMMIT after durable write on block keeps mark and returns Ok(rev) (fresh device).
+    let (_, _, peer_q27g_blk_str) = gen_ed25519_identity();
+    let peer_q27g_blk = SpkiDeviceId::parse_device_id_string(&peer_q27g_blk_str).unwrap().0;
+    assert!(!reg.has_blocking_mark(&peer_q27g_blk, None, rev_before_blk));
     reg.inject_commit_io_error
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let blk_rev = {
         let db = fed.db.lock().unwrap();
         xmsg::pairing::store::block_device_with_marks(
             &db,
-            &peer_b_id,
+            &peer_q27g_blk,
             xmsg::storage::now_epoch_secs(),
             Some(&reg),
         )
         .unwrap()
     };
-    assert!(reg.has_blocking_mark(&peer_b_id, None, blk_rev - 1));
+    assert!(
+        reg.has_blocking_mark(&peer_q27g_blk, None, blk_rev - 1),
+        "G3/Q2-7g-block: committed ambiguous block must keep mark and return Ok(rev)"
+    );
 }
 
 #[tokio::test]
