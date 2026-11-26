@@ -8,9 +8,9 @@ use std::path::Path;
 use std::process::Output;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::task::{JoinHandle, JoinSet};
 use xmsg::fed::{FedState, PeerConfig, PeersMap, RateLimiter};
@@ -53,6 +53,7 @@ struct Peer {
     config: PeerConfig,
     requests: Arc<Mutex<Vec<String>>>,
     accepted: Arc<AtomicUsize>,
+    hold_durations: Arc<Mutex<Vec<Duration>>>,
     task: JoinHandle<()>,
 }
 
@@ -124,6 +125,7 @@ impl Peer {
             },
             requests,
             accepted,
+            hold_durations: Arc::new(Mutex::new(Vec::new())),
             task,
         }
     }
@@ -134,14 +136,24 @@ impl Peer {
         let address = listener.local_addr().unwrap().to_string();
         let accepted = Arc::new(AtomicUsize::new(0));
         let connections = accepted.clone();
+        let hold_durations = Arc::new(Mutex::new(Vec::new()));
+        let recorded = hold_durations.clone();
         let task = tokio::spawn(async move {
             let mut holders = JoinSet::new();
             loop {
-                let (socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let accepted_at = Instant::now();
                 connections.fetch_add(1, Ordering::SeqCst);
+                let recorded = recorded.clone();
                 holders.spawn(async move {
-                    let _socket = socket;
-                    std::future::pending::<()>().await;
+                    let mut buf = [0u8; 256];
+                    loop {
+                        match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                    recorded.lock().unwrap().push(accepted_at.elapsed());
                 });
             }
         });
@@ -154,6 +166,7 @@ impl Peer {
                 ..Default::default()
             },
             accepted,
+            hold_durations,
             requests: Default::default(),
             task,
         }
@@ -507,21 +520,42 @@ async fn held_identity_probes_report_expiry_and_clock_offset_using_only_head() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_tcp_peer_that_never_starts_tls_is_refused_within_three_seconds() {
+async fn a_tcp_peer_that_never_starts_tls_times_out_at_the_per_peer_bound() {
     let blackhole = Peer::blackhole("blackhole.example").await;
     let fixture = Fixture::new(Identity::new(NODE, 1, 2), vec![blackhole.config.clone()]).await;
-    let result = tokio::time::timeout(Duration::from_secs(3), fixture.diagnostics())
+    // Overall diagnostics is bounded by TOTAL_TIMEOUT (8 s) plus 2 s for harness/client setup;
+    // the per-peer 2 s bound (PEER_TIMEOUT) is asserted directly on the blackhole wire duration.
+    let result = tokio::time::timeout(Duration::from_secs(10), fixture.diagnostics())
         .await
-        .expect("per-peer TLS blackhole exceeded three seconds");
-    assert_eq!(
-        peer(&result, "blackhole.example")["reachability"],
-        "unreachable"
-    );
+        .expect("overall diagnostics exceeded TOTAL_TIMEOUT (8 s) + 2 s margin");
+    assert_eq!(result["budget_exhausted"], false, "{result}");
+    let row = peer(&result, "blackhole.example");
+    assert_eq!(row["reachability"], "unreachable", "{row}");
+    assert_eq!(row["reason"], "peer_timeout", "{row}");
     assert!(
         blackhole.accepted.load(Ordering::SeqCst) > 0,
         "blackhole fixture was not reached"
     );
     assert!(blackhole.requests.lock().unwrap().is_empty());
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let durations = loop {
+        let recorded = blackhole.hold_durations.lock().unwrap().clone();
+        if !recorded.is_empty() || Instant::now() >= deadline {
+            break recorded;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        !durations.is_empty(),
+        "blackhole connection was never closed after probe timeout"
+    );
+    for elapsed in durations {
+        assert!(
+            elapsed >= Duration::from_millis(1900) && elapsed <= Duration::from_millis(2500),
+            "per-peer TLS blackhole duration {elapsed:?} outside PEER_TIMEOUT (2 s) + 500 ms margin"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
