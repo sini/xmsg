@@ -568,12 +568,12 @@ CASES = [
         int_test("safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission"),
         False,
     ),
-    # 62. G2/Q2-7g-remove: remove_with_marks drops mark on commit error
+    # 62. G2/Q2-7g-remove: remove_with_marks returns Ok(rev) but drops mark
     (
-        "q2-7g-remove-drop-mark-on-commit-error",
+        "q2-7g-remove-returns-ok-but-drops-mark",
         "src/pairing/store.rs",
         "                    Ok(r) if r >= revision => return Ok(revision),\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// A durable full-ID block",
-        "                    Ok(r) if false && r >= revision => {\n                        let _ = r;\n                        return Ok(revision);\n                    }\n                    Ok(_) | Err(_) => reg.drop_mark(&mark_scope, revision),\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// A durable full-ID block",
+        "                    Ok(r) if r >= revision => {\n                        reg.drop_mark(&mark_scope, revision);\n                        return Ok(revision);\n                    }\n                    Ok(_) => reg.drop_mark(&mark_scope, revision),\n                    Err(_) => {\n                        // Ambiguous COMMIT and read-back failed: keep the mark fail-closed.\n                    }\n                }\n            }\n            Err(err)\n        }\n    }\n}\n\n/// A durable full-ID block",
         int_test("safety_5_permit_fence_refuses_mark_and_expiry_planted_after_admission"),
         False,
     ),
