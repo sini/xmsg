@@ -88,17 +88,13 @@ impl Carrier {
     }
 
     async fn lookup(&self, request_id: &str) -> Value {
-        self.http
-            .get(format!("{}/v1/receipts/{request_id}", self.collector.url))
-            .bearer_auth(&self.bearer)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap()
+        let (status, body) = self.lookup_wire(&self.bearer, request_id).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "authorized receipt lookup was denied"
+        );
+        serde_json::from_str(&body).unwrap()
     }
 
     async fn ws(&self) -> Socket {

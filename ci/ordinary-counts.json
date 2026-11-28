@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Previous ordinary-suite baseline adjusted for the assigned base and 35 new platform-independent Mission Control command tests",
-    "darwin": "Previous ordinary-suite baseline adjusted for the assigned base and 35 new platform-independent Mission Control command tests"
+    "linux": "Baseline f1338f9b123d51e26f4c5c56e662fd4ca4c88bef plus 38 platform-independent Mission Control command tests",
+    "darwin": "Baseline f1338f9b123d51e26f4c5c56e662fd4ca4c88bef plus 38 platform-independent Mission Control command tests"
   },
   "integration_targets": [
     "tests/agent_sock.rs",

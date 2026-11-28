@@ -541,7 +541,7 @@ pub(super) struct Transition""",
     ),
     "m-sc16a-require-read-scope-for-lookup": (
         HOLDER_RECOVERY,
-        "right: 200",
+        "authorized receipt lookup was denied",
         (
             edit(
                 COMMAND,
