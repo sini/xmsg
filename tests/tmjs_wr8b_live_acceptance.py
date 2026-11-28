@@ -418,6 +418,27 @@ def start_reverse_proxy(pki: dict, proxy_port: int, backend_port: int, mutant: s
                     client.sendall("\r\n".join(new_lines).encode("latin-1") + new_body)
                     return
 
+                req_target = req_line.split(" ", 2)[1] if len(req_line.split(" ", 2)) >= 2 else ""
+                if (
+                    mutant == "asset-bytes"
+                    and resp_cl is not None
+                    and req_target.startswith("/assets/mc-roster.")
+                    and (req_target.endswith(".js") or req_target.endswith(".css"))
+                ):
+                    rbuf = bytearray(resp_left)
+                    while len(rbuf) < resp_cl:
+                        c = backend.recv(resp_cl - len(rbuf))
+                        if not c:
+                            break
+                        rbuf.extend(c)
+                    new_body = bytes(rbuf) + b"\n/*x*/"
+                    new_lines = [
+                        (f"Content-Length: {len(new_body)}" if l.lower().startswith("content-length:") else l)
+                        for l in resp_lines
+                    ]
+                    client.sendall("\r\n".join(new_lines).encode("latin-1") + new_body)
+                    return
+
                 client.sendall(resp_head)
                 if resp_left:
                     client.sendall(resp_left)
@@ -467,7 +488,7 @@ def main() -> int:
     ap.add_argument("--assets-dir", required=True)
     ap.add_argument("--chromium", default="")
     ap.add_argument("--evidence-dir", default="")
-    ap.add_argument("--mutant", default="none", choices=["none", "asset-hash", "proxy-drop-upgrade"])
+    ap.add_argument("--mutant", default="none", choices=["none", "asset-hash", "asset-bytes", "proxy-drop-upgrade"])
     args = ap.parse_args()
 
     assets_dir = Path(args.assets_dir).resolve()
