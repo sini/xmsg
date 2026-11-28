@@ -2,6 +2,7 @@
 """Verify all 44 PR 4 pairing source mutants turn their paired oracle tests RED and restore GREEN."""
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -592,10 +593,22 @@ def run_cmd(cmd):
     return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
 
 
+def parse_shard(spec: str) -> tuple[int, int]:
+    parts = spec.split("/", 1)
+    if len(parts) != 2:
+        raise ValueError(f"invalid --shard {spec!r}; expected <index>/<total>")
+    index, total = int(parts[0]), int(parts[1])
+    if total <= 0 or index < 0 or index >= total:
+        raise ValueError(f"invalid --shard {spec!r}; index must satisfy 0 <= index < total")
+    return index, total
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--case", action="append", default=[])
+    parser.add_argument("--shard", help="Run shard <index>/<total> (0-indexed)")
+    parser.add_argument("--manifest-out", type=Path, help="Write JSON completion manifest")
     args = parser.parse_args()
 
     if args.list:
@@ -603,7 +616,14 @@ def main() -> int:
             print(name)
         return 0
 
-    selected = [c for c in CASES if not args.case or c[0] in args.case]
+    selected = [c for c in CASES if not c[5] and (not args.case or c[0] in args.case)]
+    shard_info = None
+    if args.shard:
+        shard_idx, shard_total = parse_shard(args.shard)
+        shard_info = (shard_idx, shard_total)
+        selected = [c for i, c in enumerate(selected) if i % shard_total == shard_idx]
+
+    completed_cases = []
     for name, rel_path, old, new, cmd, skip_syntax in selected:
         if skip_syntax:
             continue
@@ -627,7 +647,17 @@ def main() -> int:
             print(f"GREEN FAILED AFTER RESTORE (or 0 tests matched): {name}\n{green.stdout}\n{green.stderr}", file=sys.stderr)
             return 1
         print(f"MUTANT {name}: RED ({red_line.strip()}) -> GREEN")
-    print(f"pairing-pr4-mutants-complete:{len([c for c in selected if not c[5]])}")
+        completed_cases.append({"name": name, "red": True, "green": True})
+
+    if args.manifest_out is not None:
+        manifest = {"cases": completed_cases}
+        if shard_info is not None:
+            manifest["shard"] = shard_info[0]
+            manifest["shards"] = shard_info[1]
+        args.manifest_out.parent.mkdir(parents=True, exist_ok=True)
+        args.manifest_out.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    print(f"pairing-pr4-mutants-complete:{len(completed_cases)}")
     return 0
 
 
