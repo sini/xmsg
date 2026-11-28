@@ -39,9 +39,9 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-struct Fixture {
+pub(crate) struct Fixture {
     state: Arc<State>,
-    url: String,
+    pub(crate) url: String,
     idp_calls: Arc<AtomicUsize>,
     active: Arc<AtomicBool>,
     idp_claims: Arc<Mutex<serde_json::Value>>,
@@ -67,6 +67,14 @@ impl Fixture {
     async fn with_validation(relay: bool, validated: bool) -> Self {
         Self::with_issuer(relay, validated, None, None).await
     }
+    pub(crate) async fn command_fixture(issuer: Arc<crate::mission_control::Issuer>) -> Self {
+        Self::with_issuer(false, true, Some(issuer), None).await
+    }
+
+    pub(crate) fn command_read_hub(&self) -> &Arc<crate::mission_control::upstream::ReadHub> {
+        self.state.read_hub.as_ref().unwrap()
+    }
+
     async fn with_issuer(
         relay: bool,
         validated: bool,
@@ -2520,6 +2528,23 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
     let oidc =
         crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
     let directory = tempfile::tempdir().unwrap();
+    let executor_sentinels: Vec<_> = ["executor-lifecycle.sock", "executor-attribution.sock"]
+        .into_iter()
+        .map(|socket| {
+            use std::io::{Read, Write};
+            use std::os::unix::net::{UnixListener, UnixStream};
+            let socket = directory.path().join(socket);
+            let listener = UnixListener::bind(&socket).unwrap();
+            let mut probe = UnixStream::connect(socket).unwrap();
+            probe.write_all(b"probe").unwrap();
+            let (mut reader, _) = listener.accept().unwrap();
+            let mut bytes = [0; 5];
+            reader.read_exact(&mut bytes).unwrap();
+            assert_eq!(&bytes, b"probe");
+            listener.set_nonblocking(true).unwrap();
+            listener
+        })
+        .collect();
     let (issuer, machine) =
         crate::mission_control::tests::transport_fixture(&oidc, &directory).await;
     let (browser, native, delegated) =
@@ -2664,6 +2689,69 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
         }
     }
 
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    for (method, path) in [
+        (
+            reqwest::Method::POST,
+            "/v1/mission-control/commands/prepare",
+        ),
+        (reqwest::Method::POST, "/v1/mission-control/commands/commit"),
+        (
+            reqwest::Method::GET,
+            "/v1/receipts/6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        ),
+    ] {
+        for (credential, status, code) in [
+            (&native, 503, "unavailable"),
+            (&delegated, 401, "unauthenticated"),
+            (&machine, 403, "forbidden"),
+        ] {
+            let response = client
+                .request(method.clone(), format!("{}{}", f.url, path))
+                .bearer_auth(&credential.handle)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status);
+            assert_eq!(
+                response.json::<serde_json::Value>().await.unwrap(),
+                serde_json::json!({"v":1,"type":"error","code":code,"fatal":true})
+            );
+        }
+        let response = client
+            .request(method, format!("{}{}", f.url, path))
+            .header(hyper::header::COOKIE, cookie(&browser.handle))
+            .header(hyper::header::ORIGIN, "https://collector.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let mut withheld = VectorSocket::open(&f, &native.handle).await;
+    let requires = json!({"v":1,"type":"hello","id":1,"protocol":1,
+        "capabilities":["commands"],"require":["commands"]});
+    withheld
+        .send(1, requires.to_string().as_bytes(), true)
+        .await;
+    assert_eq!(withheld.json().await["code"], "capability_unavailable");
+    assert_eq!(withheld.close_code().await, 4409);
+    assert_eq!(
+        crate::mission_control::tests::command_rows_for_test(&issuer),
+        (0, 0)
+    );
+    for sentinel in executor_sentinels {
+        assert_eq!(
+            sentinel.accept().err().map(|error| error.kind()),
+            Some(std::io::ErrorKind::WouldBlock),
+            "withheld constructor connected to an executor sentinel"
+        );
+    }
+
+
     crate::mission_control::tests::synthetic_transport_record(&issuer, &delegated.handle);
     for (credential, from_cookie, class) in [
         (&browser, true, "browser"),
@@ -2789,7 +2877,7 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
     let receipt = client
         .get(format!("{}/v1/receipts/fixture", f.url))
@@ -2797,7 +2885,7 @@ async fn mission_control_upgrade_validates_carriers_and_version() {
         .send()
         .await
         .unwrap();
-    assert_eq!(receipt.status(), StatusCode::NOT_FOUND);
+    assert_eq!(receipt.status(), StatusCode::FORBIDDEN);
 
     f.state.read_hub.as_ref().unwrap().fill_snapshot_for_test();
     let narrow =
@@ -3584,4 +3672,250 @@ async fn mission_control_sse_bounds_live_snapshot_refusal() {
         .await
         .unwrap();
     assert_eq!(snapshot.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn mission_control_exact_fixture_refuses_unattested_and_recovers_historical_receipt() {
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let store = tempfile::tempdir().unwrap();
+    let (issuer, authority) =
+        crate::mission_control::tests::exact_command_transport_fixture(&oidc, &store).await;
+    let (_, native, _) =
+        crate::mission_control::tests::transport_owner_records(&issuer, &oidc.issuer());
+    let target = json!({
+        "node":"fixture.node","endpoint":"claude-1@fixture.node",
+        "state_epoch":"0a1b2c3d4e5f60718293a4b5c6d7e8f9","incarnation":3,
+        "selector":{"kind":"execution","session_id":"exec-alpha","generation":7}
+    });
+    authority.grant(&native.record.principal, target.clone());
+    let f = Fixture::with_issuer(false, true, Some(issuer), None).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let request_id = "6f1e2d3c4b5a69788796a5b4c3d2e1f0";
+    let request = json!({
+        "v":1,"type":"prepare","request_id":request_id,
+        "requested_at":crate::storage::now_epoch_secs() * 1000,
+        "verb":"send","target":target,"params":{"text":"Hello"}
+    });
+    let command = |stage: &str, body: serde_json::Value| {
+        client
+            .post(format!("{}/v1/mission-control/commands/{stage}", f.url))
+            .bearer_auth(&native.handle)
+            .json(&body)
+    };
+    let prepared: serde_json::Value = command("prepare", request.clone())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(prepared["type"], "prepared");
+    assert_eq!(prepared["presentation"]["selector"], target["selector"]);
+    let commit = json!({
+        "v":1,"type":"commit","request_id":request_id,
+        "intent":prepared["intent"],"digest":prepared["digest"]
+    });
+    let receipt: serde_json::Value = command("commit", commit.clone())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(receipt["outcome"], "refused");
+    assert_eq!(receipt["code"], "unattested");
+    assert!(receipt.get("target").is_none());
+    let mut ws_request = request.clone();
+    ws_request["id"] = json!(2);
+    ws_request["request_id"] = json!("7f1e2d3c4b5a69788796a5b4c3d2e1f0");
+    crate::mission_control_client::command_review::assert_exact_collector_review(
+        &reqwest::Url::parse(&f.url).unwrap(),
+        &native.handle,
+        ws_request,
+        "Send to claude-1@fixture.node on fixture.node\nEpoch 0a1b2c3d4e5f60718293a4b5c6d7e8f9 incarnation 3\nExecution exec-alpha generation 7\nText: Hello\n",
+    )
+    .await;
+    authority.clear_bindings();
+
+    let mut expected = receipt;
+    expected["lookup"] = json!(true);
+    for response in [
+        command("prepare", request).send().await.unwrap(),
+        command("commit", commit).send().await.unwrap(),
+        client
+            .get(format!("{}/v1/receipts/{request_id}", f.url))
+            .bearer_auth(&native.handle)
+            .send()
+            .await
+            .unwrap(),
+    ] {
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn mission_control_sc14_default_silent_http_work_does_not_hold_http_admission() {
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let store = tempfile::tempdir().unwrap();
+    let (issuer, authority, double) =
+        crate::mission_control::tests::command_double_transport_fixture(&oidc, &store).await;
+    let records: Vec<_> = (0..8)
+        .map(|_| crate::mission_control::tests::transport_owner_records(&issuer, &oidc.issuer()).1)
+        .collect();
+    let target = json!({
+        "node":"fixture.node","endpoint":"claude-1@fixture.node",
+        "state_epoch":"0a1b2c3d4e5f60718293a4b5c6d7e8f9","incarnation":3,
+        "selector":{"kind":"execution","session_id":"exec-alpha","generation":7}
+    });
+    authority.grant(&records[0].record.principal, target.clone());
+    let f = Fixture::command_fixture(issuer).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let mut first = None;
+    for (record_index, native) in records.iter().enumerate() {
+        let submit = |stage: &str, body: serde_json::Value| {
+            client
+                .post(format!("{}/v1/mission-control/commands/{stage}", f.url))
+                .bearer_auth(&native.handle)
+                .json(&body)
+        };
+        for n in 0..8 {
+            let id = format!("{:032x}", record_index * 8 + n);
+            let prepared: serde_json::Value = submit(
+                "prepare",
+                json!({
+                    "v":1,"type":"prepare","request_id":id,
+                    "requested_at":crate::storage::now_epoch_secs() * 1000,
+                    "verb":"send","target":target,"params":{"text":"silence"}
+                }),
+            )
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+            let initial: serde_json::Value = submit(
+                "commit",
+                json!({
+                    "v":1,"type":"commit","request_id":id,
+                    "intent":prepared["intent"],"digest":prepared["digest"],
+                }),
+            )
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+            assert_eq!(initial["outcome"], "effect_unknown");
+            if first.is_none() {
+                first = Some((id, initial["receipt_id"].clone()));
+            }
+        }
+    }
+    let submitted = tokio::time::timeout(Duration::from_secs(5), double.submitted.acquire_many(64))
+        .await
+        .expect("default work pool did not saturate")
+        .unwrap();
+    submitted.forget();
+    assert_eq!(double.submitted.available_permits(), 0);
+    let (id, receipt_id) = first.unwrap();
+    let lookup: serde_json::Value = client
+        .get(format!("{}/v1/receipts/{id}", f.url))
+        .bearer_auth(&records[0].handle)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(lookup["receipt_id"], receipt_id);
+    assert_eq!(lookup["outcome"], "effect_unknown");
+}
+
+#[tokio::test]
+async fn mission_control_sc7_activity_never_prepares_a_command() {
+    let oidc =
+        crate::enroll_oidc::signed_fixture::Fixture::new_at(crate::storage::now_epoch_secs()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (issuer, authority) =
+        crate::mission_control::tests::exact_command_transport_fixture(&oidc, &dir).await;
+    let (_, native, _) =
+        crate::mission_control::tests::transport_owner_records(&issuer, &oidc.issuer());
+    authority.grant(
+        &native.record.principal,
+        json!({
+            "node":"fixture.node","endpoint":"agent@fixture.node",
+            "state_epoch":"0a1b2c3d4e5f60718293a4b5c6d7e8f9","incarnation":3,
+            "selector":{"kind":"execution","session_id":"exec-alpha","generation":7}
+        }),
+    );
+    let f = Fixture::command_fixture(issuer).await;
+    let hub = f.state.read_hub.as_ref().unwrap();
+    let mut socket = VectorSocket::open(&f, &native.handle).await;
+    let hello = json!({"v":1,"type":"hello","id":1,"protocol":1,
+        "capabilities":["observe","activity","commands"],"require":["commands"]});
+    socket.send(1, hello.to_string().as_bytes(), true).await;
+    let hello = socket.json().await;
+    assert!(hello["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("commands")));
+    let sub = json!({"v":1,"type":"subscribe","id":2,"sub":"fleet","scope":{"kind":"fleet"}});
+    socket.send(1, sub.to_string().as_bytes(), true).await;
+    loop {
+        let frame = socket.json().await;
+        assert_ne!(
+            frame["type"], "prepared",
+            "event caused intent before any prepare"
+        );
+        if frame["type"] == "snapshot" && frame["final"] == true {
+            break;
+        }
+    }
+    for _ in 0..50 {
+        for _ in 0..20 {
+            hub.witness_activity_for_test("fixture.node");
+        }
+        let mut events = 0;
+        while events != 20 {
+            let (opcode, bytes) = socket.frame().await;
+            if opcode == 9 {
+                socket.send(10, &bytes, true).await;
+                continue;
+            }
+            let frame: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_ne!(
+                frame["type"], "prepared",
+                "event caused intent before any prepare"
+            );
+            if frame["type"] == "event"
+                && frame["delta"]["event"]["activity"]["block"] == "permission"
+            {
+                events += 1;
+            }
+        }
+    }
 }

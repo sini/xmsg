@@ -27,10 +27,18 @@ impl ProjectionGate {
     }
 }
 
+pub(super) struct CommandReader {
+    pub issuer: std::sync::Arc<Issuer>,
+    pub record: Record,
+    pub receiver: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<super::command::Reply>>,
+    pub overloaded: std::sync::Arc<tokio::sync::Notify>,
+}
+
 pub(super) struct SessionWriter {
     pub live: std::sync::Arc<Live>,
     pub lease_at: i64,
     pub limits: super::limits::ReadLimits,
+    pub commands: Option<CommandReader>,
     #[cfg(test)]
     gate: Option<std::sync::Arc<ProjectionGate>>,
 }
@@ -54,6 +62,7 @@ impl SessionWriter {
             live: std::sync::Arc::new(issuer.authority.register(record, lease, abort)?),
             lease_at: lease_at.saturating_mul(1000),
             limits: issuer.config.session_limits.clone(),
+            commands: None,
             #[cfg(test)]
             gate: issuer.authority.projection_gate(),
         })

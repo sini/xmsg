@@ -20,6 +20,26 @@ leaves—which is `xmsg`'s core responsibility.
 Conversely, `xmsg` is not a terminal multiplexer, PTY pool, or SSH session manager, and each of
 these tools is stronger than `xmsg` in its own domain.
 
+## Planned Mission Control command protocol
+
+The command protocol is planned. The production collector keeps the command
+capability unavailable. Command UX is deferred, with a private test path for
+native client review and reconciliation.
+
+The v1 design allows one command, `send`, with plain text and an explicit
+execution selector. A client retains the original request ID, timestamp, and
+payload. It prepares the action and reviews the full frozen text and exact
+destination, including the pinned session and generation, before committing.
+For example, a review might show “Check the task status.” addressed to
+`claude-1@laptop`, executor session `exec-alpha`, generation 7. The review is
+inert plain text and visibly escapes control and bidirectional characters.
+
+The receipt records the command decision or an uncertain outcome. Admission
+and observed effects are separate. After a lost response, recover the receipt
+by looking up the original request ID. The client sends no second commit on
+reconnect. See the [planned command reference](/reference/http-and-sockets/#planned-mission-control-command-protocol)
+for authorization, recovery, and capacity behavior.
+
 ## Tool-by-tool comparison
 
 ### RimZ

@@ -775,4 +775,72 @@ The protocol defaults to a 16 KiB client message, 256 KiB server
 message, 4 MiB snapshot, and a 15-second heartbeat. The initial upstream
 is polled and reports `delivery: delayed`. The shared conformance
 vectors are in `tests/vectors/mission-control/v1/` in the source tree.
-Command routes and command capability are reserved for a later unit.
+
+### Planned Mission Control command protocol
+
+The production collector withholds the `commands` capability. A WebSocket
+client that requires it gets `capability_unavailable` and close 4409.
+Command messages without negotiation get `unsupported`. After normal HTTP
+admission, the command and receipt routes answer 503 `unavailable` while
+command authority is absent. Credential admission failures retain their
+existing responses.
+
+| Planned method and path | Message |
+| --- | --- |
+| `POST /v1/mission-control/commands/prepare` | `prepare` → `prepared` or an existing receipt |
+| `POST /v1/mission-control/commands/commit` | `commit` → `receipt` |
+| `GET /v1/receipts/{request_id}` | Same-ID lookup of the current receipt |
+
+WebSocket uses the same command messages with request `id` and response
+`re`. Browser owner sessions use WebSocket. Native owner bearers can use
+either carrier when authorized. HTTP rejects browser cookies on these
+routes, and machine credentials have no command permission. Delegated
+production admission remains disabled.
+
+The command vocabulary contains only `send` with plain text. The request
+pins the node, endpoint, state epoch, incarnation, executor session ID,
+and positive executor generation. Prepare freezes the request and
+returns a short-lived intent bound to the credential record and, on
+WebSocket, the original connection. The client reviews the exact
+destination and full frozen text before commit.
+
+Commit replies at durable handoff on either carrier. When an executor
+outcome is still pending, the current receipt is `effect_unknown`.
+WebSocket can deliver a later final receipt, and lookup returns the current
+stored outcome. Receipt recovery requires current entitlement to the
+stored request and works across a target rebind. The receipt contains no
+target or command text. After a lost reply, use lookup with the original
+request ID. Command clients send no commit on reconnect.
+
+At startup, abandoned reservations settle as `refused{interrupted}`,
+and a previously submitting reservation settles as `effect_unknown`.
+Startup releases the abandoned capacity charges and never resubmits a
+request. Held requests stay eligible for their normal settlement. A silent
+executor connection stays pending until actual connection loss or startup
+recovery. Final receipts and consumed intent bindings remain recoverable
+through the configured retention window (30 days by default). Retention
+must exceed the maximum age for a new request (one day by default).
+
+#### Planned command capacity defaults
+
+These settings under `mission_control` apply across HTTP and WebSocket.
+Each per-record limit is bounded by its collector-wide limit. Startup
+validates the values.
+
+| Resource | Collector-wide setting and default | Per-record setting and default |
+| --- | --- | --- |
+| In-flight work, including silent submissions | `command_work_max_global` (64) | `command_work_max_per_record` (8) |
+| Durable reserved rows, including abandoned handoffs | `command_reserved_max_global` (64) | `command_reserved_max_per_record` (8) |
+| Active or pending holds | `command_holds_max_global` (256) | `command_holds_max_per_record` (16) |
+| Unconsumed intents | `command_intents_max_global` (1,024) | `command_intents_max_per_record` (32) |
+
+Saturation returns `unavailable` and creates no additional reservation or
+intent. A commit rejected for capacity leaves its intent unconsumed.
+Abandoned reservations keep their durable charge until startup settles
+them. Eight abandoned reservations can block fresh commits from one
+record until restart. Eight silent submissions can likewise block fresh work
+from that record while the connections remain open. A hold releases its
+initial work slot and retains its hold charge. Lookup and receipt delivery
+remain independent of submission capacity. HTTP releases admission after
+returning the current durable receipt. A WebSocket receipt-lane overflow
+closes with 4408, after which lookup can recover the durable receipt.

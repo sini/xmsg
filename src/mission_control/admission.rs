@@ -9,6 +9,7 @@ pub(super) enum Route {
     Upgrade,
     Snapshot,
     Stream,
+    Command,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -96,7 +97,7 @@ fn credential<'a>(
             }
             Ok((Carrier::Bearer, bearer))
         }
-        (true, false) if route != Route::Stream => {
+        (true, false) if matches!(route, Route::Upgrade | Route::Snapshot) => {
             let handle = cookie(headers, SESSION_COOKIE).ok_or(Refusal::UNAUTHENTICATED)?;
             let origin_ok = if route == Route::Snapshot && !headers.contains_key(header::ORIGIN) {
                 single_header(headers, "sec-fetch-site", "same-origin")

@@ -73,11 +73,7 @@ pub(super) fn decode(bytes: &[u8], depth: usize, strings: usize) -> Result<Reque
         code: Code::BadMessage,
         reply,
     };
-    let mut parser = serde_json::Deserializer::from_slice(bytes);
-    let value = JsonBound { depth, strings }
-        .deserialize(&mut parser)
-        .map_err(|_| bad(None))?;
-    parser.end().map_err(|_| bad(None))?;
+    let value = bounded_json(bytes, depth, strings).map_err(|_| bad(None))?;
     let object = value.as_object().ok_or_else(|| bad(None))?;
     let id = object
         .get("id")
@@ -165,6 +161,17 @@ pub(super) fn valid_scope(scope: &Scope) -> bool {
         Scope::Node { node } => super::authority::valid_node(node),
         Scope::Session { node, endpoint } => super::authority::valid_endpoint(node, endpoint),
     }
+}
+
+pub(super) fn bounded_json(
+    bytes: &[u8],
+    depth: usize,
+    strings: usize,
+) -> serde_json::Result<Value> {
+    let mut parser = serde_json::Deserializer::from_slice(bytes);
+    let value = JsonBound { depth, strings }.deserialize(&mut parser)?;
+    parser.end()?;
+    Ok(value)
 }
 
 #[derive(Clone, Copy)]

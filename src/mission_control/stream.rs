@@ -32,6 +32,7 @@ pub(crate) type Body = UnsyncBoxBody<Bytes, Infallible>;
 #[derive(Default)]
 pub(crate) struct Fence {
     live: Mutex<Option<Arc<Live>>>,
+    command: Mutex<Option<super::command_http::ReceiptFence>>,
     headers_written: tokio::sync::Notify,
     terminal: Mutex<Option<Terminal>>,
     track_headers: bool,
@@ -54,6 +55,17 @@ impl Fence {
     pub(crate) fn track_headers(mut self, enabled: bool) -> Self {
         self.track_headers = enabled;
         self
+    }
+
+    pub(super) fn set_command(
+        &self,
+        command: super::command_http::ReceiptFence,
+    ) -> Result<(), super::admission::Refusal> {
+        *self
+            .command
+            .lock()
+            .map_err(|_| super::admission::Refusal::UNAVAILABLE)? = Some(command);
+        Ok(())
     }
 
     pub(crate) async fn started(&self) {
@@ -164,6 +176,8 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Fenced<S> {
                     result
                 }
             }
+        } else if let Some(command) = owner.command.lock().map_err(|_| fenced())?.as_ref() {
+            command.handoff(|| Pin::new(&mut self.stream).poll_write(cx, bytes))?
         } else {
             Pin::new(&mut self.stream).poll_write(cx, bytes)
         };

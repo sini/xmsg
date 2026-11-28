@@ -1,5 +1,7 @@
 pub mod codec;
 #[cfg(test)]
+pub(crate) mod command_review;
+#[cfg(test)]
 mod vectors;
 
 use std::collections::{BTreeMap, VecDeque};

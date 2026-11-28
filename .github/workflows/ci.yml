@@ -130,6 +130,43 @@ jobs:
             --shards 4 \
             pairing-mutants-results/pairing-mutants-*/pairing-mutants-completion.json
 
+  mission-control-command-mutants:
+    if: ${{ !inputs.client_build_probe && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned Cargo and fetch dependencies
+        run: |
+          msrv=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')
+          rustup toolchain install "$msrv" --profile minimal
+          rustup default "$msrv"
+          cargo fetch --locked
+      - name: Run command decoder source mutants
+        run: python3 scripts/mission-control-wire-mutants.py
+
+  mission-control-state-mutants:
+    if: ${{ !inputs.client_build_probe && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      CARGO_BUILD_JOBS: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install pinned Cargo and fetch dependencies
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup default 1.95.0
+          cargo fetch --locked
+      - name: Run command state source mutants
+        run: python3 scripts/mission-control-state-mutants.py --shard "${{ matrix.shard }}/4"
+
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -137,11 +174,14 @@ jobs:
       CARGO_BUILD_JOBS: 4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Guard Mission Control command fixtures and private native review
+        run: python3 scripts/mission-control-command-guard.py
       - name: Build the locked default features on the declared minimum Rust
         run: |
           msrv=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["rust-version"])')
           rustup toolchain install "$msrv" --profile minimal
           cargo +"$msrv" build --locked
+          cargo +"$msrv" check --locked --features test-hooks --bin xmsg
 
   deps:
     if: ${{ !inputs.client_build_probe }}

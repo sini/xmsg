@@ -256,3 +256,19 @@ cannot create an unbounded worker queue. Same-UID code can occupy all four
 slots, making attribution unavailable; ordinary messaging remains independent.
 Expiry is checked again after the executor acquires its admission lock and at
 the effect boundary.
+
+## Planned Mission Control boundary
+
+The collector withholds production command capability until it has a
+trusted source of command authority. A test-only authority fixture runs
+the real local refusal decision on an otherwise entitled request. Commit
+settles as `refused{unattested}` before submission, with zero executor I/O.
+A separate test-only executor double covers admission, typed pre-admission
+refusals, and ambiguous delivery. Those fixtures confer no executor
+authority.
+
+Any future remote routing requires explicit peer control authority and an
+exact grant for the verified actor and pinned target. The executor retains
+its independent effect-time authorization check. The
+[planned command reference](/reference/http-and-sockets/#planned-mission-control-command-protocol)
+describes receipt recovery and saturation.
