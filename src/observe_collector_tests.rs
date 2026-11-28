@@ -3787,6 +3787,7 @@ async fn mission_control_sc14_default_silent_http_work_does_not_hold_http_admiss
         .build()
         .unwrap();
     let mut first = None;
+    let clock = crate::storage::now_epoch_secs() * 1000;
     for (record_index, native) in records.iter().enumerate() {
         let submit = |stage: &str, body: serde_json::Value| {
             client
@@ -3795,12 +3796,15 @@ async fn mission_control_sc14_default_silent_http_work_does_not_hold_http_admiss
                 .json(&body)
         };
         for n in 0..8 {
-            let id = format!("{:032x}", record_index * 8 + n);
+            let index = record_index * 8 + n;
+            let at = clock + (index / 5) as i64 * 60_000;
+            authority.freeze_clock(at);
+            let id = format!("{index:032x}");
             let prepared: serde_json::Value = submit(
                 "prepare",
                 json!({
                     "v":1,"type":"prepare","request_id":id,
-                    "requested_at":crate::storage::now_epoch_secs() * 1000,
+                    "requested_at":at,
                     "verb":"send","target":target,"params":{"text":"silence"}
                 }),
             )

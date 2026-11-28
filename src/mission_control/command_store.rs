@@ -293,6 +293,19 @@ pub(super) fn count_holds(conn: &Connection, record_id: Option<&str>) -> Result<
     )
 }
 
+pub(super) fn count_active_intents_for_principal(
+    conn: &Connection,
+    principal: &str,
+    now: i64,
+) -> Result<usize> {
+    conn.query_row(
+        "SELECT count(*) FROM command_intents
+         WHERE principal = ?1 AND consumed = 0 AND expires_at > ?2",
+        params![principal, now],
+        count,
+    )
+}
+
 pub(super) fn count_unused_intents(conn: &Connection, record_id: Option<&str>) -> Result<usize> {
     conn.query_row(
         "SELECT count(*) FROM command_intents

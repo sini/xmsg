@@ -479,7 +479,10 @@ mod tests {
             .await;
         });
 
-        let mut review = CommandReview::new(prepare("<b>**verbatim**</b>\x1b\u{202e}\nend"));
+        let mut review = CommandReview::new(prepare(concat!(
+            "<b>**verbatim**</b>\x1b\u{202e}\n",
+            "\u{061c}\u{200e}\u{200f}\u{2066}\u{2067}\u{2068}\u{2069}\u{2028}\u{2029}end"
+        )));
         let witness = Cell::new(false);
         let mut output = ReviewOutput::new(&witness);
         let result = review
@@ -495,7 +498,15 @@ mod tests {
         assert!(matches!(result, CommitResult::Receipt(_)));
         assert_eq!(
             String::from_utf8(output.bytes).unwrap(),
-            "Send to claude-1@laptop on laptop\nEpoch 0a1b2c3d4e5f60718293a4b5c6d7e8f9 incarnation 3\nExecution exec-alpha generation 7\nText: <b>**verbatim**</b>\\u{1b}\\u{202e}\\u{a}end\n"
+            concat!(
+                "Send to claude-1@laptop on laptop\n",
+                "Epoch 0a1b2c3d4e5f60718293a4b5c6d7e8f9 incarnation 3\n",
+                "Execution exec-alpha generation 7\n",
+                "Text: <b>**verbatim**</b>\\u{1b}\\u{202e}\\u{a}",
+                "\\u{61c}\\u{200e}\\u{200f}\\u{2066}\\u{2067}\\u{2068}\\u{2069}",
+                "\\u{2028}\\u{2029}end\n"
+            ),
+            "full review left control or bidi characters unescaped"
         );
         server.await.unwrap();
     }

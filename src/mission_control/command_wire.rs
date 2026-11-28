@@ -244,6 +244,58 @@ mod tests {
     }
 
     #[test]
+    fn oq13_unsigned_fields_reject_noncanonical_zero() {
+        for original in [r#""incarnation":3"#, r#""requested_at":1795000000500"#] {
+            let field = original.split(':').next().unwrap();
+            let zero = PREPARE.replace(original, &format!("{field}:0"));
+            assert!(parse(zero.as_bytes()).is_ok(), "canonical zero {field}");
+            for invalid in ["-0", "0.0"] {
+                let raw = PREPARE.replace(original, &format!("{field}:{invalid}"));
+                assert_eq!(
+                    parse(raw.as_bytes()).err().map(|error| error.code),
+                    Some(Code::BadMessage),
+                    "accepted noncanonical zero spelling {field}:{invalid}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oq13_executor_text_limit_applies_with_raised_string_limit() {
+        let at_limit = "é".repeat(MAX_EXECUTOR_TEXT_BYTES / 2);
+        let raw = PREPARE.replace("Check the task status.", &at_limit);
+        let raised_limit = MAX_EXECUTOR_TEXT_BYTES + 1;
+        let CommandRequest::Prepare { request, .. } =
+            decode(raw.as_bytes(), 16, raised_limit, Carrier::WebSocket).unwrap()
+        else {
+            panic!("expected prepare at the executor text limit");
+        };
+        assert_eq!(request.params.text.len(), MAX_EXECUTOR_TEXT_BYTES);
+
+        let over_limit = PREPARE.replace("Check the task status.", &(at_limit + "x"));
+        assert_eq!(
+            decode(over_limit.as_bytes(), 16, raised_limit, Carrier::WebSocket)
+                .err()
+                .map(|error| error.code),
+            Some(Code::BadMessage),
+            "accepted text one byte over the executor limit"
+        );
+    }
+
+    #[test]
+    fn oq13_session_id_limits_utf8_bytes() {
+        let at_limit = "é".repeat(64);
+        let raw = PREPARE.replace("exec-alpha", &at_limit);
+        assert_eq!(prep(raw.as_bytes()).target.selector.session_id, at_limit);
+        let over_limit = PREPARE.replace("exec-alpha", &(at_limit + "x"));
+        assert_eq!(
+            parse(over_limit.as_bytes()).err().map(|error| error.code),
+            Some(Code::BadMessage),
+            "accepted a 129-byte executor session ID"
+        );
+    }
+
+    #[test]
     fn oq13_decoder_rejects_lone_surrogates() {
         for invalid in [r#"\uD800"#, r#"\uDC00"#] {
             let raw = PREPARE.replace("Check the task status.", invalid);

@@ -834,6 +834,24 @@ validates the values.
 | Active or pending holds | `command_holds_max_global` (256) | `command_holds_max_per_record` (16) |
 | Unconsumed intents | `command_intents_max_global` (1,024) | `command_intents_max_per_record` (32) |
 
+| Setting under `mission_control` | Default | Scope |
+| --- | --- | --- |
+| `receipt_lane_max` | 32 receipts | Per WebSocket |
+| `intent_ttl_ms` | 60,000 ms | How long a fresh intent may be committed |
+| `request_max_age_secs` | 86,400 s | Maximum age for a request without an existing reservation |
+| `receipt_retention_secs` | 2,592,000 s | Minimum retention of settled receipts and their consumed intent bindings |
+| `confirm_ttl_secs` | 3,600 s | Deadline for settling a held command |
+
+Each principal can hold up to four active intents across its credential
+records. The fresh-work budget allows 10 prepares and five commits per
+minute. A delegated grant can set a lower rate for each operation. Prepare
+budget exhaustion returns `rate_limited`, and commit budget exhaustion
+returns `refused{budget_exceeded}` with the intent still unconsumed.
+Matching receipt replay uses neither budget nor a work slot.
+
+Invalid command limits or durations refuse collector startup. The receipt
+retention window must exceed the maximum new request age.
+
 Saturation returns `unavailable` and creates no additional reservation or
 intent. A commit rejected for capacity leaves its intent unconsumed.
 Abandoned reservations keep their durable charge until startup settles

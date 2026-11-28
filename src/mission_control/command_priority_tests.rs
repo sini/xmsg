@@ -99,9 +99,11 @@ impl Harness {
     }
 
     async fn submit(&self, case: usize) -> (String, Value) {
+        let at = self.clock + (case.saturating_sub(1) / 5) as i64 * 60_000;
+        self.authority.freeze_clock(at);
         let id = format!("{case:032x}");
         let request: PreparedRequest = serde_json::from_value(json!({
-            "request_id": id, "requested_at": self.clock, "verb": "send",
+            "request_id": id, "requested_at": at, "verb": "send",
             "target": {
                 "node":"fixture.node","endpoint":"claude-1@fixture.node",
                 "state_epoch":"0a1b2c3d4e5f60718293a4b5c6d7e8f9","incarnation":3,

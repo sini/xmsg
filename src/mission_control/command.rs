@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -16,13 +16,30 @@ const _: () = assert!(std::mem::size_of::<UnattestedSubmitter>() == 0);
 pub(super) struct Commands {
     local: UnattestedSubmitter,
     work: Arc<Mutex<HashMap<String, usize>>>,
-    rate: Mutex<HashMap<String, (i64, usize)>>,
+    rate: Mutex<HashMap<String, CommandRate>>,
     #[cfg(test)]
     double: Option<Arc<CommandDouble>>,
     #[cfg(test)]
     tasks: Mutex<tokio::task::JoinSet<()>>,
     #[cfg(test)]
     fixture: Option<Arc<ExactCommandAuthorityFixture>>,
+}
+
+const OUTSTANDING_INTENTS: usize = 4;
+const PREPARES_PER_MINUTE: usize = 10;
+const COMMITS_PER_MINUTE: usize = 5;
+const RATE_WINDOW_MS: i64 = 60_000;
+
+#[derive(Default)]
+struct CommandRate {
+    prepares: VecDeque<i64>,
+    commits: VecDeque<i64>,
+}
+
+#[derive(Clone, Copy)]
+enum Charge {
+    Prepare,
+    Commit,
 }
 
 struct WorkSlot {
@@ -209,16 +226,30 @@ impl Commands {
     }
 
     fn charge(&self, record: &Record, at: i64) -> Result<(), Refusal> {
-        let Grants::Delegated { grant } = &record.grants else {
-            return Ok(());
-        };
+        self.charge_action(record, at, Charge::Commit)
+    }
+
+    fn charge_action(&self, record: &Record, at: i64, action: Charge) -> Result<(), Refusal> {
         let mut budgets = self.rate.lock().map_err(|_| Refusal::UNAVAILABLE)?;
-        budgets.retain(|_, (start, _)| at.saturating_sub(*start) < 60_000);
-        let (_, count) = budgets.entry(record.record_id.clone()).or_insert((at, 0));
-        if *count >= grant.rate as usize {
+        let live = |time: &i64| at.saturating_sub(*time) < RATE_WINDOW_MS;
+        budgets.retain(|_, budget| {
+            budget.prepares.retain(live);
+            budget.commits.retain(live);
+            !budget.prepares.is_empty() || !budget.commits.is_empty()
+        });
+        let budget = budgets.entry(record.principal.clone()).or_default();
+        let (events, ceiling) = match action {
+            Charge::Prepare => (&mut budget.prepares, PREPARES_PER_MINUTE),
+            Charge::Commit => (&mut budget.commits, COMMITS_PER_MINUTE),
+        };
+        let ceiling = match &record.grants {
+            Grants::Delegated { grant } => ceiling.min(grant.rate as usize),
+            _ => ceiling,
+        };
+        if events.len() >= ceiling {
             return Err(Refusal::RATE_LIMIT);
         }
-        *count += 1;
+        events.push_back(at);
         Ok(())
     }
 
@@ -582,7 +613,13 @@ impl Issuer {
                 {
                     return Err(Refusal::UNAVAILABLE);
                 }
-                self.commands.charge(&record, at)?;
+                if store::count_active_intents_for_principal(&state.conn, &record.principal, at)
+                    .map_err(store_error)?
+                    >= OUTSTANDING_INTENTS
+                {
+                    return Err(Refusal::RATE_LIMIT);
+                }
+                self.commands.charge_action(&record, at, Charge::Prepare)?;
                 let raw = self.commands.random_id()?;
                 use base64::Engine;
                 let intent = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
@@ -709,6 +746,20 @@ impl Issuer {
             return Err(Refusal::UNAVAILABLE);
         }
         let slot = self.commands.work_slot(&record.record_id, &self.config)?;
+        match self.commands.charge(&current, at) {
+            Ok(()) => {}
+            Err(Refusal::RATE_LIMIT) => {
+                return refused(
+                    &self.commands,
+                    id,
+                    request_id,
+                    "budget_exceeded",
+                    at,
+                    Some(request),
+                );
+            }
+            Err(error) => return Err(error),
+        }
         let row = Reservation {
             principal: record.principal.clone(),
             record_id: record.record_id.clone(),
@@ -1291,7 +1342,8 @@ mod tests {
         );
         assert_eq!(double.submitted.available_permits(), 0);
 
-        let mut pending_request = request(15, at, "revocation-first");
+        fixture.freeze_clock(at + RATE_WINDOW_MS);
+        let mut pending_request = request(15, at + RATE_WINDOW_MS, "revocation-first");
         pending_request.target.incarnation = 4;
         let pending_id = pending_request.request_id.clone();
         let pending = prepare(&issuer, &delegated.record, "http", pending_request).unwrap();
@@ -1359,6 +1411,8 @@ mod tests {
         let maximum = issuer.config.command_reserved_max_per_record as u128;
         let mut earlier = Vec::new();
         for case in 1..=maximum {
+            let at = at + (case as i64 - 1) / COMMITS_PER_MINUTE as i64 * RATE_WINDOW_MS;
+            fixture.freeze_clock(at);
             let frozen = request(case, at, "abandon");
             let id = frozen.request_id.clone();
             let prepared = prepare(&issuer, &native.record, "http", frozen).unwrap();
@@ -1652,5 +1706,168 @@ mod tests {
             "request ID collision incorrectly crossed principals"
         );
         assert_eq!(fixture.permits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn command_budget_counts_outstanding_intents_across_records() {
+        let oidc = Fixture::new_at(crate::storage::now_epoch_secs()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (issuer, fixture) =
+            super::super::tests::exact_command_transport_fixture(&oidc, &dir).await;
+        let (browser, native, _) =
+            super::super::tests::transport_owner_records(&issuer, &oidc.issuer());
+        fixture.grant(&native.record.principal, target());
+        let at = now_ms();
+        fixture.freeze_clock(at);
+        for case in 1..=4 {
+            let record = if case % 2 == 0 {
+                &browser.record
+            } else {
+                &native.record
+            };
+            assert_eq!(
+                prepare(&issuer, record, "ws", request(case, at, "outstanding"))
+                    .unwrap()
+                    .body["type"],
+                "prepared"
+            );
+        }
+        assert_eq!(
+            prepare(
+                &issuer,
+                &native.record,
+                "http",
+                request(5, at, "outstanding")
+            )
+            .err(),
+            Some(Refusal::RATE_LIMIT)
+        );
+        let fresh = at + issuer.config.intent_ttl_ms as i64;
+        fixture.freeze_clock(fresh);
+        assert_eq!(
+            prepare(
+                &issuer,
+                &native.record,
+                "http",
+                request(5, fresh, "new window")
+            )
+            .unwrap()
+            .body["type"],
+            "prepared"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_budget_limits_prepares_and_commits_per_minute() {
+        let oidc = Fixture::new_at(crate::storage::now_epoch_secs()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (issuer, fixture) =
+            super::super::tests::exact_command_transport_fixture(&oidc, &dir).await;
+        let (_, native, _) = super::super::tests::transport_owner_records(&issuer, &oidc.issuer());
+        fixture.grant(&native.record.principal, target());
+        let at = now_ms();
+        fixture.freeze_clock(at);
+
+        for (id, count) in [(1, 4), (2, 4), (3, 2)] {
+            let prepared: Vec<_> = (0..count)
+                .map(|_| {
+                    prepare(
+                        &issuer,
+                        &native.record,
+                        "http",
+                        request(id, at, "prepare budget"),
+                    )
+                    .unwrap()
+                })
+                .collect();
+            for intent in prepared {
+                assert_eq!(
+                    commit(&issuer, &native.record, "http", &intent)
+                        .unwrap()
+                        .body["code"],
+                    "unattested"
+                );
+            }
+        }
+        assert_eq!(
+            prepare(
+                &issuer,
+                &native.record,
+                "http",
+                request(4, at, "eleventh prepare")
+            )
+            .err(),
+            Some(Refusal::RATE_LIMIT)
+        );
+
+        let fresh = at + RATE_WINDOW_MS;
+        fixture.freeze_clock(fresh);
+        for id in 10..=15 {
+            let prepared = prepare(
+                &issuer,
+                &native.record,
+                "http",
+                request(id, fresh, "commit budget"),
+            )
+            .unwrap();
+            let answer = commit(&issuer, &native.record, "http", &prepared).unwrap();
+            if id == 15 {
+                assert_eq!(
+                    answer.body["code"], "budget_exceeded",
+                    "sixth commit was not budget_refused"
+                );
+                let state = issuer.authority.locked().unwrap();
+                let hash: [u8; 32] =
+                    Sha256::digest(prepared.body["intent"].as_str().unwrap().as_bytes()).into();
+                assert!(!store::intent(&state.conn, &hash).unwrap().unwrap().consumed);
+                assert!(store::reservation(
+                    &state.conn,
+                    &native.record.principal,
+                    prepared.body["request_id"].as_str().unwrap()
+                )
+                .unwrap()
+                .is_none());
+            } else {
+                assert_eq!(answer.body["code"], "unattested");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn matching_delegated_commit_replay_does_not_charge_command_budget() {
+        let oidc = Fixture::new_at(crate::storage::now_epoch_secs()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (issuer, fixture) =
+            super::super::tests::exact_command_transport_fixture(&oidc, &dir).await;
+        let (_, _, delegated) =
+            super::super::tests::transport_owner_records(&issuer, &oidc.issuer());
+        issuer.authority.allow_synthetic_for_test(&delegated.handle);
+        issuer
+            .authority
+            .edit_fixture_record(&delegated.record.record_id, |record| {
+                if let Grants::Delegated { grant } = &mut record.grants {
+                    grant.targets = vec![super::super::authority::Target {
+                        node: "fixture.node".to_owned(),
+                        endpoint: "claude-1@fixture.node".to_owned(),
+                    }];
+                }
+            });
+        fixture.grant(&delegated.record.principal, target());
+        let at = now_ms();
+        fixture.freeze_clock(at);
+        let prepared = prepare(
+            &issuer,
+            &delegated.record,
+            "http",
+            request(1, at, "delegated rate one"),
+        )
+        .unwrap();
+        let first = commit(&issuer, &delegated.record, "http", &prepared).unwrap();
+        assert_eq!(first.body["code"], "unattested");
+        let replay = commit(&issuer, &delegated.record, "http", &prepared)
+            .unwrap_or_else(|_| panic!("matching replay charged the exhausted commit budget"));
+        assert_eq!(replay.body["receipt_id"], first.body["receipt_id"]);
+        assert_eq!(replay.body["lookup"], true);
+        assert_eq!(fixture.permits.load(Ordering::SeqCst), 1);
     }
 }

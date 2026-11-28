@@ -5,6 +5,7 @@ import argparse
 import os
 import runpy
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -633,6 +634,61 @@ pub(super) struct Transition""",
     ),
 }
 
+SHIPPED_TEST = "shipped_collector_withholds_all_command_carriers"
+
+CASES.update({
+    "m02-shipped-gate": (
+        'shipped_collector_withholds_all_command_carriers',
+        'shipped hello advertised commands',
+        (edit(COMMAND, '        #[cfg(not(test))]\n        {\n            false\n        }\n    }\n\n    #[cfg(test)]\n    pub(super) async fn before_handoff(&self) -> bool {\n        let gate = self\n            .fixture\n            .as_ref()\n            .and_then(|fixture| fixture.handoff.lock().unwrap().take());\n        if let Some(gate) = gate {\n            gate.entered.notify_one();\n            gate.release.notified().await;\n            gate.drop_reply.load(std::sync::atomic::Ordering::SeqCst)\n        } else {\n            false\n        }\n    }\n\n', '        #[cfg(not(test))]\n        {\n            true\n        }\n    }\n\n    #[cfg(test)]\n    pub(super) async fn before_handoff(&self) -> bool {\n        let gate = self\n            .fixture\n            .as_ref()\n            .and_then(|fixture| fixture.handoff.lock().unwrap().take());\n        if let Some(gate) = gate {\n            gate.entered.notify_one();\n            gate.release.notified().await;\n            gate.drop_reply.load(std::sync::atomic::Ordering::SeqCst)\n        } else {\n            false\n        }\n    }\n\n'),),
+    ),
+    "m19-work-cap": (
+        'mission_control::command_limits_tests::sc14_work_cap_refuses_fresh_commit_but_not_matching_replay',
+        'work cap must refuse the first request past the per-record bound',
+        (edit(COMMAND, 'work.get(record).copied().unwrap_or_default() >= config.command_work_max_per_record', 'work.get(record).copied().unwrap_or_default() > config.command_work_max_per_record'),),
+    ),
+    "m21-hold-cap": (
+        'mission_control::command_limits_tests::sc14_hold_cap_refuses_without_consuming_and_releases_on_decline',
+        'hold cap must refuse the first request past the per-record bound',
+        (edit(COMMAND, '        if pending_hold\n            && (store::count_holds', '        if false\n            && (store::count_holds'),),
+    ),
+    "m30-future-skew": (
+        'mission_control::command_limits_tests::sc4_future_skew_and_sc2_intent_expiry_are_exact',
+        'future skew bound must reject one millisecond beyond the limit',
+        (edit(COMMAND, '                    || requested > at.saturating_add(self.config.clock_skew_secs as i64 * 1000)\n', ''),),
+    ),
+    "m34-exact-expiry": (
+        'mission_control::command_limits_tests::sc4_future_skew_and_sc2_intent_expiry_are_exact',
+        'unconsumed intent must be invalid at its expiry instant',
+        (edit(COMMAND, '&& (row.consumed || row.expires_at > at)', '&& (row.consumed || row.expires_at >= at)'),),
+    ),
+    "m35-machine-capability": (
+        'mission_control::command_limits_tests::sc11_machine_hello_never_grants_available_commands',
+        'machine must not receive commands when fixture authority is available',
+        (edit(WEBSOCKET, 'issuer.commands.available() && record.class != super::authority::Class::Machine', 'issuer.commands.available()'),),
+    ),
+    "m39-intent-cap": (
+        'mission_control::command_limits_tests::sc14_intent_cap_refuses_prepare_only_rows_at_exact_bound',
+        'prepare-only cap must refuse the first intent past the per-record bound',
+        (edit(COMMAND, '>= self.config.command_intents_max_per_record', '> self.config.command_intents_max_per_record'),),
+    ),
+    "m40-reserved-cap": (
+        'mission_control::command_limits_tests::sc14_reserved_cap_applies_across_records_and_releases_on_restart',
+        'reserved cap must refuse the first request past the global bound',
+        (edit(COMMAND, '>= self.config.command_reserved_max_global', '> self.config.command_reserved_max_global'),),
+    ),
+    "m41-replay-budget": (
+        'mission_control::command::tests::matching_delegated_commit_replay_does_not_charge_command_budget',
+        'matching replay charged the exhausted commit budget',
+        (edit(COMMAND, '            let frozen = decode(&row.request_json)?;\n            self.command_entitled(&state, &record.record_id, &frozen)?;\n            if !binding.consumed', '            let frozen = decode(&row.request_json)?;\n            self.command_entitled(&state, &record.record_id, &frozen)?;\n            self.commands.charge(&current, at)?;\n            if !binding.consumed'),),
+    ),
+    "m42-replay-slot": (
+        'mission_control::command_limits_tests::sc14_work_cap_refuses_fresh_commit_but_not_matching_replay',
+        'matching consumed replay must remain available at work saturation',
+        (edit(COMMAND, '            let frozen = decode(&row.request_json)?;\n            self.command_entitled(&state, &record.record_id, &frozen)?;\n            if !binding.consumed', '            let frozen = decode(&row.request_json)?;\n            self.command_entitled(&state, &record.record_id, &frozen)?;\n            let _replay_slot = self.commands.work_slot(&record.record_id, &self.config)?;\n            if !binding.consumed'),),
+    ),
+})
+
 
 def apply(tree, edits):
     originals = {}
@@ -649,6 +705,32 @@ def apply(tree, edits):
         source.write_text(contents)
     return originals
 
+
+
+def run_case(tree, artifacts, label, selected, reason=None):
+    if selected != SHIPPED_TEST:
+        MATCH(tree, artifacts, label, selected, reason)
+        return
+    result = subprocess.run(
+        ["cargo", "test", "--locked", "--color", "never", "--test",
+         "gate_dtxj_command_production", selected, "--", "--exact"],
+        cwd=tree, capture_output=True, text=True, timeout=900, check=False,
+    )
+    output = result.stdout + result.stderr
+    (artifacts / f"{label}.log").write_text(output)
+    if reason is None:
+        if result.returncode != 0 or f"test {selected} ... ok" not in output:
+            raise RuntimeError(f"{label}: shipped control failed\n{output}")
+        print(f"{label}: GREEN", flush=True)
+        return
+    if (
+        result.returncode != 101
+        or f"test {selected} ... FAILED" not in output
+        or "test result: FAILED. 0 passed; 1 failed;" not in output
+        or reason not in output
+    ):
+        raise RuntimeError(f"{label}: intended shipped oracle did not kill source change\n{output}")
+    print(f"{label}: RED {reason}", flush=True)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -677,18 +759,18 @@ def main():
             shutil.copytree(ROOT / name, tree / name)
         for name in selected:
             test, _, _ = CASES[name]
-            MATCH(tree, artifacts, f"{name}-control", test)
+            run_case(tree, artifacts, f"{name}-control", test)
         for name in selected:
             test, reason, edits = CASES[name]
             originals = apply(tree, edits)
             try:
-                MATCH(tree, artifacts, name, test, reason)
+                run_case(tree, artifacts, name, test, reason)
             finally:
                 for source, contents in originals.items():
                     source.write_text(contents)
         for name in selected:
             test, _, _ = CASES[name]
-            MATCH(tree, artifacts, f"{name}-restored", test)
+            run_case(tree, artifacts, f"{name}-restored", test)
         print(f"mission-control-state-mutants-complete: {len(selected)}/{len(CASES)}", flush=True)
 
 

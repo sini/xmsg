@@ -17,6 +17,8 @@ mod command_transport_tests;
 #[cfg(test)]
 mod command_crash_tests;
 #[cfg(test)]
+mod command_limits_tests;
+#[cfg(test)]
 mod command_priority_tests;
 mod command_wire;
 #[allow(
