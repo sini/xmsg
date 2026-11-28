@@ -101,6 +101,7 @@ struct Shared {
 pub(crate) struct Fixture {
     shared: Arc<Mutex<Shared>>,
     http: reqwest::Client,
+    certificate_der: Vec<u8>,
     task: tokio::task::JoinHandle<()>,
     files: tempfile::TempDir,
 }
@@ -114,6 +115,7 @@ impl Fixture {
             listener.local_addr().unwrap().port()
         );
         let generated = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let certificate_der = generated.cert.der().to_vec();
         let http = reqwest::Client::builder()
             .https_only(true)
             .no_proxy()
@@ -200,6 +202,7 @@ impl Fixture {
         Self {
             shared,
             http,
+            certificate_der,
             task,
             files: tempfile::tempdir().unwrap(),
         }
@@ -213,6 +216,10 @@ impl Fixture {
         }
         fixture
     }
+    pub(crate) fn certificate_der(&self) -> &[u8] {
+        &self.certificate_der
+    }
+
     pub(crate) fn http_client(&self) -> reqwest::Client {
         self.http.clone()
     }
