@@ -556,6 +556,13 @@ async fn serve_stream_with_socket<I>(
                         )
                         .map(BodyExt::boxed_unsync);
                     }
+                    if crate::mission_control::command_http::is_command(request.uri().path()) {
+                        return crate::mission_control::command_http::response(
+                            issuer, request, fence,
+                        )
+                        .await
+                        .map(BodyExt::boxed_unsync);
+                    }
                     if let Some(hub) = &state.read_hub {
                         if crate::mission_control::stream::is_stream(request.uri().path()) {
                             return crate::mission_control::stream::response(
@@ -670,6 +677,7 @@ async fn serve_http_inner<I, F, Fut>(
                 prepare(request).await
             } else if crate::mission_control::transport::is_snapshot(request.uri().path())
                 || crate::mission_control::stream::is_stream(request.uri().path())
+                || crate::mission_control::command_http::is_command(request.uri().path())
             {
                 crate::mission_control::transport::busy().map(BodyExt::boxed_unsync)
             } else {
@@ -1098,6 +1106,14 @@ pub async fn run(args: Args) -> Result<(), Error> {
             Authority::open(&directory, authority_config).map_err(|_| Error::Storage)?;
         let listener = admin::bind(&directory, &authority).map_err(Error::Admin)?;
         let issuer = Issuer::start(prepared, authority.clone());
+        issuer.recover_commands().map_err(|_| Error::Storage)?;
+        let command_maintenance = issuer.clone();
+        issuer_tasks.spawn(async move {
+            command_maintenance
+                .maintain_commands()
+                .await
+                .map_err(|_| Error::Storage)
+        });
         let watchdog = authority.clone();
         issuer_tasks.spawn(async move { watchdog.watchdog().await.map_err(|_| Error::Storage) });
         issuer_tasks.spawn(async move {
@@ -1173,4 +1189,4 @@ pub async fn run(args: Args) -> Result<(), Error> {
 
 #[cfg(test)]
 #[path = "observe_collector_tests.rs"]
-mod tests;
+pub(crate) mod tests;

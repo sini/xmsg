@@ -9,6 +9,18 @@ mod assets;
 mod attention;
 pub mod authority;
 mod budgets;
+pub(crate) mod command;
+pub(crate) mod command_http;
+mod command_store;
+#[cfg(test)]
+mod command_transport_tests;
+#[cfg(test)]
+mod command_crash_tests;
+#[cfg(test)]
+mod command_limits_tests;
+#[cfg(test)]
+mod command_priority_tests;
+mod command_wire;
 #[allow(
     dead_code,
     reason = "Mission Control read-only hub staged before transport integration"
@@ -123,6 +135,72 @@ pub struct Config {
     pub authority_watchdog_ms: u64,
     #[serde(default)]
     pub(crate) session_limits: limits::ReadLimits,
+    #[serde(default = "command_work_max_global")]
+    pub(crate) command_work_max_global: usize,
+    #[serde(default = "command_work_max_per_record")]
+    pub(crate) command_work_max_per_record: usize,
+    #[serde(default = "command_reserved_max_global")]
+    pub(crate) command_reserved_max_global: usize,
+    #[serde(default = "command_reserved_max_per_record")]
+    pub(crate) command_reserved_max_per_record: usize,
+    #[serde(default = "command_holds_max_global")]
+    pub(crate) command_holds_max_global: usize,
+    #[serde(default = "command_holds_max_per_record")]
+    pub(crate) command_holds_max_per_record: usize,
+    #[serde(default = "command_intents_max_global")]
+    pub(crate) command_intents_max_global: usize,
+    #[serde(default = "command_intents_max_per_record")]
+    pub(crate) command_intents_max_per_record: usize,
+    #[serde(default = "receipt_lane_max")]
+    pub(crate) receipt_lane_max: usize,
+    #[serde(default = "intent_ttl_ms")]
+    pub(crate) intent_ttl_ms: u64,
+    #[serde(default = "request_max_age_secs")]
+    pub(crate) request_max_age_secs: u64,
+    #[serde(default = "receipt_retention_secs")]
+    pub(crate) receipt_retention_secs: u64,
+    #[serde(default = "confirm_ttl_secs")]
+    pub(crate) confirm_ttl_secs: u64,
+}
+
+fn command_work_max_global() -> usize {
+    64
+}
+fn command_work_max_per_record() -> usize {
+    8
+}
+fn command_reserved_max_global() -> usize {
+    64
+}
+fn command_reserved_max_per_record() -> usize {
+    8
+}
+fn command_holds_max_global() -> usize {
+    256
+}
+fn command_holds_max_per_record() -> usize {
+    16
+}
+fn command_intents_max_global() -> usize {
+    1_024
+}
+fn command_intents_max_per_record() -> usize {
+    32
+}
+fn receipt_lane_max() -> usize {
+    32
+}
+fn intent_ttl_ms() -> u64 {
+    60_000
+}
+fn request_max_age_secs() -> u64 {
+    86_400
+}
+fn receipt_retention_secs() -> u64 {
+    2_592_000
+}
+fn confirm_ttl_secs() -> u64 {
+    3_600
 }
 
 fn yes() -> bool {
@@ -258,6 +336,39 @@ impl Config {
             || self.device_authorizations_per_min == 0
             || self.device_code_attempts_per_session == 0
             || !self.session_limits.valid()
+            || ![
+                (
+                    self.command_work_max_per_record,
+                    self.command_work_max_global,
+                ),
+                (
+                    self.command_reserved_max_per_record,
+                    self.command_reserved_max_global,
+                ),
+                (
+                    self.command_holds_max_per_record,
+                    self.command_holds_max_global,
+                ),
+                (
+                    self.command_intents_max_per_record,
+                    self.command_intents_max_global,
+                ),
+                (self.receipt_lane_max, self.receipt_lane_max),
+            ]
+            .into_iter()
+            .all(|(local, global)| {
+                local > 0 && local <= global && global <= tokio::sync::Semaphore::MAX_PERMITS
+            })
+            || ![
+                self.intent_ttl_ms,
+                self.request_max_age_secs,
+                self.receipt_retention_secs,
+                self.confirm_ttl_secs,
+            ]
+            .into_iter()
+            .all(|value| value > 0 && value <= i64::MAX as u64 / 1_000)
+            || self.clock_skew_secs > i64::MAX as u64 / 1_000
+            || self.receipt_retention_secs <= self.request_max_age_secs
         {
             return Err(Error::Configuration);
         }
@@ -276,6 +387,7 @@ pub(crate) struct Issuer {
     provider: Provider,
     authority: Arc<Authority>,
     key: Option<LessSafeKey>,
+    commands: command::Commands,
     flows: Mutex<HashMap<[u8; 32], Flow>>,
     devices: device::Devices,
     refreshing: Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
@@ -480,9 +592,61 @@ impl Issuer {
             provider: prepared.provider,
             authority,
             key: prepared.key,
+            commands: command::Commands::withheld(),
             flows: Mutex::new(HashMap::new()),
             refreshing: Mutex::new(HashMap::new()),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_command_authority_for_test(
+        prepared: Prepared,
+        authority: Arc<Authority>,
+        fixture: Arc<command::ExactCommandAuthorityFixture>,
+    ) -> Arc<Self> {
+        let mut issuer = Self::start(prepared, authority);
+        Arc::get_mut(&mut issuer)
+            .expect("new issuer is unique")
+            .commands = command::Commands::exact(fixture);
+        issuer
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_command_double_for_test(
+        prepared: Prepared,
+        authority: Arc<Authority>,
+        fixture: Arc<command::ExactCommandAuthorityFixture>,
+        double: Arc<command::CommandDouble>,
+    ) -> Arc<Self> {
+        let mut issuer = Self::start(prepared, authority);
+        Arc::get_mut(&mut issuer)
+            .expect("new issuer is unique")
+            .commands = command::Commands::with_double(fixture, double);
+        issuer
+    }
+
+    pub(crate) fn recover_commands(&self) -> Result<(), Error> {
+        let mut state = self.authority.locked().map_err(|_| Error::Unavailable)?;
+        command_store::recover(&mut state.conn, command::now_ms())
+            .map_err(|_| Error::Unavailable)?;
+        Ok(())
+    }
+
+    pub(crate) async fn maintain_commands(self: Arc<Self>) -> Result<(), Error> {
+        let mut timer = tokio::time::interval(std::time::Duration::from_secs(1));
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut cursor = 0;
+        loop {
+            timer.tick().await;
+            let at = command::now_ms();
+            let cutoff = at.saturating_sub(self.config.receipt_retention_secs as i64 * 1_000);
+            {
+                let state = self.authority.locked().map_err(|_| Error::Unavailable)?;
+                command_store::compact(&state.conn, cutoff, at).map_err(|_| Error::Unavailable)?;
+            }
+            self.sweep_command_holds(&mut cursor, at)
+                .map_err(|_| Error::Unavailable)?;
+        }
     }
 
     pub fn config(&self) -> &Config {
@@ -775,9 +939,15 @@ impl Issuer {
             },
             (Method::GET, "/device") => self.device_page(request.headers()).await,
             (Method::POST, "/device") => self.device_approval(request).await,
-            (Method::POST, "/oauth/device_authorization") => self.device_authorization(request).await,
+            (Method::POST, "/oauth/device_authorization") => {
+                self.device_authorization(request).await
+            }
             (Method::POST, "/oauth/token") => self.device_token(request).await,
-            _ => response(StatusCode::METHOD_NOT_ALLOWED, "text/plain", "method refused\n"),
+            _ => response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "text/plain",
+                "method refused\n",
+            ),
         }
     }
 

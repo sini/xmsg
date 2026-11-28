@@ -30,6 +30,16 @@ async fn issuer_with_config(
     refresh: bool,
     config: Config,
 ) -> Arc<Issuer> {
+    let (prepared, authority) = prepared_fixture(oidc, directory, refresh, config).await;
+    Issuer::start(prepared, authority)
+}
+
+async fn prepared_fixture(
+    oidc: &Fixture,
+    directory: &TempDir,
+    refresh: bool,
+    config: Config,
+) -> (Prepared, Arc<Authority>) {
     let provider = Provider::discover_with_client(
         config.oidc(),
         &config.public_origin,
@@ -45,7 +55,7 @@ async fn issuer_with_config(
         config.authority_config(vec!["fixture.node".to_owned()]),
     )
     .unwrap();
-    Issuer::start(
+    (
         Prepared {
             config,
             provider,
@@ -53,6 +63,56 @@ async fn issuer_with_config(
         },
         authority,
     )
+}
+
+pub(crate) async fn exact_command_transport_fixture(
+    oidc: &Fixture,
+    directory: &TempDir,
+) -> (Arc<Issuer>, Arc<command::ExactCommandAuthorityFixture>) {
+    let (prepared, authority) =
+        prepared_fixture(oidc, directory, false, config(&oidc.issuer())).await;
+    let fixture = Arc::new(command::ExactCommandAuthorityFixture::default());
+    let issuer =
+        Issuer::start_with_command_authority_for_test(prepared, authority, fixture.clone());
+    issuer.recover_commands().unwrap();
+    (issuer, fixture)
+}
+
+pub(crate) async fn command_double_transport_fixture(
+    oidc: &Fixture,
+    directory: &TempDir,
+) -> (
+    Arc<Issuer>,
+    Arc<command::ExactCommandAuthorityFixture>,
+    Arc<command::CommandDouble>,
+) {
+    let (prepared, authority) =
+        prepared_fixture(oidc, directory, false, config(&oidc.issuer())).await;
+    let fixture = Arc::new(command::ExactCommandAuthorityFixture::default());
+    let double = Arc::new(command::CommandDouble::default());
+    let issuer = Issuer::start_with_command_double_for_test(
+        prepared,
+        authority,
+        fixture.clone(),
+        double.clone(),
+    );
+    issuer.recover_commands().unwrap();
+    (issuer, fixture, double)
+}
+
+pub(crate) fn command_rows_for_test(issuer: &Issuer) -> (i64, i64) {
+    issuer
+        .authority
+        .locked()
+        .unwrap()
+        .conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM command_intents),
+                (SELECT count(*) FROM command_reservations)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
 }
 
 pub(crate) async fn transport_fixture(
@@ -813,7 +873,11 @@ async fn send_to_issuer(
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     drop(sender);
     let _ = srv.await;
-    (status, resp_headers, String::from_utf8_lossy(&bytes).into_owned())
+    (
+        status,
+        resp_headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
 }
 
 #[tokio::test]
@@ -934,7 +998,9 @@ async fn populated_ssr_escaping_assets_and_fetch_metadata_edges() {
                     harness: Harness::Declared("<img src=x onerror='1'>".to_owned()),
                     state: RegistrationState::Registered,
                     source_at: Some(1),
-                    label: Some("<script>alert(\"xss\")</script><a href=\"https://evil\">".to_owned()),
+                    label: Some(
+                        "<script>alert(\"xss\")</script><a href=\"https://evil\">".to_owned(),
+                    ),
                     context: None,
                     activity: None,
                 },
@@ -1035,18 +1101,45 @@ async fn populated_ssr_escaping_assets_and_fetch_metadata_edges() {
     assert!(!ssr_body.contains("secret-label"));
 
     // m05: JS & CSS assets served with canonical MIME + nosniff; unknown asset path 404
-    let (js_status, js_hdrs, js_body) = send_to_issuer(&issuer, Some(&hub), Method::GET, assets::JS_PATH, vec![], b"").await;
+    let (js_status, js_hdrs, js_body) = send_to_issuer(
+        &issuer,
+        Some(&hub),
+        Method::GET,
+        assets::JS_PATH,
+        vec![],
+        b"",
+    )
+    .await;
     assert_eq!(js_status, StatusCode::OK);
-    assert_eq!(js_hdrs[header::CONTENT_TYPE], "application/javascript; charset=utf-8");
+    assert_eq!(
+        js_hdrs[header::CONTENT_TYPE],
+        "application/javascript; charset=utf-8"
+    );
     assert_eq!(js_hdrs["x-content-type-options"], "nosniff");
     assert_eq!(js_body.as_bytes(), assets::JS_BYTES);
 
-    let (css_status, css_hdrs, css_body) = send_to_issuer(&issuer, Some(&hub), Method::GET, assets::CSS_PATH, vec![], b"").await;
+    let (css_status, css_hdrs, css_body) = send_to_issuer(
+        &issuer,
+        Some(&hub),
+        Method::GET,
+        assets::CSS_PATH,
+        vec![],
+        b"",
+    )
+    .await;
     assert_eq!(css_status, StatusCode::OK);
     assert_eq!(css_hdrs[header::CONTENT_TYPE], "text/css; charset=utf-8");
     assert_eq!(css_hdrs["x-content-type-options"], "nosniff");
     assert_eq!(css_body.as_bytes(), assets::CSS_BYTES);
 
-    let (miss_status, _, _) = send_to_issuer(&issuer, Some(&hub), Method::GET, "/assets/nonexistent.js", vec![], b"").await;
+    let (miss_status, _, _) = send_to_issuer(
+        &issuer,
+        Some(&hub),
+        Method::GET,
+        "/assets/nonexistent.js",
+        vec![],
+        b"",
+    )
+    .await;
     assert_eq!(miss_status, StatusCode::NOT_FOUND);
 }

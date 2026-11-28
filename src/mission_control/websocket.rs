@@ -141,10 +141,10 @@ async fn session(
     issuer: Arc<Issuer>,
     hub: Arc<ReadHub>,
     record: Record,
-    writer: SessionWriter,
+    mut writer: SessionWriter,
     stream: hyper::upgrade::Upgraded,
 ) {
-    let limits = &writer.limits;
+    let limits = writer.limits.clone();
     let config = WebSocketConfig::default()
         .max_frame_size(Some(limits.max_client_frame_bytes))
         .max_message_size(Some(limits.max_client_message_bytes))
@@ -196,8 +196,10 @@ async fn session(
         let _ = close(&mut socket, 4409, "version_mismatch").await;
         return;
     }
-    let capabilities: Vec<_> = ["observe", "activity"]
+    let commands = issuer.commands.available() && record.class != super::authority::Class::Machine;
+    let capabilities: Vec<_> = ["observe", "activity", "commands"]
         .into_iter()
+        .filter(|name| *name != "commands" || commands)
         .filter(|name| offered.iter().any(|item| item == name))
         .collect();
     if !required
@@ -209,6 +211,24 @@ async fn session(
         return;
     }
     let observe_activity = capabilities.contains(&"activity");
+    let commands = capabilities.contains(&"commands");
+    if commands {
+        let (sender, receiver) = tokio::sync::mpsc::channel(issuer.config.receipt_lane_max);
+        let overloaded = Arc::new(tokio::sync::Notify::new());
+        if writer
+            .live
+            .set_command_lane(super::command::CommandLane::new(sender, overloaded.clone()))
+            .is_err()
+        {
+            return;
+        }
+        writer.commands = Some(super::writer::CommandReader {
+            issuer: issuer.clone(),
+            record: record.clone(),
+            receiver: tokio::sync::Mutex::new(receiver),
+            overloaded,
+        });
+    }
     let connection = ulid::Ulid::new().to_string();
     let hello = json!({"v":1,"type":"hello","re":id,"protocol":1,"capabilities":capabilities,
         "connection":connection,"actor":{"principal":record.principal,"display":display(&record),"class":record.class},
@@ -240,6 +260,14 @@ async fn session(
             invalidated = writer.live.change() => {
                 if let Some(change) = invalidated { finish(&mut socket, change).await; }
                 break;
+            }
+            _ = async { writer.commands.as_ref().unwrap().overloaded.notified().await }, if commands => {
+                let _ = close(&mut socket, 4408, "slow_consumer").await;
+                break;
+            }
+            reply = async { writer.commands.as_ref().unwrap().receiver.lock().await.recv().await }, if commands => {
+                let Some(reply) = reply else { break };
+                if send_command_push(&mut socket, &writer, reply).await.is_err() { break; }
             }
             frame = socket.next() => {
                 match frame {
@@ -283,6 +311,40 @@ async fn session(
                                     Ok(Some(state)) => { subscriptions.insert(sub,state); }
                                     Ok(None) => {}
                                     Err(()) => break,
+                                }
+                            }
+                            Err(error) if commands && error.code == Code::Unsupported => {
+                                let command = super::command_wire::decode(
+                                    text.as_bytes(), limits.max_json_depth,
+                                    limits.max_string_bytes, super::command_wire::Carrier::WebSocket,
+                                );
+                                let command = match command {
+                                    Ok(command) => command,
+                                    Err(error) => {
+                                        if send_error(&mut socket, error.reply, error.code, false).await.is_err() { break; }
+                                        continue;
+                                    }
+                                };
+                                let id = match &command {
+                                    super::command_wire::CommandRequest::Prepare { id, .. }
+                                    | super::command_wire::CommandRequest::Commit { id, .. }
+                                    | super::command_wire::CommandRequest::Lookup { id, .. } => *id,
+                                };
+                                let reply = issuer.command(&record, &connection, command);
+                                match reply {
+                                    Ok(reply) => {
+                                        match send_checked(&mut socket, &writer, &[], None, reply.body.to_string(),
+                                            Some((&issuer, &record, reply.request.as_ref()))).await {
+                                            Ok(()) => {}
+                                            Err(WriteFailure::Ended) => break,
+                                            Err(WriteFailure::ScopeBeforeHandoff) => {
+                                                if send_error(&mut socket, id, Code::NotFoundOrDenied, false).await.is_err() { break; }
+                                            }
+                                        }
+                                    }
+                                    Err(refusal) => {
+                                        if send_error(&mut socket, id, refusal.code, false).await.is_err() { break; }
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -397,6 +459,63 @@ async fn send(
     source: Option<(&ReadHub, &Sequenced)>,
     payload: String,
 ) -> Result<(), WriteFailure> {
+    if let Some(reader) = &writer.commands {
+        #[cfg(test)]
+        if source.is_some() {
+            reader.issuer.commands.pause_data_send_for_test().await;
+        }
+        for _ in 0..reader.issuer.config.receipt_lane_max {
+            if futures_util::FutureExt::now_or_never(reader.overloaded.notified()).is_some() {
+                let _ = close(socket, 4408, "slow_consumer").await;
+                return Err(WriteFailure::Ended);
+            }
+            let reply = reader.receiver.lock().await.try_recv();
+            let Ok(reply) = reply else { break };
+            send_command_push(socket, writer, reply).await?;
+        }
+    }
+    send_checked(socket, writer, nodes, source, payload, None).await
+}
+
+async fn send_command_push(
+    socket: &mut Socket,
+    writer: &SessionWriter,
+    reply: super::command::Reply,
+) -> Result<(), WriteFailure> {
+    let reader = writer.commands.as_ref().ok_or(WriteFailure::Ended)?;
+    match send_checked(
+        socket,
+        writer,
+        &[],
+        None,
+        reply.body.to_string(),
+        Some((&reader.issuer, &reader.record, reply.request.as_ref())),
+    )
+    .await
+    {
+        Ok(()) | Err(WriteFailure::ScopeBeforeHandoff) => Ok(()),
+        Err(WriteFailure::Ended) => Err(WriteFailure::Ended),
+    }
+}
+
+async fn send_checked(
+    socket: &mut Socket,
+    writer: &SessionWriter,
+    nodes: &[&str],
+    source: Option<(&ReadHub, &Sequenced)>,
+    payload: String,
+    command: Option<(
+        &Issuer,
+        &Record,
+        Option<&super::command_wire::PreparedRequest>,
+    )>,
+) -> Result<(), WriteFailure> {
+    #[cfg(test)]
+    if let Some((issuer, _, _)) = command {
+        if issuer.commands.before_handoff().await {
+            return Err(WriteFailure::Ended);
+        }
+    }
     #[cfg(test)]
     writer
         .queued_projection_gate(!nodes.is_empty(), source.is_none())
@@ -445,12 +564,27 @@ async fn send(
                     opcode,
                     index + 1 == count,
                 );
-                writer
-                    .handoff(guarded.iter().copied(), cursor, || {
-                        Pin::new(&mut *socket).start_send(Message::Frame(frame))
-                    })
-                    .map_err(|_| refused())?
-                    .map_err(|_| WriteFailure::Ended)?;
+                let handoff = || Pin::new(&mut *socket).start_send(Message::Frame(frame));
+                if let Some((issuer, record, request)) = command.filter(|_| index == 0) {
+                    writer
+                        .live
+                        .authorize_payload_by_state(
+                            [],
+                            |state| match request {
+                                Some(request) => issuer
+                                    .command_entitled(state, &record.record_id, request)
+                                    .is_ok(),
+                                None => state.command_record(&record.record_id).is_ok(),
+                            },
+                            handoff,
+                        )
+                        .map_err(|_| refused())?
+                } else {
+                    writer
+                        .handoff(guarded.iter().copied(), cursor, handoff)
+                        .map_err(|_| refused())?
+                }
+                .map_err(|_| WriteFailure::Ended)?;
                 poll_fn(|cx| {
                     match writer.handoff([], None, || Pin::new(&mut *socket).poll_flush(cx)) {
                         Ok(poll) => poll.map_err(|_| WriteFailure::Ended),

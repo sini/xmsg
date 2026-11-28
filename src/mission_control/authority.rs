@@ -199,6 +199,22 @@ pub(crate) struct Audit {
     pub action: String,
     pub principal: Option<String>,
     pub record_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verb: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 pub(crate) struct Refresh {
@@ -333,8 +349,8 @@ struct Stored {
     record: Record,
 }
 
-struct State {
-    conn: Connection,
+pub(super) struct State {
+    pub(super) conn: Connection,
     generation: i64,
     records: HashMap<String, Stored>,
     by_digest: HashMap<[u8; 32], String>,
@@ -410,6 +426,29 @@ fn entitled(conn: &Connection, owner: &str) -> Result<bool> {
     .map_err(Into::into)
 }
 
+impl State {
+    #[cfg(test)]
+    pub(super) fn publish_command(&self, record_id: &str, reply: super::command::Reply) {
+        for registration in self
+            .live
+            .values()
+            .filter(|row| row.record_id == record_id && row.invalidation.is_none())
+        {
+            if let Some(lane) = &registration.command_lane {
+                lane.deliver(reply.clone());
+            }
+        }
+    }
+
+    pub(super) fn command_record(&self, id: &str) -> Result<Record> {
+        let record = &self.records.get(id).ok_or(AuthorityError::Denied)?.record;
+        if !fresh(record, now()) || !entitled(&self.conn, owner_for(record))? {
+            return Err(AuthorityError::Denied);
+        }
+        Ok(record.clone())
+    }
+}
+
 fn generation_after(generation: i64) -> Result<i64> {
     generation.checked_add(1).ok_or(AuthorityError::Storage)
 }
@@ -457,6 +496,30 @@ impl Authority {
              PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY;",
         )?;
         conn.execute_batch(SCHEMA)?;
+        super::command_store::migrate(&mut conn)?;
+        {
+            let tx = conn.transaction()?;
+            for field in [
+                "actor",
+                "on_behalf_of",
+                "via",
+                "node",
+                "endpoint",
+                "verb",
+                "request_id",
+                "outcome",
+            ] {
+                let present: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('audit') WHERE name = ?)",
+                    [field],
+                    |row| row.get(0),
+                )?;
+                if !present {
+                    tx.execute(&format!("ALTER TABLE audit ADD COLUMN {field} TEXT"), [])?;
+                }
+            }
+            tx.commit()?;
+        }
         let mut records = HashMap::new();
         let mut by_digest = HashMap::new();
         {
@@ -574,7 +637,7 @@ impl Authority {
         }))
     }
 
-    fn locked(&self) -> Result<std::sync::MutexGuard<'_, State>> {
+    pub(super) fn locked(&self) -> Result<std::sync::MutexGuard<'_, State>> {
         self.state.lock().map_err(|_| AuthorityError::Storage)
     }
 }
@@ -932,7 +995,7 @@ impl Authority {
         audit(&tx, now(), "audit_list", None, None)?;
         let rows = {
             let mut stmt = tx.prepare(
-                "SELECT at, action, principal, record_id FROM audit ORDER BY sequence DESC LIMIT 1000",
+                "SELECT at, action, principal, record_id, actor, on_behalf_of, via, node, endpoint, verb, request_id, outcome FROM audit ORDER BY sequence DESC LIMIT 1000",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok(Audit {
@@ -940,6 +1003,14 @@ impl Authority {
                     action: row.get(1)?,
                     principal: row.get(2)?,
                     record_id: row.get(3)?,
+                    actor: row.get(4)?,
+                    on_behalf_of: row.get(5)?,
+                    via: row.get(6)?,
+                    node: row.get(7)?,
+                    endpoint: row.get(8)?,
+                    verb: row.get(9)?,
+                    request_id: row.get(10)?,
+                    outcome: row.get(11)?,
                 })
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -1239,6 +1310,7 @@ struct Registration {
     runtime: tokio::runtime::Handle,
     sender: watch::Sender<Option<Invalidation>>,
     invalidation: Option<Invalidation>,
+    command_lane: Option<super::command::CommandLane>,
     #[cfg(test)]
     abort_delay: Option<Duration>,
 }
@@ -1371,6 +1443,7 @@ impl Authority {
                 runtime,
                 sender,
                 invalidation: None,
+                command_lane: None,
                 #[cfg(test)]
                 abort_delay,
             },
@@ -1449,6 +1522,14 @@ impl Live {
         }
     }
 
+    pub(super) fn set_command_lane(&self, lane: super::command::CommandLane) -> Result<()> {
+        let authority = self.authority.upgrade().ok_or(AuthorityError::Denied)?;
+        let mut state = authority.locked()?;
+        let registration = state.live.get_mut(&self.id).ok_or(AuthorityError::Denied)?;
+        registration.command_lane = Some(lane);
+        Ok(())
+    }
+
     pub(super) async fn change(&self) -> Option<Invalidation> {
         let mut receiver = self.receiver.clone();
         loop {
@@ -1474,6 +1555,15 @@ impl Live {
         current: impl FnOnce() -> bool,
         handoff: impl FnOnce() -> T,
     ) -> Result<T> {
+        self.authorize_payload_by_state(nodes, |_| current(), handoff)
+    }
+
+    pub(super) fn authorize_payload_by_state<'a, T>(
+        &self,
+        nodes: impl IntoIterator<Item = &'a str>,
+        current: impl FnOnce(&State) -> bool,
+        handoff: impl FnOnce() -> T,
+    ) -> Result<T> {
         let authority = self.authority.upgrade().ok_or(AuthorityError::Denied)?;
         let state = authority.locked()?;
         #[cfg(test)]
@@ -1489,7 +1579,7 @@ impl Live {
             || nodes
                 .into_iter()
                 .any(|name| state.masked_nodes.contains(name))
-            || !current()
+            || !current(&state)
         {
             return Err(AuthorityError::Denied);
         }

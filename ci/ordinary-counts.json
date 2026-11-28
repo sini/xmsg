@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "main ea825d4d7c9ebe294b31ab336981996a848c7d93 counts plus sp13_eligible_current_connection_states: +1 passed measured in PR #314 job 138519967421, Nix ordinary",
-    "darwin": "main ea825d4d7c9ebe294b31ab336981996a848c7d93 counts plus sp13_eligible_current_connection_states: +1 passed measured in PR #314 job 138512210214, darwin Nix ordinary"
+    "linux": "Baseline 7bbff021273726ce2d3068b3b63a79364dec35bc plus 53 platform-independent Mission Control command tests",
+    "darwin": "Baseline 7bbff021273726ce2d3068b3b63a79364dec35bc plus 53 platform-independent Mission Control command tests"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -35,6 +35,7 @@
     "tests/gate_activity_export.rs",
     "tests/gate_delivered_acked.rs",
     "tests/gate_dtxj_collector.rs",
+    "tests/gate_dtxj_command_production.rs",
     "tests/gate_dtxj_export.rs",
     "tests/gate_dtxj_unknown_wire.rs",
     "tests/gate_h5_hub_admission.rs",
@@ -130,16 +131,16 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1897,
+      "passed": 1950,
       "failed": 0,
       "ignored": 13,
-      "summaries": 126
+      "summaries": 127
     },
     "darwin": {
-      "passed": 1882,
+      "passed": 1935,
       "failed": 0,
       "ignored": 13,
-      "summaries": 126
+      "summaries": 127
     }
   }
 }

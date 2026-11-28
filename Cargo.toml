@@ -578,6 +578,11 @@ name = "recipient_snapshot"
 path = "tests/recipient_snapshot.rs"
 required-features = ["daemon"]
 [[test]]
+name = "gate_dtxj_command_production"
+path = "tests/gate_dtxj_command_production.rs"
+required-features = ["daemon"]
+
+[[test]]
 name = "gate_dtxj_collector"
 path = "tests/gate_dtxj_collector.rs"
 required-features = ["daemon"]
