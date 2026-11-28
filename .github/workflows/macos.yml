@@ -433,6 +433,42 @@ jobs:
           assert result.returncode == 0
           assert f"test {witness} ... ok" in result.stdout
           PYTHON
+      - name: Darwin SP5 abort-timer source control
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import subprocess
+
+          path = Path("src/mission_control/authority.rs")
+          needle = "let _ = socket.shutdown(Shutdown::Both);"
+          replacement = "let _ = socket;"
+          witness = "observe_collector::tests::mission_control_blocked_writes_end_by_audited_cutoff"
+          diagnostic = "blocked socket remained open past the recorded cutoff"
+
+          def run():
+              result = subprocess.run(
+                  ["cargo", "test", "--locked", "--lib", witness, "--", "--exact", "--nocapture"],
+                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                  timeout=600,
+              )
+              print(result.stdout, flush=True)
+              return result
+
+          source = path.read_text()
+          assert source.count(needle) == 1
+          try:
+              path.write_text(source.replace(needle, replacement, 1))
+              result = run()
+              assert result.returncode == 101
+              assert f"test {witness} ... FAILED" in result.stdout
+              assert diagnostic in result.stdout
+          finally:
+              path.write_text(source)
+
+          result = run()
+          assert result.returncode == 0
+          assert f"test {witness} ... ok" in result.stdout
+          PYTHON
       - name: cargo test
         run: cargo test --locked --no-fail-fast
 

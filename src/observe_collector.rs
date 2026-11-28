@@ -455,12 +455,20 @@ async fn serve_with_admission(
                 let tls = tls.clone();
                 tasks.spawn(async move {
                     let _lease = lease;
-                    #[cfg(test)]
+                    #[cfg(all(test, not(target_os = "macos")))]
                     if state.wire_probe.is_some() {
                         socket2::SockRef::from(&tcp).set_send_buffer_size(4096).unwrap();
                     }
                     let (tcp, abort) = if state.read_hub.is_some() {
                         let Ok(socket) = tcp.into_std() else { return };
+                        #[cfg(all(test, target_os = "macos"))]
+                        if let Some(probe) = state.wire_probe.as_ref() {
+                            if let Ok(inspect) = socket.try_clone() {
+                                if let Ok(mut slot) = probe.server_socket.lock() {
+                                    *slot = Some(inspect);
+                                }
+                            }
+                        }
                         let Ok(abort) = socket.try_clone() else { return };
                         let Ok(tcp) = tokio::net::TcpStream::from_std(socket) else { return };
                         (tcp, Some(abort))

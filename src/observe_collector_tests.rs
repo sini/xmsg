@@ -2144,6 +2144,174 @@ async fn run_three_transports_share_the_snapshot_and_cursor(
     assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Default)]
+struct DarwinTcpConnectionInfo {
+    tcpi_state: u8,
+    tcpi_snd_wscale: u8,
+    tcpi_rcv_wscale: u8,
+    _pad1: u8,
+    tcpi_options: u32,
+    tcpi_flags: u32,
+    tcpi_rto: u32,
+    tcpi_maxseg: u32,
+    tcpi_snd_ssthresh: u32,
+    tcpi_snd_cwnd: u32,
+    tcpi_snd_wnd: u32,
+    tcpi_snd_sbbytes: u32,
+    tcpi_rcv_wnd: u32,
+    tcpi_rttcur: u32,
+    tcpi_srtt: u32,
+    tcpi_rttvar: u32,
+    tcpi_tfo_bits: u32,
+    _counters: [u64; 7],
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_sockopt_int(fd: std::os::fd::RawFd, name: libc::c_int) -> u32 {
+    let mut val: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            name,
+            (&mut val as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "getsockopt({name:#x}) failed: {}",
+        std::io::Error::last_os_error()
+    );
+    val.max(0) as u32
+}
+
+#[cfg(target_os = "macos")]
+fn darwin_tcp_info(fd: std::os::fd::RawFd) -> DarwinTcpConnectionInfo {
+    const TCP_CONNECTION_INFO: libc::c_int = 0x106;
+    let mut info = DarwinTcpConnectionInfo::default();
+    let mut len = std::mem::size_of::<DarwinTcpConnectionInfo>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            TCP_CONNECTION_INFO,
+            (&mut info as *mut DarwinTcpConnectionInfo).cast(),
+            &mut len,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "getsockopt(TCP_CONNECTION_INFO) failed: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(
+        len as usize >= 40,
+        "short TCP_CONNECTION_INFO reply: {len} bytes"
+    );
+    info
+}
+
+/// Wait until Darwin kernel socket counters confirm a genuine zero-usable-window peer stall on
+/// both the client receive buffer and the server send buffer, with no further socket writes.
+#[cfg(target_os = "macos")]
+async fn wait_and_verify_darwin_stall(
+    client_fd: std::os::fd::RawFd,
+    probe: &crate::mission_control::stream::WireProbe,
+    hub: &crate::mission_control::upstream::ReadHub,
+) {
+    use std::os::fd::AsRawFd;
+
+    const SO_NREAD: libc::c_int = 0x1020;
+    const SO_NWRITE: libc::c_int = 0x1024;
+
+    let server_sock = probe
+        .server_socket
+        .lock()
+        .unwrap()
+        .take()
+        .expect("server socket must be captured for Darwin stall verification");
+    let server_fd = server_sock.as_raw_fd();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    hub.force_backlog_for_test("fixture.node");
+    let mut waves = 1usize;
+    let mut last_writes = probe.write_ok_count.load(Ordering::SeqCst);
+    let mut stalled_for = 0usize;
+    let mut idle_ticks = 0usize;
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let cli_info = darwin_tcp_info(client_fd);
+        let srv_info = darwin_tcp_info(server_fd);
+        let cli_nread = darwin_sockopt_int(client_fd, SO_NREAD);
+        let cli_rcvbuf = darwin_sockopt_int(client_fd, libc::SO_RCVBUF);
+        let srv_nwrite = darwin_sockopt_int(server_fd, SO_NWRITE);
+        let srv_sndbuf = darwin_sockopt_int(server_fd, libc::SO_SNDBUF);
+        let blocked_seen = probe.blocked_seen.load(Ordering::SeqCst);
+        let now_writes = probe.write_ok_count.load(Ordering::SeqCst);
+
+        let peer_window_closed = cli_info.tcpi_maxseg > 0
+            && cli_info.tcpi_rcv_wnd < cli_info.tcpi_maxseg
+            && cli_nread > 0
+            && cli_nread.saturating_add(cli_info.tcpi_maxseg) >= cli_rcvbuf;
+        let server_backed_up = srv_info.tcpi_maxseg > 0
+            && srv_info.tcpi_snd_wnd < srv_info.tcpi_maxseg
+            && srv_nwrite > 0
+            && srv_info.tcpi_snd_sbbytes > 0;
+
+        if blocked_seen && peer_window_closed && server_backed_up {
+            idle_ticks = 0;
+            if now_writes == last_writes {
+                stalled_for += 1;
+                // Wait past XNU's 100 ms delayed-ACK timer (TCP_DELACK_TIMER) with zero socket
+                // write progress so no delayed-ACK wake can arrive after T_change.
+                if stalled_for >= 13 {
+                    drop(server_sock);
+                    return;
+                }
+            } else {
+                stalled_for = 0;
+            }
+        } else {
+            stalled_for = 0;
+            if now_writes == last_writes {
+                idle_ticks += 1;
+                if idle_ticks >= 2 && waves < 8 {
+                    // Previous wave drained without saturating XNU's autoscaled client SO_RCVBUF;
+                    // append another sub-coalescing wave until both ends are genuinely stalled.
+                    hub.force_backlog_for_test("fixture.node");
+                    waves += 1;
+                    idle_ticks = 0;
+                }
+            } else {
+                idle_ticks = 0;
+            }
+        }
+        last_writes = now_writes;
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Darwin SP5 socket did not reach verified zero-window stall before T_change: \
+             blocked_seen={blocked_seen} cli(rcv_wnd={}, mss={}, nread={}, rcvbuf={}) \
+             srv(snd_wnd={}, mss={}, sbbytes={}, nwrite={}, sndbuf={}) waves={waves}",
+            cli_info.tcpi_rcv_wnd,
+            cli_info.tcpi_maxseg,
+            cli_nread,
+            cli_rcvbuf,
+            srv_info.tcpi_snd_wnd,
+            srv_info.tcpi_maxseg,
+            srv_info.tcpi_snd_sbbytes,
+            srv_nwrite,
+            srv_sndbuf,
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_control_blocked_writes_end_by_audited_cutoff() {
     run_blocked_writes_end_by_audited_cutoff(1_000, 20, None).await;
@@ -2270,23 +2438,36 @@ async fn run_blocked_writes_end_by_audited_cutoff(
                 keep_sse = Some(socket);
             }
             probe.armed.store(true, Ordering::SeqCst);
-            f.state
-                .read_hub
-                .as_ref()
-                .unwrap()
-                .force_backlog_for_test("fixture.node");
-            tokio::time::timeout(Duration::from_secs(5), probe.blocked.notified())
-                .await
-                .expect("real socket write must become pending");
+            #[cfg(target_os = "macos")]
+            {
+                use std::os::fd::AsRawFd;
+                let client_fd = if let Some(ws) = keep_ws.as_ref() {
+                    ws.get_ref().as_raw_fd()
+                } else {
+                    keep_sse.as_ref().unwrap().get_ref().as_raw_fd()
+                };
+                wait_and_verify_darwin_stall(client_fd, &probe, f.state.read_hub.as_ref().unwrap())
+                    .await;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                f.state
+                    .read_hub
+                    .as_ref()
+                    .unwrap()
+                    .force_backlog_for_test("fixture.node");
+                tokio::time::timeout(Duration::from_secs(5), probe.blocked.notified())
+                    .await
+                    .expect("real socket write must become pending");
+            }
             let (change, _watchdog) = crate::mission_control::tests::suppress_and_revoke_scoped(
                 &issuer,
                 &directory,
                 &issued.record.record_id,
             )
             .await;
-            let cutoff = tokio::time::Instant::from_std(
-                change + crate::mission_control::tests::authority_cutoff(&issuer),
-            );
+            let cutoff_dur = crate::mission_control::tests::authority_cutoff(&issuer);
+            let cutoff = tokio::time::Instant::from_std(change + cutoff_dur);
             tokio::time::timeout_at(cutoff, probe.closed.notified())
                 .await
                 .expect("blocked socket remained open past the recorded cutoff");
@@ -2296,7 +2477,24 @@ async fn run_blocked_writes_end_by_audited_cutoff(
                 "post-change payload admitted"
             );
             assert!(closed <= cutoff.into_std());
-            samples.push(closed.saturating_duration_since(change));
+            let elapsed = closed.saturating_duration_since(change);
+            #[cfg(target_os = "macos")]
+            {
+                let expected_abort = Duration::from_millis(revocation_slo_ms / 2)
+                    + abort_delay.unwrap_or(Duration::ZERO);
+                let min_abort = expected_abort.saturating_sub(Duration::from_millis(25));
+                let max_abort = (expected_abort + Duration::from_millis(450)).min(cutoff_dur);
+                assert!(
+                    elapsed >= min_abort && elapsed <= max_abort,
+                    "Darwin SP5 {} abort timer missed T_change + SLO/2 window: elapsed={:?}, expected=[{:?}, {:?}] (cutoff={:?})",
+                    if websocket { "WebSocket" } else { "SSE" },
+                    elapsed,
+                    min_abort,
+                    max_abort,
+                    cutoff_dur,
+                );
+            }
+            samples.push(elapsed);
             drop(keep_ws);
             drop(keep_sse);
         }

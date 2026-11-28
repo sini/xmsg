@@ -90,6 +90,12 @@ pub(crate) struct WireProbe {
     pub(crate) blocked: tokio::sync::Notify,
     pub(crate) closed: tokio::sync::Notify,
     pub(crate) closed_at: Mutex<Option<std::time::Instant>>,
+    #[cfg(target_os = "macos")]
+    pub(crate) blocked_seen: std::sync::atomic::AtomicBool,
+    #[cfg(target_os = "macos")]
+    pub(crate) write_ok_count: std::sync::atomic::AtomicUsize,
+    #[cfg(target_os = "macos")]
+    pub(crate) server_socket: Mutex<Option<TcpStream>>,
 }
 
 #[cfg(test)]
@@ -182,13 +188,24 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Fenced<S> {
             }
         }
         #[cfg(test)]
-        if checked.is_pending() {
-            if let Some(probe) = owner
-                .probe
-                .as_ref()
-                .filter(|probe| probe.armed.load(std::sync::atomic::Ordering::SeqCst))
-            {
+        if let Some(probe) = owner
+            .probe
+            .as_ref()
+            .filter(|probe| probe.armed.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            if checked.is_pending() {
+                #[cfg(target_os = "macos")]
+                probe
+                    .blocked_seen
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 probe.blocked.notify_one();
+            } else {
+                #[cfg(target_os = "macos")]
+                if matches!(checked, Poll::Ready(Ok(count)) if count > 0) {
+                    probe
+                        .write_ok_count
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
             }
         }
         checked
