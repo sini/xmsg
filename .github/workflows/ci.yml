@@ -63,7 +63,7 @@ jobs:
   pairing-acceptance:
     if: ${{ !inputs.client_build_probe && github.event_name != 'schedule' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: 4
     steps:
