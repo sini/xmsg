@@ -154,7 +154,7 @@ CASES = {
     ),
     "m-sc2b-same-intent-race-loser-invalid": (
         STATE_TEST + CAS_TEST,
-        "called `Option::unwrap()` on a `None` value",
+        "matching race loser did not receive the incumbent receipt",
         (
             edit(
                 COMMAND,
@@ -266,8 +266,8 @@ pub(super) struct Transition""",
         ),
     ),
     "m-sc5-resend-commit-on-reconnect": (
-        CLIENT_TEST + "sc5_reconnect_sends_only_lookup_after_lost_commit_response",
-        'right: "lookup"',
+        TRANSPORT_TEST + "sc5_private_client_recovers_a_real_collector_commit_after_response_loss",
+        "reconnected client sent a commit instead of lookup",
         (
             edit(
                 CLIENT,
@@ -535,8 +535,8 @@ pub(super) struct Transition""",
         ),
     ),
     "m-sc15e-expire-consumed-bindings": (
-        STORE_TEST + COMPACT_TEST,
-        "called `Option::unwrap()` on a `None` value",
+        STATE_TEST + CLOCK_TEST,
+        "consumed binding disappeared during receipt retention",
         (edit(STORE, "WHERE consumed = 0 AND expires_at <= ?", "WHERE expires_at <= ?"),),
     ),
     "m-sc16a-require-read-scope-for-lookup": (

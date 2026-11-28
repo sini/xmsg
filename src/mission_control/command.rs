@@ -93,6 +93,7 @@ pub(crate) struct ExactCommandAuthorityFixture {
 pub(crate) struct CommandHandoffGate {
     pub(crate) entered: tokio::sync::Notify,
     pub(crate) release: tokio::sync::Notify,
+    pub(crate) drop_reply: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
@@ -271,7 +272,7 @@ impl Commands {
     }
 
     #[cfg(test)]
-    pub(super) async fn before_handoff(&self) {
+    pub(super) async fn before_handoff(&self) -> bool {
         let gate = self
             .fixture
             .as_ref()
@@ -279,6 +280,9 @@ impl Commands {
         if let Some(gate) = gate {
             gate.entered.notify_one();
             gate.release.notified().await;
+            gate.drop_reply.load(std::sync::atomic::Ordering::SeqCst)
+        } else {
+            false
         }
     }
 
@@ -1144,7 +1148,7 @@ mod tests {
                 let loser = replies
                     .iter()
                     .find(|reply| reply.body["lookup"] == true)
-                    .unwrap();
+                    .expect("matching race loser did not receive the incumbent receipt");
                 assert_eq!(loser.body["receipt_id"], winner.body["receipt_id"]);
             }
             double.submitted.acquire().await.unwrap().forget();
@@ -1490,7 +1494,8 @@ mod tests {
                 commit(&issuer, &native.record, "http", &prepared)
                     .unwrap()
                     .body["receipt_id"],
-                receipt.body["receipt_id"]
+                receipt.body["receipt_id"],
+                "consumed binding disappeared during receipt retention"
             );
         }
         let after = at + issuer.config.receipt_retention_secs as i64 * 1000 + 1;

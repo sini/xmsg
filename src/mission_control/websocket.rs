@@ -512,7 +512,9 @@ async fn send_checked(
 ) -> Result<(), WriteFailure> {
     #[cfg(test)]
     if let Some((issuer, _, _)) = command {
-        issuer.commands.before_handoff().await;
+        if issuer.commands.before_handoff().await {
+            return Err(WriteFailure::Ended);
+        }
     }
     #[cfg(test)]
     writer

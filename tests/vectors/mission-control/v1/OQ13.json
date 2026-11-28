@@ -1,0 +1,212 @@
+{
+  "c1_prepare": {
+    "v": 1,
+    "type": "prepare",
+    "id": 6,
+    "request_id": "6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "requested_at": 1795000000500,
+    "verb": "send",
+    "target": {
+      "node": "laptop",
+      "endpoint": "claude-1@laptop",
+      "state_epoch": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "incarnation": 3,
+      "selector": {
+        "kind": "execution",
+        "session_id": "exec-alpha",
+        "generation": 7
+      }
+    },
+    "params": {
+      "text": "Check the task status."
+    }
+  },
+  "c2_prepared": {
+    "v": 1,
+    "type": "prepared",
+    "re": 6,
+    "request_id": "6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "intent": "AAECAwQFBgcICQoLDA0ODw",
+    "expires_at": 1795000061000,
+    "digest": "sha256:b7143a78da92c0e677f539819c4faf4342bd612b0448e18b5d3c5ebe1585e5a5",
+    "presentation": {
+      "verb": "send",
+      "node": "laptop",
+      "endpoint": "claude-1@laptop",
+      "incarnation": 3,
+      "params": [
+        {
+          "name": "text",
+          "value": "Check the task status."
+        }
+      ],
+      "state_epoch": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "selector": {
+        "kind": "execution",
+        "session_id": "exec-alpha",
+        "generation": 7
+      }
+    }
+  },
+  "c6_prepare_alternate": {
+    "v": 1,
+    "type": "prepare",
+    "id": 7,
+    "request_id": "6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "requested_at": 1795000000500,
+    "verb": "send",
+    "target": {
+      "node": "laptop",
+      "endpoint": "claude-1@laptop",
+      "state_epoch": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "incarnation": 3,
+      "selector": {
+        "kind": "execution",
+        "session_id": "exec-alpha",
+        "generation": 7
+      }
+    },
+    "params": {
+      "text": "Summarize the task status."
+    }
+  },
+  "c6_prepared_alternate": {
+    "v": 1,
+    "type": "prepared",
+    "re": 7,
+    "request_id": "6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "intent": "EBESExQVFhcYGRobHB0eHw",
+    "expires_at": 1795000061000,
+    "digest": "sha256:eff770faff7e14df0c8c1887d799ccf88195ba6d00a273ec6b14a0c0fb5c035e",
+    "presentation": {
+      "verb": "send",
+      "node": "laptop",
+      "endpoint": "claude-1@laptop",
+      "incarnation": 3,
+      "params": [
+        {
+          "name": "text",
+          "value": "Summarize the task status."
+        }
+      ],
+      "state_epoch": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "selector": {
+        "kind": "execution",
+        "session_id": "exec-alpha",
+        "generation": 7
+      }
+    }
+  },
+  "c6_commit": {
+    "v": 1,
+    "type": "commit",
+    "id": 11,
+    "request_id": "6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "intent": "EBESExQVFhcYGRobHB0eHw",
+    "digest": "sha256:eff770faff7e14df0c8c1887d799ccf88195ba6d00a273ec6b14a0c0fb5c035e"
+  },
+  "c6_conflict": {
+    "v": 1,
+    "type": "receipt",
+    "re": 11,
+    "code": "conflict",
+    "request_id": "6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "receipt_id": "r_02",
+    "outcome": "refused",
+    "at": 1795000002000
+  },
+  "c7_prepare": {
+    "v": 1,
+    "type": "prepare",
+    "request_id": "0b9a8c7d6e5f40312a1b2c3d4e5f6071",
+    "requested_at": 1795000002500,
+    "verb": "send",
+    "target": {
+      "node": "laptop",
+      "endpoint": "claude-1@laptop",
+      "state_epoch": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "incarnation": 3,
+      "selector": {
+        "kind": "execution",
+        "session_id": "exec-alpha",
+        "generation": 7
+      }
+    },
+    "params": {
+      "text": "Check the task status."
+    }
+  },
+  "c7_prepared": {
+    "v": 1,
+    "type": "prepared",
+    "request_id": "0b9a8c7d6e5f40312a1b2c3d4e5f6071",
+    "intent": "ICEiIyQlJicoKSorLC0uLw",
+    "expires_at": 1795000062700,
+    "digest": "sha256:4580f072c03755d0128f060e1ee218c4289b5561fe409e44c05266c874a10c06",
+    "presentation": {
+      "verb": "send",
+      "node": "laptop",
+      "endpoint": "claude-1@laptop",
+      "incarnation": 3,
+      "params": [
+        {
+          "name": "text",
+          "value": "Check the task status."
+        }
+      ],
+      "state_epoch": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "selector": {
+        "kind": "execution",
+        "session_id": "exec-alpha",
+        "generation": 7
+      }
+    }
+  },
+  "c8_commit": {
+    "v": 1,
+    "type": "commit",
+    "request_id": "0b9a8c7d6e5f40312a1b2c3d4e5f6071",
+    "intent": "ICEiIyQlJicoKSorLC0uLw",
+    "digest": "sha256:4580f072c03755d0128f060e1ee218c4289b5561fe409e44c05266c874a10c06"
+  },
+  "c8_held": {
+    "v": 1,
+    "type": "receipt",
+    "request_id": "0b9a8c7d6e5f40312a1b2c3d4e5f6071",
+    "receipt_id": "r_03",
+    "outcome": "held",
+    "at": 1795000003000
+  },
+  "c9_prepare": {
+    "v": 1,
+    "type": "prepare",
+    "id": 8,
+    "request_id": "6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "requested_at": 1795000000500,
+    "verb": "send",
+    "target": {
+      "node": "laptop",
+      "endpoint": "claude-1@laptop",
+      "state_epoch": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "incarnation": 3,
+      "selector": {
+        "kind": "execution",
+        "session_id": "exec-alpha",
+        "generation": 7
+      }
+    },
+    "params": {
+      "text": "Summarize the task status."
+    }
+  },
+  "c9_conflict": {
+    "v": 1,
+    "type": "receipt",
+    "re": 8,
+    "code": "conflict",
+    "request_id": "6f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "receipt_id": "r_04",
+    "outcome": "refused",
+    "at": 1795000004000
+  }
+}

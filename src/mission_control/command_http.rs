@@ -119,7 +119,7 @@ async fn inner(
         request: reply.request,
     })?;
     #[cfg(test)]
-    issuer.commands.before_handoff().await;
+    let _ = issuer.commands.before_handoff().await;
     Ok(super::response(
         StatusCode::OK,
         "application/json",

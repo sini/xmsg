@@ -339,5 +339,57 @@ mod tests {
             Code::BadMessage
         );
         assert_eq!(parse(http.as_bytes()).unwrap_err().code, Code::BadMessage);
+
+        let vectors: Value = serde_json::from_slice(include_bytes!(
+            "../../tests/vectors/mission-control/v1/OQ13.json"
+        ))
+        .unwrap();
+        for (input, output, carrier) in [
+            ("c1_prepare", "c2_prepared", Carrier::WebSocket),
+            (
+                "c6_prepare_alternate",
+                "c6_prepared_alternate",
+                Carrier::WebSocket,
+            ),
+            ("c7_prepare", "c7_prepared", Carrier::Http),
+        ] {
+            let raw = serde_json::to_vec(&vectors[input]).unwrap();
+            let CommandRequest::Prepare { request, .. } = decode(&raw, 16, 4096, carrier).unwrap()
+            else {
+                panic!("vector must be a prepare");
+            };
+            assert_eq!(
+                request.digest(),
+                vectors[output]["digest"],
+                "canonical digest lost its selector"
+            );
+            assert_eq!(
+                serde_json::to_value(&request.target.selector).unwrap(),
+                vectors[output]["presentation"]["selector"]
+            );
+        }
+        for (input, prepared, carrier) in [
+            ("c6_commit", "c6_prepared_alternate", Carrier::WebSocket),
+            ("c8_commit", "c7_prepared", Carrier::Http),
+        ] {
+            let raw = serde_json::to_vec(&vectors[input]).unwrap();
+            let CommandRequest::Commit {
+                intent,
+                digest,
+                request_id,
+                ..
+            } = decode(&raw, 16, 4096, carrier).unwrap()
+            else {
+                panic!("vector must be a commit");
+            };
+            assert_eq!(intent, vectors[prepared]["intent"]);
+            assert_eq!(digest, vectors[prepared]["digest"]);
+            assert_eq!(request_id, vectors[prepared]["request_id"]);
+        }
+        for (key, code) in [("c6_conflict", "conflict"), ("c9_conflict", "conflict")] {
+            assert_eq!(vectors[key]["code"], code);
+            assert!(vectors[key].get("target").is_none());
+        }
+        assert_eq!(vectors["c8_held"]["outcome"], "held");
     }
 }

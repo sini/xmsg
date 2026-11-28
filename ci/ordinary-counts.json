@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Previous ordinary-suite baseline plus 35 platform-independent Mission Control command tests",
-    "darwin": "Previous ordinary-suite baseline plus 35 platform-independent Mission Control command tests"
+    "linux": "Previous ordinary-suite baseline adjusted for the assigned base and 35 new platform-independent Mission Control command tests",
+    "darwin": "Previous ordinary-suite baseline adjusted for the assigned base and 35 new platform-independent Mission Control command tests"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -130,13 +130,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1932,
+      "passed": 1935,
       "failed": 0,
       "ignored": 13,
       "summaries": 126
     },
     "darwin": {
-      "passed": 1917,
+      "passed": 1920,
       "failed": 0,
       "ignored": 13,
       "summaries": 126

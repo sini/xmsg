@@ -1276,3 +1276,61 @@ async fn sc16_queued_final_push_is_fenced_without_changing_the_settled_row() {
         assert_eq!(double.requests.lock().unwrap().len(), 1);
     }
 }
+
+#[tokio::test]
+async fn sc5_private_client_recovers_a_real_collector_commit_after_response_loss() {
+    use crate::mission_control_client::command_review::{CommandReview, CommitResult};
+    let oidc = Oidc::new_at(now_epoch_secs()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (issuer, authority, double) = command_double_transport_fixture(&oidc, &dir).await;
+    let carrier = Carrier::new(issuer.clone(), &oidc).await;
+    authority.grant(&carrier.principal, target());
+    let mut payload = prepare(REQUEST_ID, now_epoch_secs() * 1000, &target());
+    payload["id"] = json!(2);
+    let origin = reqwest::Url::parse(&carrier.collector.url).unwrap();
+    let mut command = CommandReview::new(payload);
+    let mut output = Vec::new();
+    let (signal, gate) = tokio::sync::oneshot::channel();
+    let review = command.review_session(&origin, &carrier.bearer, &mut output, 4096, || {
+        assert!(signal.send(authority.arm_command_handoff()).is_ok());
+        Some('\n')
+    });
+    let drop_receipt = async {
+        let gate = gate.await.unwrap();
+        gate.entered.notified().await;
+        gate.drop_reply
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        gate.release.notify_one();
+    };
+    let (initial, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(review, drop_receipt)
+    })
+    .await
+    .unwrap();
+    assert_eq!(initial.unwrap(), CommitResult::EffectUnknown);
+    let receipt = command
+        .reconcile(&origin, &carrier.bearer)
+        .await
+        .expect("reconnected client sent a commit instead of lookup");
+    let wire_actions: Vec<_> = issuer
+        .authority
+        .audit_records()
+        .unwrap()
+        .into_iter()
+        .filter(|row| row.request_id.as_deref() == Some(REQUEST_ID))
+        .map(|row| row.action)
+        .collect();
+    assert_eq!(
+        wire_actions,
+        ["command_lookup", "command_commit", "command_prepare"]
+    );
+    assert_eq!(receipt["request_id"], REQUEST_ID);
+    assert_eq!(receipt["outcome"], "effect_unknown");
+    assert_eq!(receipt["lookup"], true);
+    check_handoff(&double).await;
+    assert_eq!(double.submitted.available_permits(), 0);
+    assert_eq!(
+        authority.permits.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
