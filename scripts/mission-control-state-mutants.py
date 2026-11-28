@@ -78,6 +78,18 @@ def edit(file, old, new):
     return file, old, new
 
 
+POST_CAS_REWRITE = edit(
+    COMMAND,
+    CRASH_SETTLEMENT,
+    """            let (to, code) = if state.command_record(&row.record_id).is_err() {
+                (Phase::Refused, Some("denied"))
+            } else {
+                (to, code)
+            };
+""" + CRASH_SETTLEMENT,
+)
+
+
 CASES = {
     "m-sc1-skip-fresh-authorization": (
         STATE_TEST + "sc1_revocation_is_ordered_by_the_submit_cas",
@@ -88,16 +100,7 @@ CASES = {
         STATE_TEST + "sc1_revocation_is_ordered_by_the_submit_cas",
         "post-CAS revocation rewrote the outcome",
         (
-            edit(
-                COMMAND,
-                CRASH_SETTLEMENT,
-                """            let (to, code) = if state.command_record(&row.record_id).is_err() {
-                (Phase::Refused, Some("denied"))
-            } else {
-                (to, code)
-            };
-""" + CRASH_SETTLEMENT,
-            ),
+            POST_CAS_REWRITE,
         ),
     ),
     "m-sc2-consume-after-executor-reply": (
@@ -177,6 +180,91 @@ CASES = {
         'assertion failed: replies.iter().any(|reply| reply.body["code"] == "conflict")',
         (edit(COMMAND, "            return if row.digest == digest {", "            return if true {"),),
     ),
+    "m-sc4a-key-uses-request-id-alone": (
+        STATE_TEST + "sc4_changed_prepare_conflicts_with_an_existing_reservation",
+        "request ID collision incorrectly crossed principals",
+        (
+            edit(STORE, "    PRIMARY KEY (principal, request_id),", "    PRIMARY KEY (request_id),"),
+            edit(STORE, "         ON CONFLICT(principal, request_id) DO NOTHING", "         ON CONFLICT(request_id) DO NOTHING"),
+        ),
+    ),
+    "m-sc4b-repeated-prepare-returns-different-digest": (
+        STATE_TEST + "sc4_changed_prepare_conflicts_with_an_existing_reservation",
+        "changed prepare disclosed the incumbent receipt",
+        (edit(COMMAND, "                    if row.digest == digest {", "                    if true {"),),
+    ),
+    "m-sc4c-include-digest-in-reservation-identity": (
+        STATE_TEST + CAS_TEST,
+        'assertion failed: replies.iter().any(|reply| reply.body["code"] == "conflict")',
+        (
+            edit(STORE, "    PRIMARY KEY (principal, request_id),", "    PRIMARY KEY (principal, request_id, digest),"),
+            edit(STORE, "         ON CONFLICT(principal, request_id) DO NOTHING", "         ON CONFLICT(principal, request_id, digest) DO NOTHING"),
+            edit(
+                STORE,
+                "#[derive(Clone, Copy, Debug)]\npub(super) struct Transition",
+                """pub(super) fn reservation_with_digest(
+    conn: &Connection,
+    principal: &str,
+    request_id: &str,
+    digest: &str,
+) -> Result<Option<Reservation>> {
+    conn.query_row(
+        "SELECT principal, record_id, request_id, request_json, digest, receipt_id, requested_at,
+                state, code, at, held_at, pending_hold
+         FROM command_reservations WHERE principal = ? AND request_id = ? AND digest = ?",
+        params![principal, request_id, digest],
+        reservation_row,
+    )
+    .optional()
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Transition""",
+            ),
+            edit(
+                COMMAND,
+                "        let incumbent =\n            store::reservation(&state.conn, &record.principal, request_id).map_err(store_error)?;",
+                "        let incumbent = store::reservation_with_digest(&state.conn, &record.principal, request_id, digest).map_err(store_error)?;",
+            ),
+            edit(
+                COMMAND,
+                """        let row = store::reservation(&state.conn, &record.principal, request_id)
+            .map_err(store_error)?
+            .ok_or(Refusal::UNAVAILABLE)?;
+        #[cfg(test)]
+        if to == Phase::Submitting {""",
+                """        let row = store::reservation_with_digest(&state.conn, &record.principal, request_id, &row.digest)
+            .map_err(store_error)?
+            .ok_or(Refusal::UNAVAILABLE)?;
+        #[cfg(test)]
+        if to == Phase::Submitting {""",
+            ),
+            edit(
+                COMMAND,
+                """        if !store::transition(
+            &state.conn,
+            &row.principal,
+            &row.request_id,
+            store::Transition {
+                from: Phase::Reserved,
+                to,
+                code,
+                now: at,
+                held_at: (to == Phase::Held).then_some(at),
+            },
+        )
+        .map_err(store_error)?
+        {""",
+                """        let changed = state.conn.execute(
+            "UPDATE command_reservations SET state = ?, code = ?, at = ?, held_at = ?, pending_hold = 0
+             WHERE principal = ? AND request_id = ? AND digest = ? AND state = 'reserved'",
+            rusqlite::params![to.as_str(), code, at, (to == Phase::Held).then_some(at),
+                row.principal, row.request_id, row.digest],
+        ).map_err(store_error)?;
+        if changed != 1 {""",
+            ),
+        ),
+    ),
     "m-sc5-resend-commit-on-reconnect": (
         CLIENT_TEST + "sc5_reconnect_sends_only_lookup_after_lost_commit_response",
         'right: "lookup"',
@@ -199,6 +287,44 @@ CASES = {
                 WEBSOCKET,
                 "        for _ in 0..reader.issuer.config.receipt_lane_max {",
                 "        for _ in 0..0 {",
+            ),
+        ),
+    ),
+    "m-sc7-prepare-from-blocked-observation": (
+        "observe_collector::tests::mission_control_sc7_activity_never_prepares_a_command",
+        "event caused intent before any prepare",
+        (
+            edit(
+                COMMAND,
+                "    pub(super) fn command_entitled(",
+                """    #[cfg(test)]
+    pub(super) fn preprepare_blocked_event(self: &Arc<Self>, record: &Record, payload: &str) -> Option<Reply> {
+        let event: Value = serde_json::from_str(payload).ok()?;
+        if event["type"] != "event" || event["delta"]["event"]["activity"]["block"] != "permission" {
+            return None;
+        }
+        let fixture = self.commands.fixture.as_ref()?;
+        let target = fixture.bindings.lock().ok()?.first()?.clone();
+        let request: PreparedRequest = serde_json::from_value(json!({
+            "request_id":"00000000000000000000000000000001",
+            "requested_at":self.commands.now(),
+            "verb":"send",
+            "target":target,
+            "params":{"text":"Fixture command"}
+        })).ok()?;
+        self.command(record, "ws-mutant", CommandRequest::Prepare { id: None, request }).ok()
+    }
+
+    pub(super) fn command_entitled(""",
+            ),
+            edit(
+                WEBSOCKET,
+                "        for _ in 0..reader.issuer.config.receipt_lane_max {",
+                """        #[cfg(test)]
+        if let Some(reply) = reader.issuer.preprepare_blocked_event(&reader.record, &payload) {
+            send_command_push(socket, writer, reply).await?;
+        }
+        for _ in 0..reader.issuer.config.receipt_lane_max {""",
             ),
         ),
     ),
@@ -304,6 +430,11 @@ CASES = {
             ),
         ),
     ),
+    "m-sc12c-revoke-after-confirm-rewrites-settlement": (
+        STATE_TEST + "sc12_held_confirm_and_decline_each_settle_once",
+        "post-confirm revocation rewrote the executor disposition",
+        (POST_CAS_REWRITE,),
+    ),
     "m-sc12d-expiry-overwrites-a-submitting-reservation": (
         STATE_TEST + "sc12_held_confirm_and_decline_each_settle_once",
         "stale expiry sweep overwrote a submitting reservation",
@@ -356,6 +487,18 @@ CASES = {
                 COMMAND,
                 "                DoubleOutcome::Lost => (Phase::EffectUnknown, None),",
                 '                DoubleOutcome::Lost => (Phase::Refused, Some("executor_unreachable")),',
+            ),
+        ),
+    ),
+    "m-sc15a-retain-final-rows-only-for-the-read-ring": (
+        STATE_TEST + CLOCK_TEST,
+        "reservation was not checked before request age",
+        (
+            edit(
+                STORE,
+                "pub(super) fn compact(conn: &Connection, cutoff: i64, now: i64) -> Result<usize> {",
+                """pub(super) fn compact(conn: &Connection, cutoff: i64, now: i64) -> Result<usize> {
+    let cutoff = cutoff.max(now.saturating_sub(120_000));""",
             ),
         ),
     ),

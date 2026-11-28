@@ -1286,6 +1286,60 @@ mod tests {
             "changed target lost the target_changed refusal"
         );
         assert_eq!(double.submitted.available_permits(), 0);
+
+        let mut pending_request = request(15, at, "revocation-first");
+        pending_request.target.incarnation = 4;
+        let pending_id = pending_request.request_id.clone();
+        let pending = prepare(&issuer, &delegated.record, "http", pending_request).unwrap();
+        assert_eq!(
+            commit(&issuer, &delegated.record, "http", &pending)
+                .unwrap()
+                .body["outcome"],
+            "held"
+        );
+        issuer
+            .authority
+            .revoke(&delegated.record.record_id)
+            .unwrap();
+        issuer
+            .decide_command_for_test(&delegated.record.principal, &pending_id, true)
+            .unwrap();
+        {
+            let state = issuer.authority.locked().unwrap();
+            let row = store::reservation(&state.conn, &delegated.record.principal, &pending_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.code.as_deref(), Some("denied"));
+        }
+        assert_eq!(
+            double.submitted.available_permits(),
+            0,
+            "revocation-first hold submitted"
+        );
+        *double.outcome.lock().unwrap() = Some(DoubleOutcome::Admitted);
+        double.release.notify_waiters();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                {
+                    let state = issuer.authority.locked().unwrap();
+                    let row =
+                        store::reservation(&state.conn, &delegated.record.principal, &sweeping)
+                            .unwrap()
+                            .unwrap();
+                    if row.state != Phase::Submitting {
+                        assert_eq!(
+                            row.state,
+                            Phase::Admitted,
+                            "post-confirm revocation rewrote the executor disposition"
+                        );
+                        break;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1543,7 +1597,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (issuer, fixture) =
             super::super::tests::exact_command_transport_fixture(&oidc, &dir).await;
-        let (_, native, _) = super::super::tests::transport_owner_records(&issuer, &oidc.issuer());
+        let (_, native, delegated) =
+            super::super::tests::transport_owner_records(&issuer, &oidc.issuer());
         fixture.grant(&native.record.principal, target());
         let at = now_ms();
         for (id, carrier) in [(1, "http"), (2, "ws-fixture")] {
@@ -1561,6 +1616,36 @@ mod tests {
             let recovered = prepare(&issuer, &native.record, carrier, original).unwrap();
             assert_eq!(recovered.body["receipt_id"], initial.body["receipt_id"]);
         }
-        assert_eq!(fixture.permits.load(Ordering::SeqCst), 2);
+        issuer.authority.allow_synthetic_for_test(&delegated.handle);
+        issuer
+            .authority
+            .edit_fixture_record(&delegated.record.record_id, |record| {
+                if let Grants::Delegated { grant } = &mut record.grants {
+                    grant.targets = vec![super::super::authority::Target {
+                        node: "fixture.node".to_owned(),
+                        endpoint: "claude-1@fixture.node".to_owned(),
+                    }];
+                }
+            });
+        fixture.grants.lock().unwrap().push((
+            delegated.record.principal.clone(),
+            "fixture.node".to_owned(),
+            "claude-1@fixture.node".to_owned(),
+        ));
+        let other = prepare(
+            &issuer,
+            &delegated.record,
+            "http",
+            request(1, at, "original"),
+        )
+        .unwrap();
+        let own = lookup(&issuer, &native.record, "http", &format!("{:032x}", 1)).unwrap();
+        let other = commit(&issuer, &delegated.record, "http", &other)
+            .unwrap_or_else(|_| panic!("request ID collision incorrectly crossed principals"));
+        assert_ne!(
+            own.body["receipt_id"], other.body["receipt_id"],
+            "request ID collision incorrectly crossed principals"
+        );
+        assert_eq!(fixture.permits.load(Ordering::SeqCst), 3);
     }
 }

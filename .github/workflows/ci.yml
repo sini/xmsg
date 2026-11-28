@@ -146,6 +146,8 @@ jobs:
           cargo fetch --locked
       - name: Run command decoder source mutants
         run: python3 scripts/mission-control-wire-mutants.py
+      - name: Run command recovery source mutants
+        run: python3 scripts/mission-control-recovery-mutants.py
 
   mission-control-state-mutants:
     if: ${{ !inputs.client_build_probe && github.event_name != 'schedule' }}

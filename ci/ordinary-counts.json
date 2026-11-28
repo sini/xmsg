@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "main ea825d4d7c9ebe294b31ab336981996a848c7d93 counts plus sp13_eligible_current_connection_states: +1 passed measured in PR #314 job 138519967421, Nix ordinary",
-    "darwin": "main ea825d4d7c9ebe294b31ab336981996a848c7d93 counts plus sp13_eligible_current_connection_states: +1 passed measured in PR #314 job 138512210214, darwin Nix ordinary"
+    "linux": "Previous ordinary-suite baseline plus 35 platform-independent Mission Control command tests",
+    "darwin": "Previous ordinary-suite baseline plus 35 platform-independent Mission Control command tests"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -130,13 +130,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1897,
+      "passed": 1932,
       "failed": 0,
       "ignored": 13,
       "summaries": 126
     },
     "darwin": {
-      "passed": 1882,
+      "passed": 1917,
       "failed": 0,
       "ignored": 13,
       "summaries": 126
