@@ -394,6 +394,7 @@ assert svc_ready.wait(timeout=10) and not svc_errs, f"svc-a failed to register: 
 
 st_send_ok, body_send_ok = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "hello-q2-7a"}})
 svc_thread.join(timeout=10)
+assert not svc_thread.is_alive(), "svc-a thread still alive after join (did not complete delivery/reply)"
 assert not svc_errs, f"svc-a recipient error: {{svc_errs}}"
 assert st_send_ok in (200, 202), f"Q2-7a first send B->A failed: {{st_send_ok}} {{body_send_ok}}"
 send_ok_json = json.loads(body_send_ok)
@@ -411,6 +412,44 @@ assert reply_seen, f"Q2-7a svc-a reply 'pong-from-svc-a' not recorded on node A 
 st_send_other, body_send_other = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"other@{{id_a}}", "text": "deny-q2-9"}})
 assert st_send_other == 403 and json.loads(body_send_other).get("error") == "denied", f"Q2-9 send to unlisted target 'other' unexpectedly succeeded: {{st_send_other}} {{body_send_other}}"
 
+def assert_refused(st, body, label):
+    payload = json.loads(body)
+    err = payload.get("error")
+    detail = (payload.get("detail") or "").lower()
+    ok = (
+        (st == 403 and err == "denied")
+        or (
+            st == 503
+            and err == "peer_unreachable"
+            and any(
+                tok in detail
+                for tok in (
+                    "connection error",
+                    "tls handshake failed",
+                    "peer rejected",
+                    "certificate",
+                    "denied",
+                    "unknownissuer",
+                )
+            )
+        )
+    )
+    assert ok, f"{{label}} expected specific refusal (403 denied or 503 TLS/connection refusal), got {{st}} {{body}}"
+
+def check_fed_listener(host, port):
+    probe = f"import socket; s = socket.create_connection(({{host!r}}, {{port}}), timeout=2); s.close()"
+    ns_b_pid = os.environ.get("XMSG_ACC_NS_B_PID")
+    ns_b_name = os.environ.get("XMSG_ACC_NS_B")
+    if ns_b_pid:
+        cmd = ["nsenter", "-t", ns_b_pid, "-n", "--no-fork", sys.executable, "-c", probe]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    elif ns_b_name:
+        cmd = ["sudo", "ip", "netns", "exec", ns_b_name, sys.executable, "-c", probe]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    else:
+        s = _sock.create_connection((host, port), timeout=2)
+        s.close()
+
 # Revocation + nothing revives BY EFFECT: block B on A -> installed_revision == committed_revision, A is live & logs TLS rejection of B, and B->A send refused.
 log_a_off1 = Path(log_a).stat().st_size
 blk_proc = subprocess.run([xmsg, "pair", "--http-sock", sock_a, "block", id_b], check=True, capture_output=True, text=True)
@@ -419,22 +458,24 @@ assert blk_json.get("committed") is True and blk_json.get("installed_revision") 
 list_after_blk = json.loads(subprocess.check_output([xmsg, "pair", "--http-sock", sock_a, "list", "--json"], text=True))
 assert any(b.get("peer_id") == id_b for b in list_after_blk.get("blocks", [])), f"pair list missing block for {{id_b}}: {{list_after_blk}}"
 st_after_blk, body_after_blk = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "blocked"}})
-assert st_after_blk in (403, 503) and json.loads(body_after_blk).get("error") in ("denied", "peer_unreachable"), f"revoked send after block unexpected result: {{st_after_blk}} {{body_after_blk}}"
+assert_refused(st_after_blk, body_after_blk, "revoked send after block")
 assert unix_get(sock_a, "/healthz")[0] == 200, "node A /healthz liveness check failed after block"
 time.sleep(0.1)
 log_delta1 = Path(log_a).read_bytes()[log_a_off1:].decode("utf-8", "replace").lower()
-assert ("certificate" in log_delta1 or "handshake" in log_delta1 or "denied" in log_delta1 or "failed to resolve peer" in log_delta1), f"node A log did not record active rejection of blocked B (liveness/authority): {{log_delta1!r}}"
+assert any("from 10.201.1.2:" in line and "peer certificate is denied" in line for line in log_delta1.splitlines()), f"node A log did not record active rejection of blocked B (from 10.201.1.2: ... peer certificate is denied): {{log_delta1!r}}"
+check_fed_listener("10.201.1.1", 7788)
 
 grant_a_hex = list_a["grants"][0]["grant_id"]
 subprocess.run([xmsg, "pair", "--http-sock", sock_a, "remove", grant_a_hex], check=True, capture_output=True)
 subprocess.run([xmsg, "pair", "--http-sock", sock_a, "unblock", id_b], check=True, capture_output=True)
 log_a_off2 = Path(log_a).stat().st_size
 st_after_unblk, body_after_unblk = unix_post(sock_b, "/v1/messages", {{"from": "b-client", "to": f"svc-a@{{id_a}}", "text": "nothing-revives"}})
-assert st_after_unblk in (403, 503) and json.loads(body_after_unblk).get("error") in ("denied", "peer_unreachable"), f"nothing-revives send after remove+unblock unexpected result: {{st_after_unblk}} {{body_after_unblk}}"
+assert_refused(st_after_unblk, body_after_unblk, "nothing-revives send after remove+unblock")
 assert unix_get(sock_a, "/healthz")[0] == 200, "node A /healthz liveness check failed after remove+unblock"
 time.sleep(0.1)
 log_delta2 = Path(log_a).read_bytes()[log_a_off2:].decode("utf-8", "replace").lower()
-assert ("certificate" in log_delta2 or "handshake" in log_delta2 or "denied" in log_delta2 or "failed to resolve peer" in log_delta2), f"node A log did not record active rejection after remove+unblock: {{log_delta2!r}}"
+assert any("from 10.201.1.2:" in line and "unknownissuer" in line for line in log_delta2.splitlines()), f"node A log did not record active rejection of B after remove+unblock (from 10.201.1.2: ... unknownissuer): {{log_delta2!r}}"
+check_fed_listener("10.201.1.1", 7788)
 
 # Q2-16: block A on B, then unblock fails pairing.unblock_would_restore while grant exists; remove then unblock succeeds
 subprocess.run([xmsg, "pair", "--http-sock", sock_b, "block", id_a], check=True, capture_output=True)
@@ -483,7 +524,7 @@ nsenter -t "$ns_b_pid" -n --no-fork env HOME={shlex.quote(str(home_b))} XDG_RUNT
 srv_b=$!
 
 trap 'kill "$srv_a" "$srv_b" "$ns_b_pid" 2>/dev/null || true' EXIT
-{shlex.quote(sys.executable)} {shlex.quote(str(driver_path))}
+XMSG_ACC_NS_B_PID="$ns_b_pid" {shlex.quote(sys.executable)} {shlex.quote(str(driver_path))}
 """
             subprocess.run(["unshare", "-Urn", "bash", "-c", script], check=True)
         else:
@@ -534,7 +575,7 @@ trap 'kill "$srv_a" "$srv_b" "$ns_b_pid" 2>/dev/null || true' EXIT
                     stdout=log_b.open("wb"),
                     stderr=subprocess.STDOUT,
                 )
-                subprocess.run([sys.executable, str(driver_path)], check=True)
+                subprocess.run([sys.executable, str(driver_path)], env={**os.environ, "XMSG_ACC_NS_B": ns_b}, check=True)
             finally:
                 for p in (srv_a, srv_b):
                     if p is not None and p.poll() is None:
