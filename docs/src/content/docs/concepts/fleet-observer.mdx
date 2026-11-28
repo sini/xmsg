@@ -192,6 +192,9 @@ keeps `Live`/`Delayed`/`Reconnecting`/`Stale`/`Unknown` connection states separa
 from per-node freshness, and deletes masked or removed rows immediately rather
 than retaining them as stale. Manage controls stay disabled in inspect-only
 rollouts.
+The live collector, loopback HTTPS reverse proxy, and cross-site OIDC login
+flow are verified by `tests/tmjs_wr8b_live_acceptance.py`; `mission-control.web`
+remains planned until the two-MacBook live gate completes.
 through a configured OIDC provider. The issuer turns that verified identity
 into a revocable local session. A native client obtains its own credential
 through a browser-approved device grant. Both use the same owner principal

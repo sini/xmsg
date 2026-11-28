@@ -411,6 +411,10 @@ no-data shell on cross-site arrivals even while signed in. `GET /login/callback`
 answers `200` with a same-origin `<meta http-equiv="refresh" content="0;url=/">`
 and link so the `SameSite=Strict` session cookie attaches on the hop to `/`.
 `POST /logout` revokes the session record, clears the cookie, and redirects to `/`.
+The automated `mission-control-browser` check now exercises this live path
+through a loopback HTTPS reverse proxy, a cross-site HTTPS OIDC IdP, and a real
+`xmsg observe-collector` polling a mTLS source node; `mission-control.web`
+remains planned until the two-MacBook live gate completes.
 
 ### Native and machine access
 

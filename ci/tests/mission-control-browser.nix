@@ -16,6 +16,7 @@
                 pkgs.esbuild
                 py
                 pkgs.chromium
+                pkgs.openssl
               ];
               src = package.src;
             }
@@ -31,6 +32,10 @@
               python3 tests/tmjs_web_roster_browser.py \
                 --assets-dir assets/mc-roster \
                 --chromium "${lib.getExe pkgs.chromium}" | tee "$out/mission-control-browser.log"
+              python3 tests/tmjs_wr8b_live_acceptance.py \
+                --xmsg-bin "${package}/bin/xmsg" \
+                --assets-dir assets/mc-roster \
+                --chromium "${lib.getExe pkgs.chromium}" | tee "$out/tmjs-wr8b-live-acceptance.log"
             '';
       };
     };
