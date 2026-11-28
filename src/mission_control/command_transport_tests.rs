@@ -1330,3 +1330,102 @@ async fn sc5_private_client_recovers_a_real_collector_commit_after_response_loss
         1
     );
 }
+
+async fn assert_prepare_rate_refusal(
+    transport: &mut CommandTransport,
+    correlation: u32,
+    request: Value,
+    reason: &str,
+) {
+    let refusal = if let Some(socket) = &mut transport.socket {
+        ws_exchange(socket, correlation, request).await
+    } else {
+        let (status, refusal) = transport.carrier.post("prepare", request).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{reason}");
+        refusal
+    };
+    no_receipt(&refusal, "rate_limited");
+    assert!(refusal.get("intent").is_none(), "{reason}");
+}
+
+#[tokio::test]
+async fn command_budget_refusals_use_the_real_http_and_websocket_envelopes() {
+    for websocket in [false, true] {
+        let oidc = Oidc::new_at(now_epoch_secs()).await;
+        let store = tempfile::tempdir().unwrap();
+        let (issuer, fixture) = exact_command_transport_fixture(&oidc, &store).await;
+        let carrier = Carrier::new(issuer.clone(), &oidc).await;
+        let target = target();
+        fixture.grant(&carrier.principal, target.clone());
+        let at = now_epoch_secs() * 1000;
+        fixture.freeze_clock(at);
+        let socket = if websocket {
+            Some(carrier.ws().await)
+        } else {
+            None
+        };
+        let mut transport = CommandTransport { carrier, socket };
+        let mut correlation = 1;
+        let mut next = || {
+            correlation += 1;
+            correlation
+        };
+        let request = |id: u32, now| prepare(&format!("{id:032x}"), now, &target);
+
+        for (id, count) in [(1, 4), (2, 4), (3, 2)] {
+            let mut prepared = Vec::new();
+            for _ in 0..count {
+                let reply = transport.prepare(next(), request(id, at)).await;
+                assert_eq!(reply["type"], "prepared");
+                prepared.push(reply);
+            }
+            if id == 1 {
+                let before = counters(&issuer);
+                assert_prepare_rate_refusal(
+                    &mut transport,
+                    next(),
+                    request(4, at),
+                    "fifth outstanding prepare",
+                )
+                .await;
+                assert_eq!(counters(&issuer), before);
+            }
+            for intent in prepared {
+                let receipt = transport.commit(next(), &intent).await;
+                assert_eq!(receipt["code"], "unattested");
+            }
+        }
+        let before = counters(&issuer);
+        assert_prepare_rate_refusal(
+            &mut transport,
+            next(),
+            request(4, at),
+            "eleventh prepare in the window",
+        )
+        .await;
+        assert_eq!(counters(&issuer), before);
+
+        let fresh = at + 60_000;
+        fixture.freeze_clock(fresh);
+        for id in 10..=15 {
+            let prepared = transport.prepare(next(), request(id, fresh)).await;
+            assert_eq!(prepared["type"], "prepared");
+            let before = counters(&issuer);
+            let permits = fixture.permits.load(Ordering::SeqCst);
+            let receipt = transport.commit(next(), &prepared).await;
+            assert_eq!(receipt["type"], "receipt");
+            assert_eq!(receipt["outcome"], "refused");
+            assert_eq!(receipt["request_id"], prepared["request_id"]);
+            if id == 15 {
+                assert_eq!(receipt["code"], "budget_exceeded", "sixth commit");
+                assert!(receipt["receipt_id"].is_string());
+                assert!(receipt.get("lookup").is_none());
+                assert_eq!(counters(&issuer), before);
+                assert_eq!(fixture.permits.load(Ordering::SeqCst), permits);
+            } else {
+                assert_eq!(receipt["code"], "unattested");
+                assert_eq!(fixture.permits.load(Ordering::SeqCst), permits + 1);
+            }
+        }
+    }
+}

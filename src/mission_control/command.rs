@@ -1763,28 +1763,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (issuer, fixture) =
             super::super::tests::exact_command_transport_fixture(&oidc, &dir).await;
-        let (_, native, _) = super::super::tests::transport_owner_records(&issuer, &oidc.issuer());
+        let (browser, native, _) =
+            super::super::tests::transport_owner_records(&issuer, &oidc.issuer());
+        assert_eq!(browser.record.principal, native.record.principal);
+        assert_ne!(browser.record.record_id, native.record.record_id);
         fixture.grant(&native.record.principal, target());
         let at = now_ms();
         fixture.freeze_clock(at);
 
         for (id, count) in [(1, 4), (2, 4), (3, 2)] {
             let prepared: Vec<_> = (0..count)
-                .map(|_| {
-                    prepare(
-                        &issuer,
-                        &native.record,
-                        "http",
-                        request(id, at, "prepare budget"),
+                .map(|index| {
+                    let (record, carrier) = if index % 2 == 0 {
+                        (&native.record, "http")
+                    } else {
+                        (&browser.record, "ws")
+                    };
+                    (
+                        record,
+                        carrier,
+                        prepare(&issuer, record, carrier, request(id, at, "prepare budget"))
+                            .unwrap(),
                     )
-                    .unwrap()
                 })
                 .collect();
-            for intent in prepared {
+            for (record, carrier, intent) in prepared {
                 assert_eq!(
-                    commit(&issuer, &native.record, "http", &intent)
-                        .unwrap()
-                        .body["code"],
+                    commit(&issuer, record, carrier, &intent).unwrap().body["code"],
                     "unattested"
                 );
             }
@@ -1797,20 +1802,37 @@ mod tests {
                 request(4, at, "eleventh prepare")
             )
             .err(),
-            Some(Refusal::RATE_LIMIT)
+            Some(Refusal::RATE_LIMIT),
+            "the combined prepare budget must apply across credential records"
         );
+        let repeated = prepare(
+            &issuer,
+            &native.record,
+            "http",
+            request(1, at, "prepare budget"),
+        )
+        .unwrap_or_else(|_| panic!("reserved prepare replay charged the exhausted budget"));
+        assert_eq!(repeated.body["lookup"], true);
+        assert_eq!(repeated.body["code"], "unattested");
+        let original = lookup(&issuer, &native.record, "http", &format!("{:032x}", 1)).unwrap();
+        assert_eq!(repeated.body["receipt_id"], original.body["receipt_id"]);
 
         let fresh = at + RATE_WINDOW_MS;
         fixture.freeze_clock(fresh);
         for id in 10..=15 {
+            let (record, carrier) = if id % 2 == 0 {
+                (&native.record, "http")
+            } else {
+                (&browser.record, "ws")
+            };
             let prepared = prepare(
                 &issuer,
-                &native.record,
-                "http",
+                record,
+                carrier,
                 request(id, fresh, "commit budget"),
             )
             .unwrap();
-            let answer = commit(&issuer, &native.record, "http", &prepared).unwrap();
+            let answer = commit(&issuer, record, carrier, &prepared).unwrap();
             if id == 15 {
                 assert_eq!(
                     answer.body["code"], "budget_exceeded",
@@ -1869,5 +1891,85 @@ mod tests {
         assert_eq!(replay.body["receipt_id"], first.body["receipt_id"]);
         assert_eq!(replay.body["lookup"], true);
         assert_eq!(fixture.permits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_commits_charge_exactly_one_remaining_budget_slot() {
+        let oidc = Fixture::new_at(crate::storage::now_epoch_secs()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (issuer, fixture, double) =
+            super::super::tests::command_double_transport_fixture(&oidc, &dir).await;
+        let (_, native, _) = super::super::tests::transport_owner_records(&issuer, &oidc.issuer());
+        fixture.grant(&native.record.principal, target());
+        let at = now_ms();
+        fixture.freeze_clock(at);
+
+        for id in 1..=4 {
+            let prepared =
+                prepare(&issuer, &native.record, "http", request(id, at, "warmup")).unwrap();
+            assert_eq!(
+                commit(&issuer, &native.record, "http", &prepared)
+                    .unwrap()
+                    .body["outcome"],
+                "effect_unknown"
+            );
+        }
+        let count = || {
+            issuer.commands.rate.lock().unwrap()[&native.record.principal]
+                .commits
+                .len()
+        };
+        assert_eq!(count(), 4);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let race = |id| {
+            let prepared =
+                prepare(&issuer, &native.record, "http", request(id, at, "race")).unwrap();
+            let barrier = barrier.clone();
+            let issuer = issuer.clone();
+            let record = native.record.clone();
+            tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                commit(&issuer, &record, "http", &prepared).unwrap()
+            })
+        };
+        let (first, second) = tokio::join!(race(5), race(6));
+        let replies = [first.unwrap(), second.unwrap()];
+        let winner = replies
+            .iter()
+            .find(|reply| reply.body["outcome"] == "effect_unknown")
+            .expect("exactly one racing commit must claim the remaining slot");
+        let refused = replies
+            .iter()
+            .find(|reply| reply.body["code"] == "budget_exceeded")
+            .expect("the other racing commit must exhaust the budget");
+        assert_eq!(refused.body["outcome"], "refused");
+        assert_eq!(count(), 5, "the race must charge exactly one slot");
+        assert_eq!(fixture.permits.load(Ordering::SeqCst), 5);
+
+        let submissions = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            double.submitted.acquire_many(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        submissions.forget();
+        *double.outcome.lock().unwrap() = Some(DoubleOutcome::Admitted);
+        double.release.notify_waiters();
+        let id = winner.body["request_id"].as_str().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let settled = lookup(&issuer, &native.record, "http", id).unwrap();
+                if settled.body["outcome"] == "admitted" {
+                    assert_eq!(settled.body["receipt_id"], winner.body["receipt_id"]);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(double.requests.lock().unwrap().len(), 5);
+        assert_eq!(count(), 5);
     }
 }

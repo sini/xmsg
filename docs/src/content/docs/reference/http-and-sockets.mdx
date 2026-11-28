@@ -844,7 +844,8 @@ validates the values.
 
 Each principal can hold up to four active intents across its credential
 records. The fresh-work budget allows 10 prepares and five commits per
-minute. A delegated grant can set a lower rate for each operation. Prepare
+minute. The prepare and commit limits are separate, including when a
+delegated grant sets a lower rate for each operation. Prepare
 budget exhaustion returns `rate_limited`, and commit budget exhaustion
 returns `refused{budget_exceeded}` with the intent still unconsumed.
 Matching receipt replay uses neither budget nor a work slot.

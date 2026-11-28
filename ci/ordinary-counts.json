@@ -1,7 +1,7 @@
 {
   "baseline": {
-    "linux": "Baseline f1338f9b123d51e26f4c5c56e662fd4ca4c88bef plus 51 platform-independent Mission Control command tests",
-    "darwin": "Baseline f1338f9b123d51e26f4c5c56e662fd4ca4c88bef plus 51 platform-independent Mission Control command tests"
+    "linux": "Baseline 7bbff021273726ce2d3068b3b63a79364dec35bc plus 53 platform-independent Mission Control command tests",
+    "darwin": "Baseline 7bbff021273726ce2d3068b3b63a79364dec35bc plus 53 platform-independent Mission Control command tests"
   },
   "integration_targets": [
     "tests/agent_sock.rs",
@@ -131,13 +131,13 @@
   ],
   "platforms": {
     "linux": {
-      "passed": 1948,
+      "passed": 1950,
       "failed": 0,
       "ignored": 13,
       "summaries": 127
     },
     "darwin": {
-      "passed": 1933,
+      "passed": 1935,
       "failed": 0,
       "ignored": 13,
       "summaries": 127

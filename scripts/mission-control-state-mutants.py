@@ -637,6 +637,27 @@ pub(super) struct Transition""",
 SHIPPED_TEST = "shipped_collector_withholds_all_command_carriers"
 
 CASES.update({
+    "b07-key-budget-by-record": (
+        STATE_TEST + "command_budget_limits_prepares_and_commits_per_minute",
+        "the combined prepare budget must apply across credential records",
+        (edit(COMMAND, "budgets.entry(record.principal.clone())",
+              "budgets.entry(record.record_id.clone())"),),
+    ),
+    "b12-charge-reserved-prepare-replay": (
+        STATE_TEST + "command_budget_limits_prepares_and_commits_per_minute",
+        "reserved prepare replay charged the exhausted budget",
+        (edit(
+            COMMAND,
+            """                    self.command_entitled(&state, &record.record_id, &incumbent)?;
+                    if row.digest == digest {""",
+            """                    self.command_entitled(&state, &record.record_id, &incumbent)?;
+                    self.commands.charge_action(&record, at, Charge::Prepare)?;
+                    if row.digest == digest {""",
+        ),),
+    ),
+})
+
+CASES.update({
     "m02-shipped-gate": (
         'shipped_collector_withholds_all_command_carriers',
         'shipped hello advertised commands',
